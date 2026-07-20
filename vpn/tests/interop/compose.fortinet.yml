@@ -42,6 +42,7 @@ services:
       SERVER: "veepin-fortinet-server"
       USER: "alice"
       PASSWORD: "s3cret"
+      NO_DTLS: "1"
     volumes:
       - ./fortinet/openconnect-entrypoint.sh:/entrypoint.sh:ro
       - certs:/certs
