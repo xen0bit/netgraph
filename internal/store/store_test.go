@@ -387,3 +387,69 @@ func TestReadOnly(t *testing.T) {
 		t.Fatal("read-only store accepted ingest")
 	}
 }
+
+// An mDNS reflector (here: the router) re-announces the printer's records.
+// They belong to the printer, found by address, not to the reflector.
+func TestMDNSReflectorAttribution(t *testing.T) {
+	st, _, _ := homeStore(t)
+	ctx := context.Background()
+	at := testutil.Base.Add(5 * time.Minute)
+	ev := wire.Event{Seq: 1, Type: wire.TypeMDNS, TS: at, MDNS: &wire.MDNS{
+		MAC: testutil.Router.MAC.String(), IP: testutil.Router.IP, Response: true,
+		Hosts:    []wire.MDNSHost{{Name: "Office-Printer.local", Addrs: []netip.Addr{testutil.Printer.IP}}},
+		Services: []wire.Service{{Instance: "Reflected._ipp._tcp.local", Type: "_ipp._tcp", Target: "Office-Printer.local", Port: 631}},
+	}}
+	if _, err := st.Ingest(ctx, "router", "reflector", []wire.Event{ev}); err != nil {
+		t.Fatal(err)
+	}
+	devs, err := st.Devices(ctx, win(0, time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range devs {
+		switch d.MAC {
+		case testutil.Printer.MAC.String():
+			if !slices.Contains(d.Hostnames, "Office-Printer.local") || !slices.Contains(d.Services, "Reflected") {
+				t.Errorf("printer did not get its reflected records: %+v", d)
+			}
+		case testutil.Router.MAC.String():
+			if len(d.Hostnames) > 0 || len(d.Services) > 0 {
+				t.Errorf("reflector was credited: %+v", d)
+			}
+		}
+	}
+}
+
+// Two names on one address, looked up back to back: each connection gets
+// the name its own SNI asks for, not merely the newest lookup.
+func TestCorrelationPrefersSNI(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "ng.db"), Config{Now: func() time.Time { return testutil.Base.Add(time.Hour) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	client := netip.MustParseAddr("192.168.1.9")
+	cdn := netip.MustParseAddr("198.18.0.30")
+	at := testutil.Base
+	ans := func(seq uint64, d time.Duration, name string) wire.Event {
+		return wire.Event{Seq: seq, Type: wire.TypeDNS, TS: at.Add(d), DNS: &wire.DNS{Client: client, Server: netip.MustParseAddr("192.168.1.1"), QName: name, QType: "A", RCode: "NOERROR",
+			Answers: []wire.Answer{{Name: name, Type: "A", TTL: 300, Data: cdn.String()}}}}
+	}
+	flow := func(seq, id uint64, d time.Duration, sni string) wire.Event {
+		return wire.Event{Seq: seq, Type: wire.TypeFlow, TS: at.Add(d + time.Second), Flow: &wire.Flow{ID: id, Proto: 6, Src: client, SrcPort: uint16(40000 + id), Dst: cdn, DstPort: 443,
+			FirstSeen: at.Add(d), Start: at.Add(d), End: at.Add(d + time.Second), BytesOut: 100, SNI: sni, App: "tls", Final: true}}
+	}
+	evs := []wire.Event{ans(1, 0, "www.lab.test"), ans(2, 10*time.Millisecond, "hold.lab.test"),
+		flow(3, 1, 20*time.Millisecond, "www.lab.test"), flow(4, 2, 30*time.Millisecond, "hold.lab.test"), flow(5, 3, 40*time.Millisecond, "")}
+	if _, err := st.Ingest(context.Background(), "s", "b", evs); err != nil {
+		t.Fatal(err)
+	}
+	fl, _ := st.Flows(context.Background(), model.Filter{From: at.Add(-time.Minute), To: at.Add(time.Minute)})
+	got := map[int]string{}
+	for _, f := range fl {
+		got[f.ClientPort-40000] = f.QName
+	}
+	if got[1] != "www.lab.test" || got[2] != "hold.lab.test" || got[3] != "hold.lab.test" {
+		t.Fatalf("qnames by flow: %v", got)
+	}
+}

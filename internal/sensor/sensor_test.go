@@ -141,7 +141,7 @@ func TestReplayHome(t *testing.T) {
 	t.Run("identity", func(t *testing.T) {
 		md := out.of(wire.TypeMDNS)
 		if len(md) != 1 || len(md[0].MDNS.Services) != 1 || md[0].MDNS.Services[0].Type != "_ipp._tcp" || md[0].MDNS.Services[0].TXT["ty"] != "Brother HL-L2350DW" ||
-			!slices.Equal(md[0].MDNS.Hostnames, []string{"BRN001BA9.local"}) {
+			len(md[0].MDNS.Hosts) != 1 || md[0].MDNS.Hosts[0].Name != "BRN001BA9.local" {
 			t.Errorf("mdns = %+v", md)
 		}
 		names := out.of(wire.TypeName)
@@ -243,5 +243,20 @@ func TestJA4MatchesWireshark(t *testing.T) {
 		if got[sni] != ja4 {
 			t.Errorf("%s: ja4 %q, want %q (Wireshark)", sni, got[sni], ja4)
 		}
+	}
+}
+
+func TestResolveInterface(t *testing.T) {
+	if n, err := ResolveInterface("br-lan"); err != nil || n != "br-lan" {
+		t.Fatalf("name: %q %v", n, err)
+	}
+	if n, err := ResolveInterface("127.0.0.1"); err != nil || n == "" {
+		t.Fatalf("loopback by address: %q %v", n, err)
+	}
+	if n, err := ResolveInterface("127.0.0.0/8"); err != nil || n == "" {
+		t.Fatalf("loopback by prefix: %q %v", n, err)
+	}
+	if _, err := ResolveInterface("203.0.113.254"); err == nil {
+		t.Fatal("found an interface for an address nobody holds")
 	}
 }

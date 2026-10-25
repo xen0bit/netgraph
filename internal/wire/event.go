@@ -177,15 +177,22 @@ type DHCP struct {
 	Addresses   []netip.Addr `json:"addrs,omitempty"` // DHCPv6 IA addresses
 }
 
-// MDNS is what one mDNS packet said about the host that sent it.
+// MDNS is what one mDNS packet said. Its records need not be about the
+// sender: reflectors and sleep proxies answer for other hosts, so each
+// host comes with the addresses that identify it.
 type MDNS struct {
-	MAC       string       `json:"mac,omitempty"`
-	IP        netip.Addr   `json:"ip"`
-	Response  bool         `json:"response"`
-	Hostnames []string     `json:"hostnames,omitempty"` // owners of A/AAAA records
-	Addresses []netip.Addr `json:"addrs,omitempty"`
-	Services  []Service    `json:"services,omitempty"`
-	Queries   []string     `json:"queries,omitempty"` // names asked about
+	MAC      string     `json:"mac,omitempty"`
+	IP       netip.Addr `json:"ip"`
+	Response bool       `json:"response"`
+	Hosts    []MDNSHost `json:"hosts,omitempty"`
+	Services []Service  `json:"services,omitempty"`
+	Queries  []string   `json:"queries,omitempty"` // names asked about
+}
+
+// MDNSHost is a .local name and the addresses announced for it.
+type MDNSHost struct {
+	Name  string       `json:"name"`
+	Addrs []netip.Addr `json:"addrs,omitempty"`
 }
 
 // Service is one DNS-SD service instance.

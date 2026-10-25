@@ -2,6 +2,7 @@ package decode
 
 import (
 	"net/netip"
+	"slices"
 	"sort"
 	"strings"
 
@@ -43,8 +44,18 @@ func MDNS(m *DNSMsg, src netip.Addr, mac string) *wire.MDNS {
 		// Probes and known-answer queries carry the sender's own records in
 		// the authority/answer sections; fall through to read them.
 	}
-	hosts := map[string]bool{}
-	addrs := map[netip.Addr]bool{}
+	hosts := map[string]*wire.MDNSHost{} // by lower-cased name
+	var order []string
+	host := func(name string) *wire.MDNSHost {
+		k := strings.ToLower(name)
+		h, ok := hosts[k]
+		if !ok {
+			h = &wire.MDNSHost{Name: name} // keep the first spelling
+			hosts[k] = h
+			order = append(order, k)
+		}
+		return h
+	}
 	svcs := map[string]*wire.Service{}
 	svc := func(instance string) *wire.Service {
 		k := strings.ToLower(instance)
@@ -61,17 +72,22 @@ func MDNS(m *DNSMsg, src netip.Addr, mac string) *wire.MDNS {
 			switch rr.Type {
 			case TypeA, TypeAAAA:
 				if rr.Addr.IsValid() && !strings.Contains(rr.Name, "._") {
-					hosts[rr.Name] = true
-					addrs[rr.Addr] = true
+					h := host(rr.Name)
+					if !slices.Contains(h.Addrs, rr.Addr) {
+						h.Addrs = append(h.Addrs, rr.Addr)
+					}
 				}
 			case TypePTR:
 				// "<type>.local PTR <instance>" announces an instance; the
 				// meta-query PTRs (_services._dns-sd._udp) only list types.
-				// Reverse-address PTRs name the host itself.
+				// A reverse-address PTR names the host holding that address.
 				switch {
 				case strings.HasSuffix(rr.Name, ".in-addr.arpa") || strings.HasSuffix(rr.Name, ".ip6.arpa"):
 					if rr.Target != "" {
-						hosts[rr.Target] = true
+						h := host(rr.Target)
+						if a, ok := reverseAddr(rr.Name); ok && !slices.Contains(h.Addrs, a) {
+							h.Addrs = append(h.Addrs, a)
+						}
 					}
 				case strings.HasPrefix(strings.ToLower(rr.Name), "_services._dns-sd."):
 				case rr.Target != "" && strings.Contains(rr.Target, "._"):
@@ -82,7 +98,7 @@ func MDNS(m *DNSMsg, src netip.Addr, mac string) *wire.MDNS {
 					s := svc(rr.Name)
 					s.Target, s.Port = rr.Target, rr.Port
 					if rr.Target != "" {
-						hosts[rr.Target] = true
+						host(rr.Target)
 					}
 				}
 			case TypeTXT:
@@ -102,27 +118,52 @@ func MDNS(m *DNSMsg, src netip.Addr, mac string) *wire.MDNS {
 			}
 		}
 	}
-	// Names differing only in case are one name; keep the first spelling.
-	folded := map[string]bool{}
-	for h := range hosts {
-		if !folded[strings.ToLower(h)] {
-			folded[strings.ToLower(h)] = true
-			ev.Hostnames = append(ev.Hostnames, h)
-		}
-	}
-	for a := range addrs {
-		ev.Addresses = append(ev.Addresses, a)
+	sort.Strings(order)
+	for _, k := range order {
+		h := hosts[k]
+		sort.Slice(h.Addrs, func(i, j int) bool { return h.Addrs[i].Less(h.Addrs[j]) })
+		ev.Hosts = append(ev.Hosts, *h)
 	}
 	for _, s := range svcs {
 		ev.Services = append(ev.Services, *s)
 	}
-	sort.Strings(ev.Hostnames)
-	sort.Slice(ev.Addresses, func(i, j int) bool { return ev.Addresses[i].Less(ev.Addresses[j]) })
 	sort.Slice(ev.Services, func(i, j int) bool { return ev.Services[i].Instance < ev.Services[j].Instance })
-	if len(ev.Hostnames) == 0 && len(ev.Services) == 0 && len(ev.Queries) == 0 {
+	if len(ev.Hosts) == 0 && len(ev.Services) == 0 && len(ev.Queries) == 0 {
 		return nil
 	}
 	return ev
+}
+
+// reverseAddr parses "4.3.2.1.in-addr.arpa" and the nibble form of
+// ip6.arpa back into an address.
+func reverseAddr(name string) (netip.Addr, bool) {
+	name = strings.ToLower(strings.TrimSuffix(name, "."))
+	if rest, ok := strings.CutSuffix(name, ".in-addr.arpa"); ok {
+		p := strings.Split(rest, ".")
+		if len(p) != 4 {
+			return netip.Addr{}, false
+		}
+		slices.Reverse(p)
+		a, err := netip.ParseAddr(strings.Join(p, "."))
+		return a, err == nil
+	}
+	if rest, ok := strings.CutSuffix(name, ".ip6.arpa"); ok {
+		p := strings.Split(rest, ".")
+		if len(p) != 32 {
+			return netip.Addr{}, false
+		}
+		slices.Reverse(p)
+		var b strings.Builder
+		for i, n := range p {
+			if i > 0 && i%4 == 0 {
+				b.WriteByte(':')
+			}
+			b.WriteString(n)
+		}
+		a, err := netip.ParseAddr(b.String())
+		return a, err == nil
+	}
+	return netip.Addr{}, false
 }
 
 // serviceType extracts "_airplay._tcp" from "Living Room._airplay._tcp.local".

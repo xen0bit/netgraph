@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net"
 	"net/netip"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -560,6 +561,11 @@ func (g *ingester) hasIP(ctx context.Context, mac string, ip netip.Addr, ts, unt
 // deviceFor finds the device behind a local address: by the MAC that sent
 // it if known, else by the latest binding.
 func (g *ingester) deviceFor(ctx context.Context, ip netip.Addr, mac string, ts int64) (int64, string, error) {
+	if ip.IsUnspecified() && mac != "" && !isGroupMAC(mac) {
+		// 0.0.0.0: a host before DHCP has given it an address.
+		id, err := g.device(ctx, mac, ts)
+		return id, mac, err
+	}
 	if !ip.IsValid() || !g.s.nets.isLocal(ip) {
 		return 0, "", nil
 	}
@@ -596,7 +602,7 @@ func (g *ingester) observation(ctx context.Context, sid, ts int64, typ string, d
 func (g *ingester) flow(ctx context.Context, sid int64, sensor, boot string, f *wire.Flow) error {
 	key := sensor + ":" + boot + ":" + strconv.FormatUint(f.ID, 10)
 	nets := g.s.nets
-	srcLocal, dstLocal := nets.isLocal(f.Src), nets.isLocal(f.Dst)
+	srcLocal, dstLocal := nets.isLocal(f.Src) || f.Src.IsUnspecified(), nets.isLocal(f.Dst)
 	client, cport, cmac := f.Src, f.SrcPort, f.SrcMAC
 	remote, rport := f.Dst, f.DstPort
 	dir := "external"
@@ -630,7 +636,7 @@ func (g *ingester) flow(ctx context.Context, sid int64, sensor, boot string, f *
 	qname, seen := g.flowName[key]
 	if !seen {
 		if !g.s.nets.isLocal(remote) && !multicast {
-			qname = g.lookupName(remote.String(), client.String(), first)
+			qname = g.lookupName(remote.String(), client.String(), first, f.SNI, f.HTTPHost)
 		}
 		g.flowName[key] = qname
 	}
@@ -695,23 +701,34 @@ func (g *ingester) flow(ctx context.Context, sid int64, sensor, boot string, f *
 	return nil
 }
 
-// lookupName finds the DNS name client resolved remote from: the newest
-// answer for that client whose validity covers ts, else any client's.
-func (g *ingester) lookupName(remote, client string, ts int64) string {
+// lookupName finds the DNS name a client resolved remote from before
+// connecting at ts. Many names share an address (virtual hosting, CDNs),
+// so a lookup naming what the connection itself names (its SNI or HTTP
+// Host) wins; then the client's newest lookup; then anyone's.
+func (g *ingester) lookupName(remote, client string, ts int64, hints ...string) string {
+	const jitter = 50 // ms: a response and the first packet after it can be stamped out of order
 	refs := g.answers[remote]
-	var any string
-	var anyTS int64
+	var mine, any string
+	var mineTS, anyTS int64
 	for i := len(refs) - 1; i >= 0; i-- {
 		a := refs[i]
-		if a.ts > ts+1000 || a.expires+answerGrace < ts {
+		if a.ts > ts+jitter || a.expires+answerGrace < ts {
 			continue
 		}
-		if a.client == client {
-			return a.qname
+		for _, h := range hints {
+			if h != "" && strings.EqualFold(h, a.qname) {
+				return a.qname
+			}
+		}
+		if a.client == client && (mine == "" || a.ts > mineTS) {
+			mine, mineTS = a.qname, a.ts
 		}
 		if any == "" || a.ts > anyTS {
 			any, anyTS = a.qname, a.ts
 		}
+	}
+	if mine != "" {
+		return mine
 	}
 	return any
 }
@@ -898,34 +915,62 @@ func (g *ingester) reporter(ctx context.Context, ip netip.Addr, mac string, ts i
 		return dev, devMAC, err
 	}
 	if devMAC == "" {
-		var key string
-		if err := g.tx.QueryRowContext(ctx, `SELECT key FROM entities WHERE id = ?`, dev).Scan(&key); err != nil {
+		if devMAC, err = g.macOf(ctx, dev); err != nil {
 			return 0, "", err
 		}
-		devMAC = key
 	}
 	return dev, devMAC, nil
 }
 
+// mdns credits each announced host to the device holding its address,
+// not to the packet's sender: reflectors and sleep proxies answer for
+// others. A host announced without addresses, or with the sender's own,
+// is the sender's.
 func (g *ingester) mdns(ctx context.Context, sid, ts int64, m *wire.MDNS) error {
-	dev, mac, err := g.reporter(ctx, m.IP, m.MAC, ts)
-	if err != nil || dev == 0 {
+	sender, senderMAC, err := g.reporter(ctx, m.IP, m.MAC, ts)
+	if err != nil || sender == 0 {
 		return err
 	}
-	if !m.Response && len(m.Services) == 0 && len(m.Hostnames) == 0 {
+	if !m.Response && len(m.Services) == 0 && len(m.Hosts) == 0 {
 		return nil // a bare query says little about the asker
 	}
-	for _, h := range m.Hostnames {
-		if err := g.hostname(ctx, dev, mac, h, ts, "mdns", priMDNS); err != nil {
+	owners := map[string][2]any{} // lower host name -> (device id, mac)
+	for _, h := range m.Hosts {
+		dev, mac := sender, senderMAC
+		if len(h.Addrs) > 0 && !slices.Contains(h.Addrs, m.IP) {
+			dev, mac = 0, ""
+			for _, a := range h.Addrs {
+				if b, ok := g.bindings[a.String()]; ok {
+					if mac, err = g.macOf(ctx, b.device); err != nil {
+						return err
+					}
+					dev = b.device
+					break
+				}
+			}
+		}
+		if dev == 0 {
+			continue // about a host we cannot place yet
+		}
+		owners[strings.ToLower(h.Name)] = [2]any{dev, mac}
+		if err := g.hostname(ctx, dev, mac, h.Name, ts, "mdns", priMDNS); err != nil {
 			return err
 		}
-	}
-	for _, a := range m.Addresses {
-		if err := g.hasIP(ctx, mac, a, ts, ts, "mdns"); err != nil {
-			return err
+		if dev == sender {
+			for _, a := range h.Addrs {
+				if err := g.hasIP(ctx, mac, a, ts, ts, "mdns"); err != nil {
+					return err
+				}
+			}
 		}
 	}
 	for _, sv := range m.Services {
+		dev, mac := sender, senderMAC
+		if o, ok := owners[strings.ToLower(sv.Target)]; ok {
+			dev, mac = o[0].(int64), o[1].(string)
+		} else if sv.Target != "" && len(m.Hosts) > 0 {
+			continue // its host is someone we could not place
+		}
 		key := strings.ToLower(sv.Instance)
 		instance, _, _ := strings.Cut(sv.Instance, "._")
 		id, err := g.entity(ctx, model.KindService, key, ts, func(e *entRow) {
@@ -949,13 +994,32 @@ func (g *ingester) mdns(ctx context.Context, sid, ts int64, m *wire.MDNS) error 
 			return err
 		}
 	}
-	return g.observation(ctx, sid, ts, "mdns", dev, m.IP, m)
+	return g.observation(ctx, sid, ts, "mdns", sender, m.IP, m)
+}
+
+// macOf returns a device entity's MAC.
+func (g *ingester) macOf(ctx context.Context, dev int64) (string, error) {
+	for k, e := range g.entities {
+		if e.id == dev && k.kind == model.KindDevice {
+			return k.key, nil
+		}
+	}
+	var key string
+	err := g.tx.QueryRowContext(ctx, `SELECT key FROM entities WHERE id = ?`, dev).Scan(&key)
+	return key, err
 }
 
 func (g *ingester) name(ctx context.Context, sid, ts int64, n *wire.Name) error {
 	dev, mac, err := g.reporter(ctx, n.IP, n.MAC, ts)
 	if err != nil || dev == 0 || n.Group {
 		return err
+	}
+	// A host registers its workgroup and browser roles as NetBIOS names
+	// too; only its workstation and file-server names name it.
+	switch n.Suffix {
+	case "", "workstation", "file-server":
+	default:
+		return g.observation(ctx, sid, ts, n.Proto, dev, n.IP, n)
 	}
 	pri := priNBNS
 	if n.Proto == "llmnr" {
@@ -1012,7 +1076,11 @@ func (g *ingester) lldp(ctx context.Context, sid, ts int64, l *wire.LLDP) error 
 		return err
 	}
 	g.setLabel(model.KindDevice, l.MAC, l.SystemName, priLLDP)
-	g.setAttr(model.KindDevice, l.MAC, "role", "switch")
+	// LLDP speakers are mostly switches and APs, but a router speaks it too:
+	// never demote a known role.
+	if e := g.row(model.KindDevice, l.MAC); e != nil && e.attrs["role"] == "" {
+		g.setAttr(model.KindDevice, l.MAC, "role", "switch")
+	}
 	return g.observation(ctx, sid, ts, "lldp", dev, netip.Addr{}, l)
 }
 

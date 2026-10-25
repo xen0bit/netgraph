@@ -1,44 +1,146 @@
-# Isolated end-to-end lab. An internal network with no route out: every
-# packet the sensor sees is one this file caused, so assertions can be exact.
+# Isolated end-to-end lab: a home network in containers, with a router
+# the sensor runs beside, real daemons announcing themselves, a scripted
+# user, and an "internet" behind the router. Nothing can reach the real
+# internet: every packet the sensor sees is one this file caused.
 #
-#   make lab      # go test -tags lab ./test/lab — brings this up and down
+#   make lab      # go test -tags lab ./test/lab — builds, runs, asserts, tears down
 #
-# Phase 0 holds only the topology; services that generate traffic (dnsmasq
-# DHCP+DNS, TLS/QUIC web, avahi mDNS, scripted clients) are added with the
-# decoders they exercise.
+#           lan 10.77.0.0/24 (internal)              wan 198.18.0.0/24 (internal)
+#   laptop .100 ─┐                               ┌─ web 198.18.0.30 (https, h3, http)
+#   printer .101 ┤                               │
+#   nas .102 ────┼── router .10 ═════════════════┘
+#   tv .103 ─────┤   └ sensor (shares the router's network namespace)
+#   server .20 ──┘── mgmt (published on 127.0.0.1) ── chrome
 name: netgraph-lab
+
+x-lab: &lab
+  build: { context: ., dockerfile: Dockerfile }
+  image: netgraph-lab:dev
+  init: true
 
 networks:
   lan:
     internal: true
     ipam:
       config:
-        # .1 is the Docker bridge gateway; lab hosts start at .10.
-        - subnet: 10.77.0.0/24
+        - subnet: 10.77.0.0/24  # .1 is the Docker bridge itself
+  wan:
+    internal: true
+    ipam:
+      config:
+        - subnet: 198.18.0.0/24  # benchmarking range: not private, so netgraph sees it as remote
+  mgmt: {}
+
+volumes:
+  shared:
+  data:
 
 services:
-  # Stands in for the router: the sensor shares its network namespace, the
-  # same way deploy/compose/sidecar.yml attaches to an app container.
   router:
-    image: busybox:1.37
-    command: ["sleep", "infinity"]
+    <<: *lab
+    command: ["/lab/router.sh"]
+    cap_add: [NET_ADMIN, NET_RAW]
+    sysctls:
+      net.ipv4.ip_forward: "1"
     networks:
       lan:
         ipv4_address: 10.77.0.10
-    mac_address: "02:00:5e:00:00:01"
+        mac_address: "02:42:0a:4d:00:0a"
+      wan:
+        ipv4_address: 198.18.0.10
 
   sensor:
     build: { context: ../.., dockerfile: deploy/Dockerfile, target: sensor }
+    image: netgraph-sensor:lab
     network_mode: "service:router"
     cap_drop: [ALL]
     cap_add: [NET_RAW]
     read_only: true
-    command: ["version"]
+    environment:
+      NETGRAPH_TOKEN: lab-ingest-token
+    command: ["run", "-iface", "10.77.0.10", "-server", "http://10.77.0.20:8443", "-name", "lab-router",
+              "-active-timeout", "5s", "-flush", "1s", "-log-level", "debug"]
+    depends_on: [router, server]
+    restart: on-failure
+
+  # Captures what the sensor sees, for cross-checking against Wireshark.
+  tap:
+    <<: *lab
+    network_mode: "service:router"
+    cap_add: [NET_RAW, NET_ADMIN]
+    command: ["tcpdump", "-i", "any", "-w", "/shared/lab.pcap", "-U", "not port 8443"]
+    volumes: [shared:/shared]
     depends_on: [router]
 
   server:
     build: { context: ../.., dockerfile: deploy/Dockerfile, target: server }
-    command: ["version"]
+    image: netgraph:lab
+    environment:
+      NETGRAPH_TOKEN: lab-ingest-token
+      NETGRAPH_READ_TOKEN: lab-read-token
+    volumes: [data:/data]
     networks:
       lan:
         ipv4_address: 10.77.0.20
+      mgmt: {}
+    ports: ["127.0.0.1:18443:8443"]
+
+  web:
+    <<: *lab
+    command: ["/lab/web.sh"]
+    cap_add: [NET_ADMIN]
+    networks:
+      wan:
+        ipv4_address: 198.18.0.30
+
+  laptop:
+    <<: *lab
+    command: ["/lab/laptop.sh"]
+    cap_add: [NET_ADMIN, NET_RAW]
+    volumes: [shared:/shared]
+    depends_on: [router, web, sensor, printer, nas, tv, lldp]
+    networks:
+      lan:
+        ipv4_address: 10.77.0.100
+        mac_address: "3c:22:fb:00:00:64"   # Apple
+
+  printer:
+    <<: *lab
+    command: ["/lab/printer.sh"]
+    networks:
+      lan:
+        ipv4_address: 10.77.0.101
+        mac_address: "00:1b:a9:00:00:65"   # Brother
+
+  nas:
+    <<: *lab
+    command: ["/lab/nas.sh"]
+    networks:
+      lan:
+        ipv4_address: 10.77.0.102
+        mac_address: "00:15:5d:00:00:66"   # Microsoft
+
+  tv:
+    <<: *lab
+    # The lab networks have no default route; multicast needs one of its own.
+    command: ["sh", "-c", "ip route add 224.0.0.0/4 dev eth0 && exec labapp ssdp LabTV/2.0"]
+    cap_add: [NET_ADMIN]
+    networks:
+      lan:
+        ipv4_address: 10.77.0.103
+        mac_address: "f4:f5:d8:00:00:67"   # Google
+
+  # LLDP is link-local: bridges, Docker's included, never forward it, so
+  # the router hears only its direct neighbours. lldpd runs here in the
+  # router's own namespace, and the sensor captures its outgoing frames.
+  lldp:
+    <<: *lab
+    network_mode: "service:router"
+    cap_add: [NET_ADMIN, NET_RAW]
+    command: ["/lab/lldp.sh"]
+    depends_on: [router]
+
+  chrome:
+    image: chromedp/headless-shell:latest
+    networks: [mgmt]
+    ports: ["127.0.0.1:19222:9222"]

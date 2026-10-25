@@ -55,11 +55,12 @@ func checkWebUI(t *testing.T, devtools, ui, token, shotDir string, expect []stri
 	}
 
 	var note, svgText string
+	// Store the token before the app's first API call: open a page of the
+	// origin that is not the app, set it, then load the app.
 	err := chromedp.Run(ctx,
 		chromedp.EmulateViewport(1600, 1000),
-		chromedp.Navigate(ui+"/"),
+		chromedp.Navigate(ui+"/healthz"),
 		chromedp.Evaluate(fmt.Sprintf(`localStorage.setItem("netgraph.token", %q)`, token), nil),
-		chromedp.Navigate(ui+"/#from=0&to=0"), // placeholder; replaced below
 	)
 	if err != nil {
 		t.Fatalf("browser: %v", err)

@@ -3,6 +3,9 @@
 FROM gcr.io/distroless/static-debian12:nonroot AS server
 ARG TARGETPLATFORM
 COPY $TARGETPLATFORM/netgraph /usr/bin/netgraph
+# Owned by nonroot, so a fresh named volume mounted here is writable.
+WORKDIR /data
+USER 65532:65532
 VOLUME /data
 EXPOSE 8443
 ENTRYPOINT ["/usr/bin/netgraph"]

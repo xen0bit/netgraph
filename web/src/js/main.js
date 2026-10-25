@@ -67,8 +67,11 @@ function saveHash() {
   if (state.tab !== "graph") p.set("tab", state.tab);
   for (const k of ["collapse", "dns", "identity"]) p.set(k, state.gopts[k] ? "1" : "0");
   p.set("top", state.gopts.top);
-  history.replaceState(null, "", "#" + p.toString());
+  lastHash = p.toString();
+  history.replaceState(null, "", "#" + lastHash);
 }
+
+let lastHash = "";
 
 // parseFilter turns "device:x domain:y word" into API parameters; a bare
 // word is a domain, an IPv6 address an ip, a MAC a device.
@@ -585,6 +588,14 @@ function init() {
   });
   brush();
   addEventListener("resize", () => renderSpark(series));
+  // A pasted or edited link changes only the hash: follow it.
+  addEventListener("hashchange", () => {
+    if (location.hash.slice(1) === lastHash) return;
+    const wasLive = state.live;
+    loadHash();
+    $("#filter").value = state.filter;
+    if (state.live !== wasLive) setLive(state.live); else selectTab(state.tab);
+  });
   selectTab(state.tab);
   if (state.live) setLive(true);
 }

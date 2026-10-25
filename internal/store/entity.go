@@ -197,9 +197,11 @@ func summarizeObservation(typ, data string) string {
 		add("vendor=", "vendor_class")
 		add("lease=", "lease")
 	case "mdns":
-		if hs, ok := m["hostnames"].([]any); ok {
+		if hs, ok := m["hosts"].([]any); ok {
 			for _, h := range hs {
-				parts = append(parts, fmt.Sprint(h))
+				if hm, ok := h.(map[string]any); ok {
+					parts = append(parts, fmt.Sprint(hm["name"]))
+				}
 			}
 		}
 		if ss, ok := m["services"].([]any); ok {

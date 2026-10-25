@@ -77,7 +77,7 @@ Run 'netgraph-sensor run -h' for run's flags.
 
 func run(args []string) error {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
-	ifaces := fs.String("iface", envOr("NETGRAPH_IFACE", ""), "comma-separated interfaces to capture (e.g. br-lan); $NETGRAPH_IFACE")
+	ifaces := fs.String("iface", envOr("NETGRAPH_IFACE", ""), "comma-separated interfaces to capture: names (br-lan), or an address or CIDR the interface holds; $NETGRAPH_IFACE")
 	pcap := fs.String("pcap", "", "replay a pcap/pcapng file instead of capturing live")
 	server := fs.String("server", envOr("NETGRAPH_SERVER", ""), "netgraph server URL, or - for JSON lines on stdout; $NETGRAPH_SERVER")
 	tokenFile := fs.String("token-file", "", "file holding the ingest token (default $NETGRAPH_TOKEN)")
@@ -146,7 +146,13 @@ func run(args []string) error {
 	}, out)
 	var names []string
 	if *ifaces != "" {
-		names = strings.Split(*ifaces, ",")
+		for _, v := range strings.Split(*ifaces, ",") {
+			n, err := sensor.ResolveInterface(v)
+			if err != nil {
+				return err
+			}
+			names = append(names, n)
+		}
 	}
 	r := &sensor.Runner{
 		Processor: proc, Out: out,

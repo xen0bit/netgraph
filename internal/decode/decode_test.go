@@ -130,8 +130,14 @@ func TestMDNSServices(t *testing.T) {
 	if s.Instance != "Living Room._airplay._tcp.local" || s.Type != "_airplay._tcp" || s.Port != 7000 || s.Target != "Apple-TV.local" || s.TXT["model"] != "AppleTV11,1" {
 		t.Errorf("service = %+v", s)
 	}
-	if !slices.Equal(ev.Hostnames, []string{"Apple-TV.local"}) || len(ev.Addresses) != 1 {
-		t.Errorf("hostnames=%v addrs=%v", ev.Hostnames, ev.Addresses)
+	if len(ev.Hosts) != 1 || ev.Hosts[0].Name != "Apple-TV.local" || len(ev.Hosts[0].Addrs) != 1 || ev.Hosts[0].Addrs[0].String() != "192.168.1.50" {
+		t.Errorf("hosts=%+v", ev.Hosts)
+	}
+	if a, ok := reverseAddr("50.1.168.192.in-addr.arpa"); !ok || a.String() != "192.168.1.50" {
+		t.Errorf("reverse v4: %v %v", a, ok)
+	}
+	if a, ok := reverseAddr("1.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.0.d.f.ip6.arpa"); !ok || a.String() != "fd00::1" {
+		t.Errorf("reverse v6: %v %v", a, ok)
 	}
 }
 
