@@ -7,7 +7,9 @@ Wants=network-online.target
 [Service]
 Type=exec
 EnvironmentFile=/etc/netgraph/sensor.conf
-ExecStart=/usr/bin/netgraph-sensor run $NETGRAPH_SENSOR_ARGS
+# The token file stays root-only; systemd hands the dynamic user a copy.
+LoadCredential=token:/etc/netgraph/sensor.token
+ExecStart=/usr/bin/netgraph-sensor run -token-file ${CREDENTIALS_DIRECTORY}/token $NETGRAPH_SENSOR_ARGS
 Restart=on-failure
 RestartSec=2s
 DynamicUser=yes

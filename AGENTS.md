@@ -1,34 +1,48 @@
 # AGENTS.md — working on netgraph
 
-## Layout
+Read `docs/development.md` for the layout, builds and tests, and
+`docs/concepts.md` for what the data means. The rules below are the ones
+that are easy to break.
 
-| Path | What |
-|---|---|
-| `cmd/netgraph-sensor` | router agent. **Must not import SQLite, d2 or the TUI**; `deps_test.go` enforces it (modernc sqlite does not build for mips; d2 adds ~20 MB) |
-| `cmd/netgraph` | server, CLI, TUI |
-| `cmd/web` | WASM entrypoint (`js && wasm`), served by `netgraph serve` |
-| `internal/buildinfo` | version symbols stamped by the Makefile and goreleaser |
-| `deploy/` | Dockerfiles, compose files for sidecar and host deployments |
-| `packaging/` | systemd units, OpenWrt procd init and UCI config |
-| `test/lab` | docker-compose lab, `go test -tags lab` (`make lab`) |
+## Invariants
 
-Planned packages: `internal/{capture,decode,flow,wire,ingest,correlate,enrich/oui,store,query,graph,api,tui}`, `web/`.
+- **The sensor stays small and portable.** `cmd/netgraph-sensor` must not
+  import SQLite, d2, the TUI libraries or `gopacket/layers`;
+  `cmd/netgraph-sensor/deps_test.go` checks the first three. It must build
+  for every target in `SENSOR_TARGETS` (MIPS softfloat, ARMv5 included):
+  run `make cross`.
+- **Everything is `CGO_ENABLED=0`.** The target lists live in the
+  Makefile, `.goreleaser.yaml` and the CI `cross` job. Change all three
+  together.
+- **Windows are half-open `[from, to)`.** A connection belongs to a
+  window if a record overlaps it. Bytes straddling an edge are prorated;
+  states are `carried` (opened before `from`), `opened`, plus `closed`.
+  DNS answers are valid for `[ts, ts+ttl]`.
+- **Flow records span at most `store.MaxRecordSpan`** (10 min; ingest
+  splits longer ones). Window queries over `flows` depend on it to bound
+  `t_end` on both sides (`flowsWindow`). Queries over `connections` read
+  totals and prorate only edge-crossing connections (`connBytes`).
+- **Replays are deterministic.** The flow table walks its LRU list, never
+  a map, and DNS timeouts are sorted: replaying a capture twice gives
+  identical events (`TestReplayDeterministic`).
+- **Decoders are pure functions over bytes from the network**, which is
+  attacker-controlled: bound every length, never loop on input, and give
+  each a `Fuzz*` target. The processor also recovers from panics, but a
+  panic is still a bug.
+- **Everything shown in the web UI goes through `esc()` or `textContent`.**
+  Hostnames, user agents and UPnP strings come from the LAN.
+- **d2 keys are always quoted** (`graph.quote`): an unquoted
+  `example.com` or address is parsed as nested containers.
+- **Correlation is by evidence.** Devices are found by the MAC that sent
+  the packets. mDNS records go to the device holding their address, not
+  the sender. DNS names prefer the lookup the connection's own SNI/Host
+  names. Keep it that way: the lab caught each of these going wrong.
 
-## Rules
+## Checks before a commit
 
-- Everything is `CGO_ENABLED=0`. Run `make cross` before you add a dependency;
-  the sensor must still build for mips/mipsle softfloat and arm v5.
-- The target lists are kept in three places: `Makefile` (`SENSOR_TARGETS`,
-  `SERVER_TARGETS`), `.goreleaser.yaml` and the `cross` job in CI. Change all
-  three together.
-- d2 scripts must quote every key. An unquoted `example.com` or IP address is
-  parsed as nested containers.
-- Time windows are half-open `[t0, t1)`. A flow belongs to a window when
-  `t_start < t1 && t_end >= t0`, and is classified `carried`/`opened`/`closed`.
-  A DNS answer is valid over `[ts, ts+ttl]`.
-- Decoders are pure functions over packet bytes, each with a `Fuzz*` target.
-
-## Tooling
-
-go 1.27, golangci-lint v2.14.0, goreleaser v2, govulncheck, actionlint,
-Docker with compose v2+.
+```sh
+gofmt -l .        # must print nothing
+make lint test    # vet (default, lab and wasm tags), golangci-lint, tests with -race
+make cross        # when touching dependencies or the sensor
+make lab          # when touching capture, decoding, ingest, queries or the web UI
+```

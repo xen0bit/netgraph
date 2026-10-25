@@ -7,7 +7,11 @@ Wants=network-online.target
 [Service]
 Type=exec
 EnvironmentFile=/etc/netgraph/server.conf
-ExecStart=/usr/bin/netgraph serve -db /var/lib/netgraph/netgraph.db $NETGRAPH_SERVER_ARGS
+# Token files stay root-only; systemd hands the dynamic user copies. The
+# read token is optional (the "-" prefix).
+LoadCredential=token:/etc/netgraph/server.token
+LoadCredential=-read-token:/etc/netgraph/read.token
+ExecStart=/usr/bin/netgraph serve -db /var/lib/netgraph/netgraph.db -token-file ${CREDENTIALS_DIRECTORY}/token $NETGRAPH_SERVER_ARGS
 Restart=on-failure
 RestartSec=2s
 DynamicUser=yes

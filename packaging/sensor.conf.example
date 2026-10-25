@@ -1,2 +1,3 @@
-# /etc/netgraph/sensor.conf — read by netgraph-sensor.service
-NETGRAPH_SENSOR_ARGS=-iface br-lan -server https://netgraph.lan:8443 -token-file /etc/netgraph/sensor.token
+# /etc/netgraph/sensor.conf — read by netgraph-sensor.service.
+# The ingest token goes in /etc/netgraph/sensor.token (root-only is fine).
+NETGRAPH_SENSOR_ARGS=-iface br-lan -server https://netgraph.lan:8443

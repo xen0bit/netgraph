@@ -1,14 +1,21 @@
 # netgraph-sensor on a Linux router or host, capturing a physical or bridge
-# interface (br-lan on OpenWrt-like setups). The server can be anywhere the
-# sensor can reach; set NETGRAPH_SERVER to it.
+# interface (br-lan on OpenWrt-like setups), shipping to a server anywhere
+# the sensor can reach.
+#
+#   NETGRAPH_TOKEN=... NETGRAPH_SERVER=https://netgraph.lan:8443 docker compose -f host.yml up -d
+#
+# NETGRAPH_IFACE may be a name or an address/CIDR the interface holds
+# (192.168.1.1), which survives interface renames.
 services:
   netgraph-sensor:
-    image: ghcr.io/xen0bit/netgraph-sensor:latest
+    image: ${NETGRAPH_SENSOR_IMAGE:-ghcr.io/xen0bit/netgraph-sensor:latest}
     network_mode: host
     cap_drop: [ALL]
     cap_add: [NET_RAW]
     read_only: true
     environment:
       NETGRAPH_TOKEN: ${NETGRAPH_TOKEN:?set NETGRAPH_TOKEN}
-    command: ["run", "-iface", "${NETGRAPH_IFACE:-br-lan}", "-server", "${NETGRAPH_SERVER:?set NETGRAPH_SERVER}"]
+      NETGRAPH_IFACE: ${NETGRAPH_IFACE:-br-lan}
+      NETGRAPH_SERVER: ${NETGRAPH_SERVER:?set NETGRAPH_SERVER}
+    command: ["run"]
     restart: unless-stopped

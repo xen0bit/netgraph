@@ -50,7 +50,7 @@ func checkWebUI(t *testing.T, devtools, ui, token, shotDir string, expect []stri
 			if err := chromedp.FullScreenshot(&buf, 90).Do(ctx); err != nil {
 				return err
 			}
-			return os.WriteFile(fmt.Sprintf("%s/%s.png", shotDir, name), buf, 0o644)
+			return os.WriteFile(fmt.Sprintf("%s/%s.jpg", shotDir, name), buf, 0o644)
 		})
 	}
 
