@@ -49,12 +49,33 @@ build-server:
 build-sensor:
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/netgraph-sensor ./cmd/netgraph-sensor
 
-## web.wasm: build the browser WASM module
-.PHONY: web.wasm
-web.wasm:
-	mkdir -p web/src/wasm web/src/js
-	GOOS=js GOARCH=wasm $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o web/src/wasm/web.wasm ./cmd/web
-	cp "$$($(GO) env GOROOT)/lib/wasm/wasm_exec.js" web/src/js/wasm_exec.js
+## web.build: assemble the web UI (static files + WASM) into web/dist
+.PHONY: web.build
+web.build:
+	rm -rf web/dist && mkdir -p web/dist
+	cp -r web/src/. web/dist/
+	GOOS=js GOARCH=wasm $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o web/dist/web.wasm ./cmd/web
+	cp "$$($(GO) env GOROOT)/lib/wasm/wasm_exec.js" web/dist/js/wasm_exec.js
+	gzip -9 -f web/dist/web.wasm
+	@echo "web/dist: $$(du -sh web/dist | cut -f1) ($$(du -h web/dist/web.wasm.gz | cut -f1) compressed wasm)"
+
+## build-full: build netgraph with the web UI embedded
+.PHONY: build-full
+build-full: web.build
+	CGO_ENABLED=0 $(GO) build -trimpath -tags embed_web -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/netgraph ./cmd/netgraph
+
+## demo: generate a demo capture and database, then serve it on :8443
+.PHONY: demo
+demo: build-full build-sensor
+	mkdir -p demo
+	$(GO) run ./internal/testutil/genpcap demo/home.pcap
+	$(BIN_DIR)/netgraph import -db demo/netgraph.db demo/home.pcap
+	$(BIN_DIR)/netgraph serve -db demo/netgraph.db -no-auth -listen 127.0.0.1:8443
+
+## oui.update: refresh the embedded IEEE MAC vendor registry
+.PHONY: oui.update
+oui.update:
+	$(GO) run ./internal/oui/gen -o internal/oui/oui.tsv.gz
 
 ## test: run all tests with the race detector
 .PHONY: test
@@ -77,6 +98,7 @@ fuzz:
 lint:
 	@test -z "$$(gofmt -l .)" || (gofmt -l .; echo "gofmt: files above need formatting"; exit 1)
 	$(GO) vet ./...
+	$(GO) vet -tags lab ./test/lab/...
 	GOOS=js GOARCH=wasm $(GO) vet ./cmd/web
 	$(GOLANGCI_LINT) run
 
@@ -119,7 +141,7 @@ tidy:
 ## clean: remove build output
 .PHONY: clean
 clean:
-	rm -rf $(BIN_DIR) dist web/dist web/src/wasm
+	rm -rf $(BIN_DIR) dist web/dist demo
 
 ## help: list targets
 .PHONY: help

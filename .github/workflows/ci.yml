@@ -58,6 +58,7 @@ jobs:
       - name: Vet
         run: |
           go vet ./...
+          go vet -tags lab ./test/lab/...
           GOOS=js GOARCH=wasm go vet ./cmd/web
       - uses: golangci/golangci-lint-action@v9
         with:
@@ -89,8 +90,10 @@ jobs:
           go-version: "1.27"
           cache: true
       - run: make cross
-      - name: Build the WASM module
-        run: GOOS=js GOARCH=wasm go build -o /dev/null ./cmd/web
+      - name: Build the web UI and the server that embeds it
+        run: |
+          make web.build
+          CGO_ENABLED=0 go build -tags embed_web -o /dev/null ./cmd/netgraph
       - name: Sensor size budget
         run: |
           # A router has a few MB of flash to spare. Fail before that stops

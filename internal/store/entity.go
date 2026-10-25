@@ -111,16 +111,18 @@ func filterDNS(in []model.DNSQuery, keep func(model.DNSQuery) bool) []model.DNSQ
 func (s *Store) timeline(ctx context.Context, kind, key string, eid int64, d *model.EntityDetail, from, to int64) ([]model.TimelineEvent, error) {
 	var tl []model.TimelineEvent
 	for _, fl := range d.Flows {
-		peer := fl.RemoteIP
-		if kind != model.KindDevice {
-			peer = firstNonEmpty(fl.DeviceName, fl.ClientIP)
+		// "client → remote", where remote is the name it was reached by
+		// when there is one.
+		remote := fmt.Sprintf("%s:%d/%s", fl.RemoteIP, fl.RemotePort, fl.Proto)
+		if fl.Name != "" {
+			remote = fmt.Sprintf("%s (%s:%d/%s)", fl.Name, fl.RemoteIP, fl.RemotePort, fl.Proto)
 		}
-		name := firstNonEmpty(fl.Name, peer)
+		what := firstNonEmpty(fl.DeviceName, fl.ClientIP) + " → " + remote
 		if fl.FirstSeen >= from {
-			tl = append(tl, model.TimelineEvent{TS: fl.FirstSeen, Type: "flow-open", Detail: fmt.Sprintf("%s %s:%d %s", peer, name, fl.RemotePort, fl.Proto)})
+			tl = append(tl, model.TimelineEvent{TS: fl.FirstSeen, Type: "flow-open", Detail: what})
 		}
 		if fl.Closed {
-			tl = append(tl, model.TimelineEvent{TS: fl.LastSeen, Type: "flow-close", Detail: fmt.Sprintf("%s %s (%s) %s up %s down", name, fl.EndReason, fl.Proto, model.FormatBytes(fl.BytesOut), model.FormatBytes(fl.BytesIn))})
+			tl = append(tl, model.TimelineEvent{TS: fl.LastSeen, Type: "flow-close", Detail: fmt.Sprintf("%s, %s, up %s down %s", what, fl.EndReason, model.FormatBytes(fl.BytesOut), model.FormatBytes(fl.BytesIn))})
 		}
 	}
 	for _, q := range d.DNS {

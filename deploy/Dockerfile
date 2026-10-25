@@ -13,9 +13,10 @@ RUN go mod download
 COPY . .
 ARG VERSION=dev
 ENV CGO_ENABLED=0
-RUN go build -trimpath -ldflags "-s -w -X github.com/xen0bit/netgraph/internal/buildinfo.Version=${VERSION}" \
-        -o /out/netgraph-sensor ./cmd/netgraph-sensor \
+RUN make web.build VERSION=${VERSION} \
  && go build -trimpath -ldflags "-s -w -X github.com/xen0bit/netgraph/internal/buildinfo.Version=${VERSION}" \
+        -o /out/netgraph-sensor ./cmd/netgraph-sensor \
+ && go build -trimpath -tags embed_web -ldflags "-s -w -X github.com/xen0bit/netgraph/internal/buildinfo.Version=${VERSION}" \
         -o /out/netgraph ./cmd/netgraph
 
 # The sensor needs CAP_NET_RAW (cap_add: [NET_RAW]) and nothing else. It runs

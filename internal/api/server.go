@@ -6,6 +6,7 @@ package api
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
@@ -333,16 +334,21 @@ func (s *Server) web(w http.ResponseWriter, r *http.Request) {
 	if p == "" {
 		p = "index.html"
 	}
-	// web.wasm is shipped pre-compressed: serve the .gz to browsers that
-	// accept it (all of them), about 4x smaller.
+	// web.wasm ships only gzipped (a quarter of the size, and the binary
+	// embeds it): sent as-is to browsers that accept gzip, which is all of
+	// them, and inflated here for anything that does not.
 	if strings.HasSuffix(p, ".wasm") {
 		w.Header().Set("Content-Type", "application/wasm")
-		if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
-			if f, err := s.cfg.Web.Open(p + ".gz"); err == nil {
-				defer f.Close()
+		w.Header().Set("Vary", "Accept-Encoding")
+		if f, err := s.cfg.Web.Open(p + ".gz"); err == nil {
+			defer f.Close()
+			if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
 				w.Header().Set("Content-Encoding", "gzip")
-				w.Header().Set("Vary", "Accept-Encoding")
 				io.Copy(w, f)
+				return
+			}
+			if zr, err := gzip.NewReader(f); err == nil {
+				io.Copy(w, zr)
 				return
 			}
 		}

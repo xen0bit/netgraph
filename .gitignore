@@ -28,3 +28,6 @@ web/src/node_modules/
 .vscode/
 *.swp
 .DS_Store
+
+# make demo
+/demo/

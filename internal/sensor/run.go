@@ -94,12 +94,11 @@ loop:
 }
 
 func (r *Runner) capture(ctx context.Context, s capture.Source) error {
-	link := s.LinkType()
 	for ctx.Err() == nil {
 		data, ts, err := s.ReadPacket()
 		switch {
 		case err == nil:
-			r.Processor.Handle(ts, data, link)
+			r.Processor.Handle(ts, data, s.LinkType())
 		case errors.Is(err, capture.ErrTimeout):
 		case ctx.Err() != nil:
 			return nil
@@ -117,7 +116,6 @@ func (r *Runner) capture(ctx context.Context, s capture.Source) error {
 func (r *Runner) RunFile(ctx context.Context, s capture.Source) error {
 	r.sources = []capture.Source{s}
 	defer s.Close()
-	link := s.LinkType()
 	var clock, lastTick time.Time
 	for ctx.Err() == nil {
 		data, ts, err := s.ReadPacket()
@@ -134,7 +132,7 @@ func (r *Runner) RunFile(ctx context.Context, s capture.Source) error {
 		if ts.After(clock) {
 			clock = ts
 		}
-		r.Processor.Handle(ts, data, link)
+		r.Processor.Handle(ts, data, s.LinkType())
 		if clock.Sub(lastTick) >= time.Second {
 			r.Processor.Tick(clock)
 			lastTick = clock
