@@ -1,0 +1,44 @@
+# Isolated end-to-end lab. An internal network with no route out: every
+# packet the sensor sees is one this file caused, so assertions can be exact.
+#
+#   make lab      # go test -tags lab ./test/lab — brings this up and down
+#
+# Phase 0 holds only the topology; services that generate traffic (dnsmasq
+# DHCP+DNS, TLS/QUIC web, avahi mDNS, scripted clients) are added with the
+# decoders they exercise.
+name: netgraph-lab
+
+networks:
+  lan:
+    internal: true
+    ipam:
+      config:
+        # .1 is the Docker bridge gateway; lab hosts start at .10.
+        - subnet: 10.77.0.0/24
+
+services:
+  # Stands in for the router: the sensor shares its network namespace, the
+  # same way deploy/compose/sidecar.yml attaches to an app container.
+  router:
+    image: busybox:1.37
+    command: ["sleep", "infinity"]
+    networks:
+      lan:
+        ipv4_address: 10.77.0.10
+    mac_address: "02:00:5e:00:00:01"
+
+  sensor:
+    build: { context: ../.., dockerfile: deploy/Dockerfile, target: sensor }
+    network_mode: "service:router"
+    cap_drop: [ALL]
+    cap_add: [NET_RAW]
+    read_only: true
+    command: ["version"]
+    depends_on: [router]
+
+  server:
+    build: { context: ../.., dockerfile: deploy/Dockerfile, target: server }
+    command: ["version"]
+    networks:
+      lan:
+        ipv4_address: 10.77.0.20

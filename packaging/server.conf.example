@@ -1,0 +1,2 @@
+# /etc/netgraph/server.conf — read by netgraph.service
+NETGRAPH_SERVER_ARGS=-listen :8443 -token-file /etc/netgraph/server.token

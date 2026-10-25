@@ -1,0 +1,32 @@
+# netgraph as a sidecar: the sensor joins the network namespace of the
+# container it watches (network_mode: service:app) and captures that
+# container's eth0. Replace `app` with your own service.
+#
+#   NETGRAPH_TOKEN=$(openssl rand -hex 32) docker compose -f sidecar.yml up -d
+services:
+  app:
+    image: nginx:stable
+    ports: ["8080:80"]
+
+  netgraph-sensor:
+    image: ghcr.io/xen0bit/netgraph-sensor:latest
+    network_mode: "service:app"
+    cap_drop: [ALL]
+    cap_add: [NET_RAW]
+    read_only: true
+    environment:
+      NETGRAPH_TOKEN: ${NETGRAPH_TOKEN:?set NETGRAPH_TOKEN}
+    command: ["run", "-iface", "eth0", "-server", "http://netgraph:8443"]
+    depends_on: [app, netgraph]
+    restart: unless-stopped
+
+  netgraph:
+    image: ghcr.io/xen0bit/netgraph:latest
+    environment:
+      NETGRAPH_TOKEN: ${NETGRAPH_TOKEN:?set NETGRAPH_TOKEN}
+    volumes: [netgraph-data:/data]
+    ports: ["8443:8443"]
+    restart: unless-stopped
+
+volumes:
+  netgraph-data:

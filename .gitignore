@@ -1,0 +1,30 @@
+# Binaries, anchored to the root so they never shadow a package directory.
+/netgraph
+/netgraph-sensor
+
+# Local build output (see Makefile) and GoReleaser output
+/bin/
+/dist/
+
+# Compiled tests, coverage and profiles
+*.test
+*.out
+*.prof
+coverage.html
+
+# Web build artifacts
+web/dist/
+web/src/wasm/
+web/src/js/wasm_exec.js
+web/src/node_modules/
+
+# Local databases
+*.db
+*.db-wal
+*.db-shm
+
+# Editor / OS cruft
+.idea/
+.vscode/
+*.swp
+.DS_Store
