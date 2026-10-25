@@ -81,7 +81,7 @@ function parseFilter(s) {
     const i = tok.indexOf(":");
     const k = i > 0 ? tok.slice(0, i) : "";
     const v = tok.slice(i + 1);
-    if (["device", "ip", "domain", "port", "proto", "app", "multicast"].includes(k) && !(k === "device" && false)) out[k] = v;
+    if (["device", "ip", "domain", "port", "proto", "app", "multicast"].includes(k)) out[k] = v;
     else if (/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(tok)) out.device = tok;
     else if (tok.split(":").length > 2) out.ip = tok;
     else out.domain = tok;

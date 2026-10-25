@@ -151,8 +151,6 @@ dockers_v2:
     images: ["ghcr.io/xen0bit/netgraph"]
     tags: ["{{ .Version }}", "{{ if not .Prerelease }}latest{{ end }}"]
     platforms: [linux/amd64, linux/arm64]
-    build_args:
-      BUILDKIT_MULTI_PLATFORM: "1"
     flags: ["--target=server"]
   - id: netgraph-sensor
     ids: [netgraph-sensor]
