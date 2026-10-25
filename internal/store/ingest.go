@@ -12,6 +12,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/xen0bit/netgraph/internal/model"
 	"github.com/xen0bit/netgraph/internal/oui"
@@ -599,7 +600,47 @@ func (g *ingester) observation(ctx context.Context, sid, ts int64, typ string, d
 	return err
 }
 
+// MaxRecordSpan is the longest interval one stored flow record covers.
+// Window queries rely on it to bound their index range on both sides;
+// longer records (a sensor with a long -active-timeout) are split, their
+// counters shared out in proportion.
+const MaxRecordSpan = 10 * time.Minute
+
 func (g *ingester) flow(ctx context.Context, sid int64, sensor, boot string, f *wire.Flow) error {
+	if span := f.End.Sub(f.Start); span > MaxRecordSpan {
+		n := int64((span + MaxRecordSpan - 1) / MaxRecordSpan)
+		total := *f
+		var done [4]uint64
+		for i := int64(0); i < n; i++ {
+			part := total
+			part.Start = total.Start.Add(time.Duration(i) * span / time.Duration(n))
+			part.End = total.Start.Add(time.Duration(i+1) * span / time.Duration(n))
+			last := i == n-1
+			share := func(v uint64, j int) uint64 {
+				if last {
+					return v - done[j]
+				}
+				x := v * uint64(i+1) / uint64(n)
+				out := x - done[j]
+				done[j] = x
+				return out
+			}
+			part.BytesOut, part.BytesIn = share(total.BytesOut, 0), share(total.BytesIn, 1)
+			part.PktsOut, part.PktsIn = share(total.PktsOut, 2), share(total.PktsIn, 3)
+			part.Final = total.Final && last
+			if !last {
+				part.EndReason = ""
+			}
+			if err := g.flowRecord(ctx, sid, sensor, boot, &part); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	return g.flowRecord(ctx, sid, sensor, boot, f)
+}
+
+func (g *ingester) flowRecord(ctx context.Context, sid int64, sensor, boot string, f *wire.Flow) error {
 	key := sensor + ":" + boot + ":" + strconv.FormatUint(f.ID, 10)
 	nets := g.s.nets
 	srcLocal, dstLocal := nets.isLocal(f.Src) || f.Src.IsUnspecified(), nets.isLocal(f.Dst)
@@ -653,6 +694,30 @@ func (g *ingester) flow(ctx context.Context, sid int64, sensor, boot string, f *
 		sid, key, f.Proto, f.Src.String(), f.SrcPort, f.Dst.String(), f.DstPort, first, start, end,
 		f.BytesOut, f.BytesIn, f.PktsOut, f.PktsIn, f.TCPFlags, boolInt(f.Final), f.EndReason, f.App, f.SNI, f.ALPN, f.JA4, f.HTTPHost, f.UserAgent,
 		qname, client.String(), cport, devMAC, dev, remote.String(), rport, dir, boolInt(multicast)); err != nil {
+		return err
+	}
+	if _, err := g.tx.ExecContext(ctx, `INSERT INTO connections (
+		flow_key, sensor_id, proto, client_ip, client_port, client_mac, client_device, remote_ip, remote_port, direction, multicast,
+		first_seen, last_seen, final, end_reason, app, sni, alpn, ja4, http_host, user_agent, qname, bytes_out, bytes_in, pkts_out, pkts_in)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT (flow_key) DO UPDATE SET
+			first_seen = min(first_seen, excluded.first_seen), last_seen = max(last_seen, excluded.last_seen),
+			final = max(final, excluded.final),
+			end_reason = CASE WHEN excluded.final = 1 THEN excluded.end_reason ELSE end_reason END,
+			client_device = CASE WHEN client_device = 0 THEN excluded.client_device ELSE client_device END,
+			client_mac = CASE WHEN client_mac = '' THEN excluded.client_mac ELSE client_mac END,
+			app = CASE WHEN excluded.app != '' THEN excluded.app ELSE app END,
+			sni = CASE WHEN excluded.sni != '' THEN excluded.sni ELSE sni END,
+			alpn = CASE WHEN excluded.alpn != '' THEN excluded.alpn ELSE alpn END,
+			ja4 = CASE WHEN excluded.ja4 != '' THEN excluded.ja4 ELSE ja4 END,
+			http_host = CASE WHEN excluded.http_host != '' THEN excluded.http_host ELSE http_host END,
+			user_agent = CASE WHEN excluded.user_agent != '' THEN excluded.user_agent ELSE user_agent END,
+			qname = CASE WHEN excluded.qname != '' THEN excluded.qname ELSE qname END,
+			bytes_out = bytes_out + excluded.bytes_out, bytes_in = bytes_in + excluded.bytes_in,
+			pkts_out = pkts_out + excluded.pkts_out, pkts_in = pkts_in + excluded.pkts_in`,
+		key, sid, f.Proto, client.String(), cport, devMAC, dev, remote.String(), rport, dir, boolInt(multicast),
+		first, end, boolInt(f.Final), f.EndReason, f.App, f.SNI, f.ALPN, f.JA4, f.HTTPHost, f.UserAgent, qname,
+		f.BytesOut, f.BytesIn, f.PktsOut, f.PktsIn); err != nil {
 		return err
 	}
 

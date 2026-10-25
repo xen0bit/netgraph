@@ -5,6 +5,7 @@ import (
 	"crypto/tls"
 	"net"
 	"net/netip"
+	"runtime"
 	"testing"
 	"time"
 
@@ -173,4 +174,28 @@ func BenchmarkAdd(b *testing.B) {
 		p.Src = netip.AddrPortFrom(client.Addr(), uint16(i%4096))
 		tb.Add(p)
 	}
+}
+
+// A full table must fit a router's memory budget with room to spare: the
+// sensor's default soft limit is 128 MiB.
+func TestTableMemory(t *testing.T) {
+	if testing.Short() {
+		t.Skip("allocates a full table")
+	}
+	var before, after runtime.MemStats
+	runtime.GC()
+	runtime.ReadMemStats(&before)
+	tb := New(Config{MaxFlows: 65536}, func(*wire.Flow) {})
+	for i := range 65536 {
+		src := netip.AddrPortFrom(netip.AddrFrom4([4]byte{10, byte(i >> 16), byte(i >> 8), byte(i)}), uint16(i))
+		tb.Add(&Packet{TS: t0, Proto: ProtoTCP, Src: src, Dst: server, TCPFlags: SYN, Len: 60})
+	}
+	runtime.GC()
+	runtime.ReadMemStats(&after)
+	used := after.HeapAlloc - before.HeapAlloc
+	t.Logf("65536 flows: %.1f MiB (%d B/flow)", float64(used)/(1<<20), used/65536)
+	if tb.Len() != 65536 || used > 64<<20 {
+		t.Fatalf("len=%d, heap grew %d MiB", tb.Len(), used>>20)
+	}
+	runtime.KeepAlive(tb)
 }

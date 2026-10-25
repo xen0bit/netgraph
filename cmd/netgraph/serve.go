@@ -32,6 +32,7 @@ func runServe(args []string) error {
 	raw := fs.String("raw-retention", "14d", "keep raw flows, DNS and observations this long")
 	rollup := fs.String("rollup-retention", "180d", "keep hourly rollups and facts this long")
 	gap := fs.String("fact-gap", "1h", "silence after which a relationship starts a new period")
+	exactMax := fs.String("exact-max", "48h", "longest window answered from raw records; longer ones use hourly rollups")
 	logLevel := fs.String("log-level", "info", "debug, info, warn or error")
 	logFormat := fs.String("log-format", "text", "text or json")
 	if err := fs.Parse(args); err != nil {
@@ -61,7 +62,11 @@ func runServe(args []string) error {
 	if err != nil {
 		return fmt.Errorf("-fact-gap: %w", err)
 	}
-	st, err := store.Open(*db, store.Config{RawRetention: rawD, RollupRetention: rollD, FactGap: gapD, Logger: log})
+	exactD, err := model.ParseDuration(*exactMax)
+	if err != nil {
+		return fmt.Errorf("-exact-max: %w", err)
+	}
+	st, err := store.Open(*db, store.Config{RawRetention: rawD, RollupRetention: rollD, FactGap: gapD, ExactMax: exactD, Logger: log})
 	if err != nil {
 		return err
 	}

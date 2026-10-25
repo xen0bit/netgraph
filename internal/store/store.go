@@ -35,6 +35,10 @@ type Config struct {
 	// RollupRetention keeps hourly rollups and facts this long (default
 	// 180 days).
 	RollupRetention time.Duration
+	// ExactMax is the longest window answered from raw records; longer
+	// windows use the hourly rollups (default 48h), which keeps a week's
+	// or a month's view as cheap as a day's.
+	ExactMax time.Duration
 	// FactGap is how long a relationship may go unobserved before a new
 	// observation starts a new period instead of extending the last one
 	// (default 1h).
@@ -50,6 +54,9 @@ func (c *Config) defaults() {
 	}
 	if c.RollupRetention <= 0 {
 		c.RollupRetention = 180 * 24 * time.Hour
+	}
+	if c.ExactMax <= 0 {
+		c.ExactMax = 48 * time.Hour
 	}
 	if c.FactGap <= 0 {
 		c.FactGap = time.Hour
