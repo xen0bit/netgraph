@@ -1,0 +1,209 @@
+# GoReleaser configuration for netgraph.
+#
+#   goreleaser check                       # validate this file
+#   goreleaser release --snapshot --clean  # full pipeline dry-run (no publish)
+#
+# Two binaries, because they are two different deployments:
+#
+#   netgraph-sensor  goes on the router. Tiny, stateless, every Linux arch Go
+#                    supports that a router plausibly runs — mips included.
+#   netgraph         the persistence host: SQLite, API, TUI, web UI. SQLite is
+#                    modernc.org/sqlite, which is CGO-free but does not build
+#                    for mips, so the server matrix leaves mips out.
+#
+# Everything is CGO_ENABLED=0, so every target cross-compiles from one runner.
+
+version: 2
+
+project_name: netgraph
+
+before:
+  hooks:
+    - go mod tidy
+    - go vet ./...
+    # The web UI (static files + WASM) is embedded in netgraph, so it has
+    # to exist before the build. Needs only Go and gzip.
+    - make web.build
+
+builds:
+  - id: netgraph-sensor
+    binary: netgraph-sensor
+    main: ./cmd/netgraph-sensor
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [amd64, arm64, arm, "386", mips, mipsle, mips64, mips64le, riscv64, ppc64le]
+    goarm: ["5", "6", "7"]
+    # Most router SoCs (ath79, ramips, ...) have no FPU; hardfloat binaries
+    # SIGILL on them, softfloat runs everywhere.
+    gomips: [softfloat]
+    # softfloat, not sse2: old i386 boxes lack SSE2 (same reason as pwrq).
+    go386: [softfloat]
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    flags:
+      - -trimpath
+    ldflags: &ldflags
+      - -s -w
+      - -X github.com/xen0bit/netgraph/internal/buildinfo.Version={{ .Version }}
+      - -X github.com/xen0bit/netgraph/internal/buildinfo.Commit={{ .ShortCommit }}
+      - -X github.com/xen0bit/netgraph/internal/buildinfo.Date={{ .CommitDate }}
+
+  - id: netgraph
+    binary: netgraph
+    main: ./cmd/netgraph
+    # embed_web bakes web/dist into the binary: an installed netgraph has
+    # no source tree to serve the UI from.
+    tags: [embed_web]
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64, arm, riscv64]
+    goarm: ["7"]
+    ignore:
+      - { goos: darwin, goarch: arm }
+      - { goos: darwin, goarch: riscv64 }
+      - { goos: windows, goarch: arm }
+      - { goos: windows, goarch: riscv64 }
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    flags:
+      - -trimpath
+    ldflags: *ldflags
+
+archives:
+  # Names carry the ARM variant: armv5/6/7 are all GOARCH=arm, and without
+  # it they collide on one file name (pwrq hit this as a 422 on upload).
+  - id: netgraph-sensor
+    ids: [netgraph-sensor]
+    formats: [tar.gz]
+    name_template: >-
+      netgraph-sensor_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    files:
+      - README.md
+      - LICENSE*
+      # OpenWrt has no package for this yet; the tarball carries the procd
+      # init script and UCI config to drop in by hand.
+      - src: packaging/openwrt/*
+        dst: openwrt
+  - id: netgraph
+    ids: [netgraph]
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: >-
+      netgraph_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    files:
+      - README.md
+      - LICENSE*
+
+nfpms:
+  - id: netgraph-sensor
+    package_name: netgraph-sensor
+    ids: [netgraph-sensor]
+    vendor: netgraph
+    homepage: https://github.com/xen0bit/netgraph
+    maintainer: Remy <21974988+xen0bit@users.noreply.github.com>
+    description: |-
+      netgraph capture sensor.
+      Passively captures LAN traffic (flows, DNS, DHCP, mDNS, ARP/NDP, TLS SNI)
+      and ships it to a netgraph server. Needs CAP_NET_RAW.
+    license: MIT
+    formats: [deb, rpm, apk]
+    bindir: /usr/bin
+    scripts:
+      postinstall: packaging/postinstall.sh
+      postremove: packaging/postremove.sh
+    contents:
+      - src: packaging/netgraph-sensor.service
+        dst: /usr/lib/systemd/system/netgraph-sensor.service
+      - src: packaging/sensor.conf.example
+        dst: /etc/netgraph/sensor.conf
+        type: config|noreplace
+  - id: netgraph
+    package_name: netgraph
+    ids: [netgraph]
+    vendor: netgraph
+    homepage: https://github.com/xen0bit/netgraph
+    maintainer: Remy <21974988+xen0bit@users.noreply.github.com>
+    description: |-
+      netgraph server.
+      Stores sensor events in SQLite as a time-sliced graph of devices,
+      addresses, names and services, with a CLI, TUI and web UI.
+    license: MIT
+    formats: [deb, rpm, apk]
+    bindir: /usr/bin
+    scripts:
+      postinstall: packaging/postinstall.sh
+      postremove: packaging/postremove.sh
+    contents:
+      - src: packaging/netgraph.service
+        dst: /usr/lib/systemd/system/netgraph.service
+      - src: packaging/server.conf.example
+        dst: /etc/netgraph/server.conf
+        type: config|noreplace
+
+dockers_v2:
+  - id: netgraph
+    ids: [netgraph]
+    dockerfile: deploy/goreleaser.Dockerfile
+    images: ["ghcr.io/xen0bit/netgraph"]
+    tags: ["{{ .Version }}", "{{ if not .Prerelease }}latest{{ end }}"]
+    platforms: [linux/amd64, linux/arm64]
+    flags: ["--target=server"]
+  - id: netgraph-sensor
+    ids: [netgraph-sensor]
+    dockerfile: deploy/goreleaser.Dockerfile
+    images: ["ghcr.io/xen0bit/netgraph-sensor"]
+    tags: ["{{ .Version }}", "{{ if not .Prerelease }}latest{{ end }}"]
+    platforms: [linux/amd64, linux/arm64, linux/arm/v7]
+    flags: ["--target=sensor"]
+
+checksum:
+  name_template: "checksums.txt"
+
+# Cosign keyless signing of checksums.txt via GitHub OIDC: one signature
+# covers every artifact the checksum file lists.
+signs:
+  - cmd: cosign
+    certificate: "${artifact}.pem"
+    args:
+      - "sign-blob"
+      - "--output-certificate=${certificate}"
+      - "--output-signature=${signature}"
+      - "${artifact}"
+      - "--yes"
+    artifacts: checksum
+    output: true
+
+sboms:
+  - artifacts: binary
+    documents:
+      - >-
+        {{ .Binary }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+        {{- if .Arm }}v{{ .Arm }}{{ end }}.sbom.json
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  use: github
+  filters:
+    exclude:
+      - '^docs(\(.+\))?!?:'
+      - '^test(\(.+\))?!?:'
+      - '^chore(\(.+\))?!?:'
+      - '^ci(\(.+\))?!?:'
+      - "Merge pull request"
+      - "Merge branch"
+  groups:
+    - { title: Features, regexp: '^.*?feat(\(.+\))??!?:.+$', order: 0 }
+    - { title: Bug fixes, regexp: '^.*?fix(\(.+\))??!?:.+$', order: 1 }
+    - { title: Others, order: 999 }
+
+release:
+  draft: false
+  prerelease: auto
+  name_template: "v{{ .Version }}"

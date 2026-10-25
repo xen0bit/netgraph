@@ -1,0 +1,8 @@
+bin/
+dist/
+demo/
+web/dist/
+*.db
+*.db-wal
+*.db-shm
+.git/

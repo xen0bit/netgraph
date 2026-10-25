@@ -1,0 +1,16 @@
+# The netgraph server on its own, for sensors elsewhere (routers, hosts,
+# sidecars) to ship to.
+#
+#   NETGRAPH_TOKEN=... NETGRAPH_READ_TOKEN=... docker compose -f server.yml up -d
+services:
+  netgraph:
+    image: ${NETGRAPH_IMAGE:-ghcr.io/xen0bit/netgraph:latest}
+    environment:
+      NETGRAPH_TOKEN: ${NETGRAPH_TOKEN:?set NETGRAPH_TOKEN}
+      NETGRAPH_READ_TOKEN: ${NETGRAPH_READ_TOKEN:-}
+    volumes: [netgraph-data:/data]
+    ports: ["${NETGRAPH_PORT:-8443}:8443"]
+    restart: unless-stopped
+
+volumes:
+  netgraph-data:

@@ -1,0 +1,67 @@
+# HTTP API
+
+All query endpoints are `GET`, return JSON, and take the window and
+filter as parameters. When the server has a read token, send it as
+`Authorization: Bearer <token>` (or `?token=` for the live stream).
+Times in responses are unix milliseconds.
+
+## Window and filter parameters
+
+| Parameter | |
+|---|---|
+| `from`, `to` | unix ms, RFC 3339, local `2026-10-25 14:00`, or relative `-1h`; default the last hour |
+| `device` | MAC, label or hostname glob |
+| `ip` | address or CIDR |
+| `domain` | DNS name / SNI / HTTP host glob |
+| `port`, `proto`, `app` | remote port, `tcp`/`udp`/number, application |
+| `multicast` | `1` to include multicast and broadcast |
+| `limit` | maximum rows |
+
+## Endpoints
+
+| Endpoint | Returns |
+|---|---|
+| `GET /api/v1/summary` | `{devices, flows, peak_connections, dns_queries, domains, remote_ips, bytes_out, bytes_in, precision, ...}` |
+| `GET /api/v1/devices` | `[{id, mac, label, vendor, vendor_short, randomized, role, ips, hostnames, services, fingerprints, user_agents, flows, dns_queries, bytes_out, bytes_in, remotes, active_from, active_to, first_seen, last_seen}]` |
+| `GET /api/v1/flows` | `[{key, proto, client_ip, client_port, device, device_name, remote_ip, remote_port, direction, app, name, sni, http_host, qname, alpn, ja4, user_agent, first_seen, last_seen, state, closed, end_reason, bytes_out, bytes_in, pkts_out, pkts_in}]`, busiest first |
+| `GET /api/v1/dns` | `[{ts, client_ip, device, device_name, server, qname, qtype, rcode, latency_ms, answers: [{name, type, data, ttl, expires}]}]`, newest first |
+| `GET /api/v1/facts` | `[{rel, src, src_label, dst, dst_label, first_seen, last_seen, count, source, attrs}]` |
+| `GET /api/v1/timeseries?step=5m` | `{step, precision, buckets: [{ts, bytes_out, bytes_in, flows_new, dns_queries, devices}]}` |
+| `GET /api/v1/graph` | `{from, to, precision, truncated, nodes: [{id, kind, label, sub, local, bytes_out, bytes_in, attrs}], edges: [{from, to, rel, count, bytes_out, bytes_in, carried, opened, closed, peak, ports, ttl, first_seen, last_seen, attrs}]}` |
+| `GET /api/v1/graph?format=svg\|d2\|txt` | the graph drawn by the server; `theme=dark`, `layout=elk\|dagre` |
+| `GET /api/v1/entity?id=device:3c:22:fb:01:02:03` | `{id, kind, key, label, attrs, device, facts, flows, dns, timeline: [{ts, type, detail}]}` |
+| `GET /api/v1/sensors` | `[{name, version, interfaces, first_seen, last_seen, stats}]` |
+| `GET /api/v1/live` | server-sent events: `event: ingest` with `[{type, ts, detail}]` per batch |
+| `GET /api/v1/version`, `/healthz` | `{version, commit}`; no token needed |
+
+Graph options: `collapse=0|1` (default 1), `dns=0|1` (1), `identity=0|1`
+(0), `top=N` (15; `-1` for all).
+
+```sh
+curl -s -H "Authorization: Bearer $NETGRAPH_READ_TOKEN" \
+  "http://netgraph.lan:8443/api/v1/flows?from=-1h&device=alice-*&app=quic" | jq .
+```
+
+## Ingest
+
+Sensors `POST /api/v1/ingest` with:
+
+| Header | |
+|---|---|
+| `Authorization: Bearer <ingest token>` | |
+| `X-Netgraph-Sensor` | sensor name |
+| `X-Netgraph-Boot` | random per sensor start; scopes sequence numbers |
+| `X-Netgraph-Version` | event schema version (`1`) |
+| `Content-Encoding: zstd` | optional; plain JSON lines are accepted too |
+
+The body is newline-delimited JSON events, each `{seq, type, ts, <type>:
+{...}}`, as defined in [`internal/wire/event.go`](../internal/wire/event.go).
+Events with a `seq` at or below the last one ingested for that sensor boot
+are skipped, so retries are safe. The response is `{accepted,
+duplicates}`. Anything that can produce these events can feed netgraph:
+
+```sh
+netgraph-sensor run -pcap capture.pcap -server - > events.jsonl   # JSON lines on stdout
+curl -X POST -H "Authorization: Bearer $NETGRAPH_TOKEN" -H "X-Netgraph-Sensor: test" \
+  --data-binary @events.jsonl http://netgraph.lan:8443/api/v1/ingest
+```

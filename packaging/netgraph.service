@@ -1,0 +1,26 @@
+[Unit]
+Description=netgraph server (ingest, storage, API and web UI)
+Documentation=https://github.com/xen0bit/netgraph
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+EnvironmentFile=/etc/netgraph/server.conf
+# Token files stay root-only; systemd hands the dynamic user copies. The
+# read token is optional (the "-" prefix).
+LoadCredential=token:/etc/netgraph/server.token
+LoadCredential=-read-token:/etc/netgraph/read.token
+ExecStart=/usr/bin/netgraph serve -db /var/lib/netgraph/netgraph.db -token-file ${CREDENTIALS_DIRECTORY}/token $NETGRAPH_SERVER_ARGS
+Restart=on-failure
+RestartSec=2s
+DynamicUser=yes
+StateDirectory=netgraph
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+
+[Install]
+WantedBy=multi-user.target
