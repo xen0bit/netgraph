@@ -141,7 +141,7 @@ func TestReplayHome(t *testing.T) {
 	t.Run("identity", func(t *testing.T) {
 		md := out.of(wire.TypeMDNS)
 		if len(md) != 1 || len(md[0].MDNS.Services) != 1 || md[0].MDNS.Services[0].Type != "_ipp._tcp" || md[0].MDNS.Services[0].TXT["ty"] != "Brother HL-L2350DW" ||
-			!slices.Equal(md[0].MDNS.Hostnames, []string{"brn001ba9.local"}) {
+			!slices.Equal(md[0].MDNS.Hostnames, []string{"BRN001BA9.local"}) {
 			t.Errorf("mdns = %+v", md)
 		}
 		names := out.of(wire.TypeName)

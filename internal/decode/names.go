@@ -61,7 +61,7 @@ func MDNS(m *DNSMsg, src netip.Addr, mac string) *wire.MDNS {
 			switch rr.Type {
 			case TypeA, TypeAAAA:
 				if rr.Addr.IsValid() && !strings.Contains(rr.Name, "._") {
-					hosts[strings.ToLower(rr.Name)] = true
+					hosts[rr.Name] = true
 					addrs[rr.Addr] = true
 				}
 			case TypePTR:
@@ -71,7 +71,7 @@ func MDNS(m *DNSMsg, src netip.Addr, mac string) *wire.MDNS {
 				switch {
 				case strings.HasSuffix(rr.Name, ".in-addr.arpa") || strings.HasSuffix(rr.Name, ".ip6.arpa"):
 					if rr.Target != "" {
-						hosts[strings.ToLower(rr.Target)] = true
+						hosts[rr.Target] = true
 					}
 				case strings.HasPrefix(strings.ToLower(rr.Name), "_services._dns-sd."):
 				case rr.Target != "" && strings.Contains(rr.Target, "._"):
@@ -80,9 +80,9 @@ func MDNS(m *DNSMsg, src netip.Addr, mac string) *wire.MDNS {
 			case TypeSRV:
 				if strings.Contains(rr.Name, "._") {
 					s := svc(rr.Name)
-					s.Target, s.Port = strings.ToLower(rr.Target), rr.Port
+					s.Target, s.Port = rr.Target, rr.Port
 					if rr.Target != "" {
-						hosts[strings.ToLower(rr.Target)] = true
+						hosts[rr.Target] = true
 					}
 				}
 			case TypeTXT:
@@ -102,8 +102,13 @@ func MDNS(m *DNSMsg, src netip.Addr, mac string) *wire.MDNS {
 			}
 		}
 	}
+	// Names differing only in case are one name; keep the first spelling.
+	folded := map[string]bool{}
 	for h := range hosts {
-		ev.Hostnames = append(ev.Hostnames, h)
+		if !folded[strings.ToLower(h)] {
+			folded[strings.ToLower(h)] = true
+			ev.Hostnames = append(ev.Hostnames, h)
+		}
 	}
 	for a := range addrs {
 		ev.Addresses = append(ev.Addresses, a)

@@ -15,7 +15,6 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
-	"testing"
 	"time"
 
 	"github.com/gopacket/gopacket"
@@ -25,6 +24,15 @@ import (
 
 	"github.com/xen0bit/netgraph/internal/decode"
 )
+
+// TB is the part of testing.TB the builders use, so cmd/genpcap can build
+// scenarios outside a test.
+type TB interface {
+	Helper()
+	Fatal(args ...any)
+	Fatalf(format string, args ...any)
+	TempDir() string
+}
 
 // Host is one machine in a scenario.
 type Host struct {
@@ -71,7 +79,7 @@ func mac(s string) net.HardwareAddr {
 
 // Capture accumulates timestamped frames.
 type Capture struct {
-	t      testing.TB
+	t      TB
 	frames []frame
 }
 
@@ -81,7 +89,7 @@ type frame struct {
 }
 
 // Home builds the home scenario.
-func Home(t testing.TB) *Capture {
+func Home(t TB) *Capture {
 	c := &Capture{t: t}
 	at := func(d time.Duration) time.Time { return Base.Add(d) }
 
@@ -334,7 +342,7 @@ func (t *TCPConn) Close(ts time.Time) {
 }
 
 // ClientHello returns a ClientHello record produced by crypto/tls.
-func ClientHello(t testing.TB, sni string, alpn ...string) []byte {
+func ClientHello(t TB, sni string, alpn ...string) []byte {
 	t.Helper()
 	cl, sv := net.Pipe()
 	defer sv.Close()
@@ -415,7 +423,7 @@ func rr(n string, t dnsmessage.Type, ttl uint32) dnsmessage.ResourceHeader {
 	return dnsmessage.ResourceHeader{Name: name(n), Type: t, Class: dnsmessage.ClassINET, TTL: ttl}
 }
 
-func must(t testing.TB, err error) {
+func must(t TB, err error) {
 	t.Helper()
 	if err != nil {
 		t.Fatal(err)

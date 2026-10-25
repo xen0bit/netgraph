@@ -127,10 +127,10 @@ func TestMDNSServices(t *testing.T) {
 		t.Fatalf("got %+v", ev)
 	}
 	s := ev.Services[0]
-	if s.Instance != "Living Room._airplay._tcp.local" || s.Type != "_airplay._tcp" || s.Port != 7000 || s.Target != "apple-tv.local" || s.TXT["model"] != "AppleTV11,1" {
+	if s.Instance != "Living Room._airplay._tcp.local" || s.Type != "_airplay._tcp" || s.Port != 7000 || s.Target != "Apple-TV.local" || s.TXT["model"] != "AppleTV11,1" {
 		t.Errorf("service = %+v", s)
 	}
-	if !slices.Equal(ev.Hostnames, []string{"apple-tv.local"}) || len(ev.Addresses) != 1 {
+	if !slices.Equal(ev.Hostnames, []string{"Apple-TV.local"}) || len(ev.Addresses) != 1 {
 		t.Errorf("hostnames=%v addrs=%v", ev.Hostnames, ev.Addresses)
 	}
 }
