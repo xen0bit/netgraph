@@ -19,7 +19,7 @@ const bodyChrome = 6
 
 type styles struct {
 	title, dim, tab, tabActive, head, sel, err, live, ok, key lipgloss.Style
-	spark                                                       lipgloss.Style
+	spark                                                     lipgloss.Style
 }
 
 func newStyles(r *lipgloss.Renderer, dark bool) styles {

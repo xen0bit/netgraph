@@ -23,7 +23,10 @@ import (
 
 type sink struct{ events []wire.Event }
 
-func (s *sink) Emit(ev wire.Event) { ev.Seq = uint64(len(s.events) + 1); s.events = append(s.events, ev) }
+func (s *sink) Emit(ev wire.Event) {
+	ev.Seq = uint64(len(s.events) + 1)
+	s.events = append(s.events, ev)
+}
 
 func homeBackend(t *testing.T) *store.Store {
 	t.Helper()

@@ -195,18 +195,36 @@ func (m *Model) fetchTab(seq int, f model.Filter) tea.Cmd {
 	be, t := m.be, m.tab
 	switch t {
 	case tabDevices:
-		return func() tea.Msg { v, err := be.Devices(context.Background(), f); return dataMsg{seq: seq, kind: t, v: v, err: err} }
+		return func() tea.Msg {
+			v, err := be.Devices(context.Background(), f)
+			return dataMsg{seq: seq, kind: t, v: v, err: err}
+		}
 	case tabFlows:
-		return func() tea.Msg { v, err := be.Flows(context.Background(), f); return dataMsg{seq: seq, kind: t, v: v, err: err} }
+		return func() tea.Msg {
+			v, err := be.Flows(context.Background(), f)
+			return dataMsg{seq: seq, kind: t, v: v, err: err}
+		}
 	case tabDNS:
-		return func() tea.Msg { v, err := be.DNS(context.Background(), f); return dataMsg{seq: seq, kind: t, v: v, err: err} }
+		return func() tea.Msg {
+			v, err := be.DNS(context.Background(), f)
+			return dataMsg{seq: seq, kind: t, v: v, err: err}
+		}
 	case tabFacts:
-		return func() tea.Msg { v, err := be.Facts(context.Background(), f); return dataMsg{seq: seq, kind: t, v: v, err: err} }
+		return func() tea.Msg {
+			v, err := be.Facts(context.Background(), f)
+			return dataMsg{seq: seq, kind: t, v: v, err: err}
+		}
 	case tabGraph:
 		o := m.gopts
-		return func() tea.Msg { v, err := be.Graph(context.Background(), f, o); return dataMsg{seq: seq, kind: t, v: v, err: err} }
+		return func() tea.Msg {
+			v, err := be.Graph(context.Background(), f, o)
+			return dataMsg{seq: seq, kind: t, v: v, err: err}
+		}
 	case tabSummary:
-		return func() tea.Msg { v, err := be.Devices(context.Background(), f); return dataMsg{seq: seq, kind: tabDevices, v: v, err: err} }
+		return func() tea.Msg {
+			v, err := be.Devices(context.Background(), f)
+			return dataMsg{seq: seq, kind: tabDevices, v: v, err: err}
+		}
 	}
 	return nil
 }
