@@ -219,7 +219,7 @@ func TestLiveAndWeb(t *testing.T) {
 func gzipped(s string) []byte {
 	var b bytes.Buffer
 	zw := gzip.NewWriter(&b)
-	zw.Write([]byte(s))
+	_, _ = zw.Write([]byte(s))
 	zw.Close()
 	return b.Bytes()
 }
