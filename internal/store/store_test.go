@@ -453,3 +453,27 @@ func TestCorrelationPrefersSNI(t *testing.T) {
 		t.Fatalf("qnames by flow: %v", got)
 	}
 }
+
+// An LLDP neighbour renamed after its first advertisement takes the new name.
+func TestLLDPRename(t *testing.T) {
+	st, _, _ := homeStore(t)
+	ctx := context.Background()
+	mac := testutil.Switch.MAC.String()
+	evs := []wire.Event{
+		{Seq: 1, Type: wire.TypeLLDP, TS: testutil.Base.Add(80 * time.Second), LLDP: &wire.LLDP{MAC: mac, ChassisID: "00:1b:21:aa:00:01", PortID: "port-7", SystemName: "renamed-switch"}},
+	}
+	if _, err := st.Ingest(ctx, "router", "rename", evs); err != nil {
+		t.Fatal(err)
+	}
+	facts, _ := st.Facts(ctx, model.Filter{From: testutil.Base, To: testutil.Base.Add(time.Hour), Device: mac})
+	var found bool
+	for _, f := range facts {
+		if f.Rel == model.RelNeighbor {
+			found = f.DstLabel == "renamed-switch port-7"
+		}
+	}
+	devs, _ := st.Devices(ctx, model.Filter{From: testutil.Base, To: testutil.Base.Add(time.Hour), Device: mac})
+	if !found || len(devs) != 1 || devs[0].Label != "renamed-switch" {
+		t.Fatalf("neighbor renamed=%v devices=%+v", found, devs)
+	}
+}

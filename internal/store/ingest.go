@@ -367,6 +367,13 @@ func (g *ingester) setLabel(kind, key, label string, pri int) {
 	e.attrs["label_pri"] = strconv.Itoa(pri)
 }
 
+// relabel sets a non-device entity's label to its latest form.
+func (g *ingester) relabel(kind, key, label string) {
+	if e := g.row(kind, key); e != nil && label != "" && e.label != label {
+		e.label, e.dirty = label, true
+	}
+}
+
 func (g *ingester) setAttr(kind, key, k, v string) {
 	e := g.row(kind, key)
 	if e == nil || v == "" || e.attrs[k] == v {
@@ -1130,13 +1137,16 @@ func (g *ingester) lldp(ctx context.Context, sid, ts int64, l *wire.LLDP) error 
 		return err
 	}
 	key := l.ChassisID + "/" + l.PortID
-	id, err := g.entity(ctx, model.KindLLDP, key, ts, func(e *entRow) {
-		e.label = firstNonEmpty(l.SystemName, l.ChassisID) + " " + l.PortID
-		e.attrs["system"], e.attrs["port"], e.attrs["description"] = l.SystemName, l.PortID, l.SystemDesc
-	})
+	label := firstNonEmpty(l.SystemName, l.ChassisID) + " " + l.PortID
+	id, err := g.entity(ctx, model.KindLLDP, key, ts, nil)
 	if err != nil {
 		return err
 	}
+	// Systems get renamed; the neighbour is what it last advertised.
+	g.relabel(model.KindLLDP, key, label)
+	g.setAttr(model.KindLLDP, key, "system", l.SystemName)
+	g.setAttr(model.KindLLDP, key, "port", l.PortID)
+	g.setAttr(model.KindLLDP, key, "description", l.SystemDesc)
 	if err := g.fact(ctx, model.RelNeighbor, dev, id, ts, ts, "lldp", nil); err != nil {
 		return err
 	}
