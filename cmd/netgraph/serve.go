@@ -16,6 +16,7 @@ import (
 	"github.com/xen0bit/netgraph/internal/buildinfo"
 	"github.com/xen0bit/netgraph/internal/model"
 	"github.com/xen0bit/netgraph/internal/store"
+	"github.com/xen0bit/netgraph/internal/wifi"
 	"github.com/xen0bit/netgraph/web"
 )
 
@@ -28,6 +29,7 @@ func runServe(args []string) error {
 	noAuth := fs.Bool("no-auth", false, "accept ingest without a token (trusted networks only)")
 	cert := fs.String("tls-cert", "", "TLS certificate (PEM)")
 	key := fs.String("tls-key", "", "TLS key (PEM)")
+	wifiKeyFile := fs.String("wifi-key-file", envOr("NETGRAPH_WIFI_KEY_FILE", ""), "WPA/WPA2 passphrases, PMKs and WEP keys served to sensors for Wi-Fi decryption; $NETGRAPH_WIFI_KEY_FILE")
 	webDir := fs.String("web-dir", "", "serve the web UI from this directory instead of the embedded copy")
 	raw := fs.String("raw-retention", "14d", "keep raw flows, DNS and observations this long")
 	rollup := fs.String("rollup-retention", "180d", "keep hourly rollups and facts this long")
@@ -49,6 +51,15 @@ func runServe(args []string) error {
 	}
 	if ingestTok == "" && !*noAuth {
 		return errors.New("no ingest token: set $NETGRAPH_TOKEN or -token-file (or pass -no-auth on a trusted network)")
+	}
+	var wifiKeys *wifi.Secrets
+	if *wifiKeyFile != "" {
+		if ingestTok == "" {
+			return errors.New("-wifi-key-file needs an ingest token: Wi-Fi keys are only served to authenticated sensors")
+		}
+		if wifiKeys, err = wifi.LoadKeyFile(*wifiKeyFile); err != nil {
+			return fmt.Errorf("wifi keys: %w", err)
+		}
 	}
 	rawD, err := model.ParseDuration(*raw)
 	if err != nil {
@@ -72,7 +83,7 @@ func runServe(args []string) error {
 	}
 	defer st.Close()
 
-	cfg := api.Config{Store: st, IngestToken: ingestTok, ReadToken: readTok, Web: web.FS, Logger: log}
+	cfg := api.Config{Store: st, IngestToken: ingestTok, ReadToken: readTok, WiFi: wifiKeys, Web: web.FS, Logger: log}
 	if *webDir != "" {
 		cfg.Web = os.DirFS(*webDir)
 	}
@@ -98,6 +109,12 @@ func runServe(args []string) error {
 	if readTok == "" {
 		if host, _, _ := net.SplitHostPort(*listen); host == "" || !net.ParseIP(host).IsLoopback() {
 			log.Warn("queries and the web UI are open to anyone who can reach this port; set $NETGRAPH_READ_TOKEN to require a token")
+		}
+	}
+	if wifiKeys != nil {
+		log.Info("serving wifi keys to sensors", "networks", len(wifiKeys.PMKs))
+		if *cert == "" {
+			log.Warn("wifi keys are sent to sensors without TLS; use -tls-cert, or a TLS proxy, unless the sensor link is trusted")
 		}
 	}
 	if cfg.Web == nil {

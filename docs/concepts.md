@@ -141,23 +141,27 @@ The graph can show `access point ──broadcasts──▶ SSID`,
 `device ──probes/associates──▶ SSID/access point`, and handshake edges with
 the message number and cipher.
 
-**Decryption** happens on the sensor, before events are shipped:
+**Decryption** happens on the sensor, before events are shipped, with keys
+the sensor fetches from the server and holds only in memory:
 
 - **Open** networks are passed through.
 - **WEP** uses the configured 40/104/128-bit shared keys.
-- **WPA/WPA2-PSK** derives the PMK from the SSID and passphrase (PBKDF2) or
-  accepts a raw PMK. It follows EAPOL messages 1–4, derives the PTK from the
-  nonces, verifies the MIC, and decrypts CCMP or TKIP data frames.
+- **WPA/WPA2-PSK** uses the PMK the server derived from the SSID and
+  passphrase in its key file (PBKDF2), or a raw PMK. It follows EAPOL
+  messages 1–4, derives the PTK from the nonces, verifies the MIC, and
+  decrypts CCMP or TKIP data frames.
 - **WPA3/SAE, OWE and 802.1X** cannot be followed from the air alone. They
   are parsed and reported as networks, and can be decrypted only when a PMK
-  is supplied (`pmk <ssid> <hex>` in the key file).
+  is supplied (`pmk <ssid> <hex>` in the server's key file).
 
 Decrypted data frames are rebuilt as Ethernet and enter the normal flow,
 DNS, TLS and HTTP pipeline, so a Wi-Fi capture produces the same connection
 graph as a bridge capture. Only pairwise keys are followed; group/broadcast
-keys are not derived, so multicast Wi-Fi data stays encrypted. No key leaves
-the sensor — not the PMK, PTK, passphrase or MIC — and the keyring is never
-written to disk; `wifi` events carry only public facts (BSSID, SSID, client,
+keys are not derived, so multicast Wi-Fi data stays encrypted. Keys flow one
+way, server to sensor: the server keeps the passphrases in its key file and
+serves only the derived PMKs and WEP keys, over the ingest-token endpoint.
+No key leaves the sensor — not the PMK, PTK or MIC — and the sensor writes
+nothing to disk; `wifi` events carry only public facts (BSSID, SSID, client,
 channel, security, cipher, handshake message number and whether its MIC
 verified).
 
@@ -166,13 +170,12 @@ memory, so a sensor restart would otherwise lose them until each client
 re-associated. To avoid that, a sensor that installs a key ships a
 `wifi_key` event carrying just the handshake's two **nonces** — values the
 AP and client broadcast in the clear, so not secret. The server keeps the
-latest per `(AP, client)` in `wifi_handshakes`, and a sensor fetches them on
-startup (and every few minutes) to re-derive the PTK from its own key-file
-PMK. The same mechanism lets several sensors share keys: one sensor catches
-a client's handshake, the rest decrypt that client too. The server never
-sees the passphrase and stores no raw frames, so the stored nonces decrypt
-nothing on their own. A sensor only ships a `wifi_key` for a network whose
-passphrase it holds, so the table only ever covers your own networks.
+latest per `(AP, client)` in `wifi_handshakes`, and a sensor fetches them
+with its PMKs on startup (and every minute) to re-derive the PTK. The same mechanism lets several sensors share keys: one sensor catches
+a client's handshake, the rest decrypt that client too. The server stores
+no raw frames and never copies the key file into the database, so the stored
+nonces decrypt nothing on their own. A sensor only ships a `wifi_key` for a
+network whose PMK it holds, so the table only ever covers your own networks.
 
 Channel hopping is available with `-wifi-hop`. It uses the wireless
 extensions ioctl, so it works with mac80211 monitor interfaces and not with

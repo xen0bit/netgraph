@@ -1,5 +1,7 @@
 # /etc/netgraph/server.conf — read by netgraph.service.
 # The ingest token goes in /etc/netgraph/server.token; to require a token for
 # queries and the web UI, add -read-token-file ${CREDENTIALS_DIRECTORY}/read-token
-# and put it in /etc/netgraph/read.token.
+# and put it in /etc/netgraph/read.token. To let Wi-Fi sensors decrypt WPA2,
+# put the key file in /etc/netgraph/wifi.keys (root-only) and add
+# -wifi-key-file ${CREDENTIALS_DIRECTORY}/wifi-keys.
 NETGRAPH_SERVER_ARGS=-listen :8443

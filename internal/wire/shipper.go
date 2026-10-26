@@ -105,12 +105,12 @@ func NewBootID() string {
 // Boot is this run's boot ID.
 func (s *Shipper) Boot() string { return s.boot }
 
-// FetchHandshakes pulls the server's stored WPA handshake nonce records so
-// the sensor can re-derive pairwise keys after a restart, or pick up keys
-// another sensor found. It carries public nonces only; the sensor still
-// needs the network passphrase (never shipped) to derive anything.
-func (s *Shipper) FetchHandshakes(ctx context.Context) ([]WiFiKey, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.cfg.URL+"/api/v1/wifi/handshakes", nil)
+// FetchWiFiKeys pulls the Wi-Fi keys the server holds for its sensors: PMKs
+// and WEP keys from its key file, and the stored handshake nonces, so the
+// sensor can decrypt without a key file of its own and re-derive pairwise
+// keys after a restart or from another sensor's capture.
+func (s *Shipper) FetchWiFiKeys(ctx context.Context) (*WiFiKeys, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.cfg.URL+"/api/v1/wifi/keys", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -123,13 +123,13 @@ func (s *Shipper) FetchHandshakes(ctx context.Context) ([]WiFiKey, error) {
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode/100 != 2 {
-		return nil, fmt.Errorf("fetch handshakes: %s", resp.Status)
+		return nil, fmt.Errorf("fetch wifi keys: %s", resp.Status)
 	}
-	var out []WiFiKey
+	var out WiFiKeys
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<20)).Decode(&out); err != nil {
 		return nil, err
 	}
-	return out, nil
+	return &out, nil
 }
 
 // Emit queues an event, assigning its sequence number.

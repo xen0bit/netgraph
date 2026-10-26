@@ -51,6 +51,7 @@ netgraph serve -db /var/lib/netgraph/netgraph.db -listen :8443
 | `-token-file` | `$NETGRAPH_TOKEN` | ingest token; required unless `-no-auth` |
 | `-read-token-file` | `$NETGRAPH_READ_TOKEN` | query token; when empty, queries and the UI are open (a warning is logged) |
 | `-tls-cert`, `-tls-key` | | serve HTTPS |
+| `-wifi-key-file` | `$NETGRAPH_WIFI_KEY_FILE` | WPA/WPA2 passphrases, PMKs and WEP keys for Wi-Fi sensors ([Wi-Fi capture](#wi-fi-capture)); needs an ingest token |
 | `-raw-retention` | `14d` | keep raw connections, lookups and observations |
 | `-rollup-retention` | `180d` | keep hourly rollups and facts |
 | `-exact-max` | `48h` | longer windows are answered from hourly rollups |
@@ -84,11 +85,12 @@ netgraph-sensor run -iface br-lan -server https://netgraph.lan:8443 -token-file 
 | `-tcp-idle`, `-udp-idle` | `5m`, `60s` | silence after which a connection is considered gone |
 | `-max-flows` | `65536` | tracked connections; about 720 B each |
 | `-spool-mb` | `32` | batches held while the server is unreachable; oldest dropped beyond |
+| `-flush` | `2s` | send batches at least this often |
+| `-log-level`, `-log-format` | `info`, `text` | `debug`/`info`/`warn`/`error`; `text` or `json` (the server takes the same two) |
 | `-mem-limit-mb` | `128` | Go soft memory limit (unless `$GOMEMLIMIT`) |
 | `-ring-mb` | `8` | AF_PACKET ring per interface |
 | `-rdns` | on | reverse DNS for local hosts while they are observed (live capture only) |
 | `-rdns-timeout`, `-rdns-workers`, `-rdns-ttl` | `2s`, `4`, `1h` | lookup bound, concurrency and answer cache |
-| `-wifi-key-file` | `$NETGRAPH_WIFI_KEY_FILE` | WPA/WPA2 passphrases, PMKs and WEP keys |
 | `-wifi-hop`, `-wifi-channels`, `-wifi-dwell` | off, common 2.4/5 GHz, `250ms` | channel hopping on monitor interfaces |
 | `-wifi-data` | off | emit one event per data frame (noisy; management and handshakes are always reported) |
 
@@ -144,7 +146,7 @@ The sensor never changes the interface type; it only sets the channel (with
 
 ```sh
 netgraph-sensor run -iface wlan1 -server https://netgraph.lan:8443 \
-  -wifi-key-file /etc/netgraph/wifi.keys -wifi-hop -wifi-channels 1,6,11,36,40,44,48,149
+  -wifi-hop -wifi-channels 1,6,11,36,40,44,48,149
 ```
 
 **Hopping vs. pinning.** `-wifi-hop` tunes the wireless extensions ioctl
@@ -169,12 +171,21 @@ A dual-band SSID runs a separate AP (and BSSID) per band, often on very
 different channels. Decryption is per-AP, so pin to the band/channel the
 target device actually uses — many clients prefer 5 GHz.
 
-**Keys** are read from a root-only file, never from flags, so they do not
-appear in `ps` or a shell history. One line per *distinct SSID* (the WPA2
-key is derived from the passphrase and the SSID, so the same SSID on both
-bands needs only one line):
+**Keys are configured on the server**, never on the sensor: the sensor has
+no key file and writes nothing to disk. Give `netgraph serve` a root-only
+key file with `-wifi-key-file` (never flags, so keys do not appear in `ps`
+or a shell history). The server turns each passphrase into its PMK and
+serves the PMKs and WEP keys — not the passphrases — to sensors that present
+the ingest token. A sensor fetches them into memory before it starts
+capturing and again every minute, so a key added to or removed from the file
+reaches every sensor within a minute of restarting the server. Because
+the PMKs travel to the sensors, serve over HTTPS (`-tls-cert`) or a TLS
+proxy unless the sensor link is trusted; the server warns otherwise. One
+line per *distinct SSID* (the WPA2 key is derived from the passphrase and
+the SSID, so the same SSID on both bands needs only one line):
 
 ```sh
+# on the server
 sudo mkdir -p /etc/netgraph
 sudo install -m 600 /dev/null /etc/netgraph/wifi.keys
 sudo tee /etc/netgraph/wifi.keys >/dev/null <<'EOF'
@@ -186,7 +197,12 @@ pmk some-eap-net 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde
 # WEP: <index 0-3> <5, 13 or 16 bytes of hex>
 wep 0 0102030405
 EOF
+netgraph serve -token-file /etc/netgraph/server.token -wifi-key-file /etc/netgraph/wifi.keys ...
 ```
+
+With the systemd unit, drop the file at `/etc/netgraph/wifi.keys` and add
+`-wifi-key-file ${CREDENTIALS_DIRECTORY}/wifi-keys` to
+`/etc/netgraph/server.conf`.
 
 **What can be decrypted — WPA2-PSK yes, WPA3-SAE no.** For WPA2-PSK the
 pairwise master key is `PBKDF2(passphrase, SSID)`, a static value, so knowing
@@ -214,13 +230,13 @@ need no keys.
 **Keys survive restarts, and sync across sensors, through the server** — no
 configuration needed. Pairwise keys live only in sensor memory, but when a
 sensor installs one it ships the handshake's public nonces to the server,
-which keeps the latest per client. On startup (and every few minutes) a
-sensor fetches them and re-derives the keys from its own key file, so a
-restarted sensor recovers its decryption coverage, and a second sensor
-decrypts clients whose handshake another sensor caught. No key, passphrase
-or MIC ever leaves a sensor, and nothing is written to the sensor's disk —
-only the cleartext-broadcast nonces are stored, on the server, and they
-decrypt nothing without the passphrase.
+which keeps the latest per client. Each key fetch returns them alongside
+the PMKs, and the sensor re-derives the pairwise keys, so a restarted sensor
+recovers its decryption coverage, and a second sensor decrypts clients whose
+handshake another sensor caught. No key or MIC is ever sent by a sensor, and
+nothing is written to the sensor's disk. The server stores only the
+cleartext-broadcast nonces; the key file stays a file and is never copied
+into the database.
 
 If the interface is not in monitor mode, or no packets are 802.11, the
 sensor treats it as Ethernet. Channel hopping is only started for interfaces

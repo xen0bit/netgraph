@@ -276,10 +276,31 @@ type WiFi struct {
 type WiFiKey struct {
 	BSSID      string `json:"bssid"`       // access point
 	STA        string `json:"sta"`         // client station
-	SSID       string `json:"ssid"`        // network name, to find the PMK in the key file
+	SSID       string `json:"ssid"`        // network name, to find the PMK
 	ANonce     string `json:"anonce"`      // authenticator nonce, hex (32 bytes)
 	SNonce     string `json:"snonce"`      // supplicant nonce, hex (32 bytes)
 	KeyVersion int    `json:"key_version"` // EAPOL descriptor version: 1 TKIP, 2 CCMP
+}
+
+// WiFiKeys is the Wi-Fi key material a sensor fetches from the server
+// (GET /api/v1/wifi/keys) and holds only in memory. The server derives the
+// PMKs from its key file, so a passphrase never travels.
+type WiFiKeys struct {
+	PMKs       []WiFiPMK `json:"pmks"`
+	WEP        []WiFiWEP `json:"wep"`
+	Handshakes []WiFiKey `json:"handshakes"`
+}
+
+// WiFiPMK is one network's pairwise master key.
+type WiFiPMK struct {
+	SSID string `json:"ssid"`
+	PMK  string `json:"pmk"` // hex, 32 bytes
+}
+
+// WiFiWEP is one of the four WEP keys.
+type WiFiWEP struct {
+	Index int    `json:"index"` // 0..3
+	Key   string `json:"key"`   // hex, 5, 13 or 16 bytes
 }
 
 // EAPOL is the public shape of one 802.1X key message.

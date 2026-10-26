@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -19,6 +20,7 @@ import (
 	"github.com/xen0bit/netgraph/internal/sensor"
 	"github.com/xen0bit/netgraph/internal/store"
 	"github.com/xen0bit/netgraph/internal/testutil"
+	"github.com/xen0bit/netgraph/internal/wifi"
 	"github.com/xen0bit/netgraph/internal/wire"
 )
 
@@ -232,4 +234,59 @@ func gzipped(s string) []byte {
 	_, _ = zw.Write([]byte(s))
 	zw.Close()
 	return b.Bytes()
+}
+
+// TestWiFiKeys checks that sensors get the server's Wi-Fi keys and stored
+// handshakes with the ingest token, and that keys are never served without
+// one.
+func TestWiFiKeys(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "ng.db"), store.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	sec, err := wifi.ParseKeyFile(strings.NewReader("wpa2 Home correct horse battery\nwep 2 0102030405\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs := wire.WiFiKey{BSSID: "aa:bb:cc:00:00:01", STA: "02:00:00:00:00:01", SSID: "home",
+		ANonce: strings.Repeat("11", 32), SNonce: strings.Repeat("22", 32), KeyVersion: 2}
+	if _, err := st.Ingest(context.Background(), "mon", "boot", []wire.Event{
+		{Seq: 1, Type: wire.TypeWiFiKey, TS: testutil.Base, WiFiKey: &hs},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fetch := func(cfg Config, token string) (*wire.WiFiKeys, error) {
+		cfg.Store, cfg.WiFi = st, sec
+		srv := httptest.NewServer(New(cfg))
+		defer srv.Close()
+		sh := wire.NewShipper(wire.ShipperConfig{URL: srv.URL, Token: token, Sensor: "mon"})
+		return sh.FetchWiFiKeys(context.Background())
+	}
+
+	if _, err := fetch(Config{IngestToken: "in-tok", ReadToken: "rd-tok"}, "rd-tok"); err == nil || !strings.Contains(err.Error(), "401") {
+		t.Fatalf("read token fetched wifi keys: %v", err)
+	}
+	got, err := fetch(Config{IngestToken: "in-tok"}, "in-tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pmk, _ := wifi.PMK("correct horse battery", "Home")
+	if len(got.PMKs) != 1 || got.PMKs[0].SSID != "home" || got.PMKs[0].PMK != hex.EncodeToString(pmk) {
+		t.Errorf("pmks = %+v", got.PMKs)
+	}
+	if len(got.WEP) != 1 || got.WEP[0].Index != 2 || got.WEP[0].Key != "0102030405" {
+		t.Errorf("wep = %+v", got.WEP)
+	}
+	if len(got.Handshakes) != 1 || got.Handshakes[0] != hs {
+		t.Errorf("handshakes = %+v", got.Handshakes)
+	}
+	// With no ingest token (-no-auth) the nonces are still shared, but no key.
+	got, err = fetch(Config{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.PMKs) != 0 || len(got.WEP) != 0 || len(got.Handshakes) != 1 {
+		t.Errorf("unauthenticated server served keys: %+v", got)
+	}
 }

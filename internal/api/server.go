@@ -6,9 +6,11 @@ package api
 
 import (
 	"bytes"
+	"cmp"
 	"compress/gzip"
 	"context"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,6 +19,7 @@ import (
 	"log/slog"
 	"net/http"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -26,6 +29,7 @@ import (
 	"github.com/xen0bit/netgraph/internal/graph/d2render"
 	"github.com/xen0bit/netgraph/internal/model"
 	"github.com/xen0bit/netgraph/internal/store"
+	"github.com/xen0bit/netgraph/internal/wifi"
 	"github.com/xen0bit/netgraph/internal/wire"
 )
 
@@ -40,6 +44,9 @@ type Config struct {
 	// serves a page saying the UI was not built in.
 	Web    fs.FS
 	Logger *slog.Logger
+	// WiFi holds the Wi-Fi keys served to sensors; nil serves none. They
+	// are only served when IngestToken is set.
+	WiFi *wifi.Secrets
 	// MaxBatch bounds an ingest request body (compressed); default 32 MiB.
 	MaxBatch int64
 }
@@ -61,7 +68,7 @@ func New(cfg Config) *Server {
 	}
 	s := &Server{cfg: cfg, mux: http.NewServeMux(), log: cfg.Logger}
 	s.mux.HandleFunc("POST /api/v1/ingest", s.ingest)
-	s.mux.HandleFunc("GET /api/v1/wifi/handshakes", s.wifiHandshakes)
+	s.mux.HandleFunc("GET /api/v1/wifi/keys", s.wifiKeys)
 	s.mux.HandleFunc("GET /api/v1/version", s.version)
 	s.mux.HandleFunc("GET /healthz", s.version)
 	read := func(p string, h http.HandlerFunc) { s.mux.Handle("GET "+p, s.requireRead(h)) }
@@ -234,22 +241,34 @@ func (s *Server) wifi(w http.ResponseWriter, r *http.Request) {
 	answer(s, w, r, s.cfg.Store.WiFi)
 }
 
-// wifiHandshakes hands a sensor the stored handshake nonces so it can
+// wifiKeys hands a sensor what it needs to decrypt Wi-Fi: the PMKs and WEP
+// keys from the server's key file, and the stored handshake nonces so it can
 // re-derive pairwise keys after a restart, or learn keys another sensor
 // found. It is authorised with the ingest token (the sensor's own
-// credential): the response is public nonce material, useless without the
-// network passphrase, which stays on the sensor.
-func (s *Server) wifiHandshakes(w http.ResponseWriter, r *http.Request) {
+// credential), and keys are never served without one.
+func (s *Server) wifiKeys(w http.ResponseWriter, r *http.Request) {
 	if !tokenOK(r, s.cfg.IngestToken) {
 		httpError(w, http.StatusUnauthorized, errors.New("missing or wrong ingest token"))
 		return
 	}
-	v, err := s.cfg.Store.WiFiHandshakes(r.Context())
+	hs, err := s.cfg.Store.WiFiHandshakes(r.Context())
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, errors.New("query failed"))
 		return
 	}
-	writeJSON(w, v)
+	out := wire.WiFiKeys{PMKs: []wire.WiFiPMK{}, WEP: []wire.WiFiWEP{}, Handshakes: hs}
+	if sec := s.cfg.WiFi; sec != nil && s.cfg.IngestToken != "" {
+		for ssid, pmk := range sec.PMKs {
+			out.PMKs = append(out.PMKs, wire.WiFiPMK{SSID: ssid, PMK: hex.EncodeToString(pmk)})
+		}
+		slices.SortFunc(out.PMKs, func(a, b wire.WiFiPMK) int { return cmp.Compare(a.SSID, b.SSID) })
+		for i, k := range sec.WEP {
+			if k != nil {
+				out.WEP = append(out.WEP, wire.WiFiWEP{Index: i, Key: hex.EncodeToString(k)})
+			}
+		}
+	}
+	writeJSON(w, out)
 }
 
 func (s *Server) timeseries(w http.ResponseWriter, r *http.Request) {

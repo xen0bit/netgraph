@@ -62,7 +62,7 @@ Event types are `hello`, `stats`, `flow`, `dns`, `binding`, `dhcp`, `mdns`,
 `"proto":"rdns"`; a `wifi` event describes an access point, client,
 association or handshake and never carries key material. A `wifi_key` event
 carries a handshake's public nonces so keys survive a sensor restart and sync
-across sensors (see below); it holds no key, PMK or MIC. Events with a
+across sensors (see [Wi-Fi keys](#wi-fi-keys)); it holds no key, PMK or MIC. Events with a
 `seq` at or below the last one ingested for that sensor boot are skipped, so
 retries are safe. The response is `{accepted, duplicates}`. Anything that
 can produce these events can feed netgraph:
@@ -73,13 +73,22 @@ curl -X POST -H "Authorization: Bearer $NETGRAPH_TOKEN" -H "X-Netgraph-Sensor: t
   --data-binary @events.jsonl http://netgraph.lan:8443/api/v1/ingest
 ```
 
-### Wi-Fi handshake sync
+### Wi-Fi keys
 
-`GET /api/v1/wifi/handshakes` returns the stored handshake nonce records a
-sensor uses to re-derive WPA pairwise keys after a restart, or to pick up
-keys another sensor found. It is authorised with the **ingest** token (it is
-sensor infrastructure), and sensors call it automatically on startup and
-every few minutes. Each record is `{bssid, sta, ssid, anonce, snonce,
-key_version}`. These are the nonces broadcast in the clear during the 4-way
-handshake — not key material — and are useless without the network
-passphrase, which never leaves the sensor.
+`GET /api/v1/wifi/keys` returns what a sensor needs to decrypt Wi-Fi. It is
+authorised with the **ingest** token (it is sensor infrastructure), and
+sensors call it automatically on startup and every minute. The response is
+`{pmks, wep, handshakes}`:
+
+- `pmks`: `[{ssid, pmk}]`, the 32-byte PMK (hex) for each network in the
+  server's `-wifi-key-file`. Passphrases are not sent; the server derives
+  the PMKs.
+- `wep`: `[{index, key}]`, the configured WEP keys (hex).
+- `handshakes`: `[{bssid, sta, ssid, anonce, snonce, key_version}]`, the
+  latest stored 4-way handshake nonces per client, from `wifi_key` events.
+  These are broadcast in the clear and decrypt nothing on their own; with a
+  network's PMK they let a restarted or additional sensor re-derive the
+  pairwise key without seeing the handshake again.
+
+`pmks` and `wep` are empty unless the server has a key file **and** an
+ingest token; a server started with `-no-auth` never serves keys.

@@ -7,10 +7,11 @@ Wants=network-online.target
 [Service]
 Type=exec
 EnvironmentFile=/etc/netgraph/server.conf
-# Token files stay root-only; systemd hands the dynamic user copies. The
-# read token is optional (the "-" prefix).
+# Token and key files stay root-only; systemd hands the dynamic user copies.
+# The read token and Wi-Fi keys are optional (the "-" prefix).
 LoadCredential=token:/etc/netgraph/server.token
 LoadCredential=-read-token:/etc/netgraph/read.token
+LoadCredential=-wifi-keys:/etc/netgraph/wifi.keys
 ExecStart=/usr/bin/netgraph serve -db /var/lib/netgraph/netgraph.db -token-file ${CREDENTIALS_DIRECTORY}/token $NETGRAPH_SERVER_ARGS
 Restart=on-failure
 RestartSec=2s
