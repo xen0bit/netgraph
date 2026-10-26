@@ -240,6 +240,18 @@ func (f *Frame) hasSSIDIE() bool {
 	return false
 }
 
+// channel is the AP's operating channel. A beacon or probe response
+// advertises it in the DS Parameter Set (or HT Operation) IE, which is
+// authoritative; the radiotap channel is only where the card was listening,
+// and while hopping that is often an adjacent channel the beacon bled into.
+// Frames without those IEs fall back to the radiotap channel.
+func (f *Frame) channel() int {
+	if c := f.IEs.channel(); c != 0 {
+		return c
+	}
+	return f.Radio.Channel
+}
+
 // Kind names the frame for events and logs.
 func (f *Frame) Kind() string {
 	switch f.Type {
@@ -317,14 +329,22 @@ func (f *Frame) Ethernet(dst, src net.HardwareAddr, etherType uint16, payload []
 
 // WireEvent turns what a management frame said into the server's event.
 func (f *Frame) WireEvent() *wire.WiFi {
+	// Only management frames carry security IEs. For data frames (including
+	// the EAPOL handshake) f.Security is zero, whose String() is "open";
+	// leaving Security empty lets the processor fill it from the network's
+	// beacon instead of mislabelling an encrypted network "open".
+	security := ""
+	if f.Security.Kind != "" {
+		security = f.Security.String()
+	}
 	e := &wire.WiFi{
 		Kind:      f.Kind(),
 		BSSID:     f.BSSID.String(),
 		SSID:      f.SSID,
-		Channel:   f.Radio.Channel,
+		Channel:   f.channel(),
 		Frequency: f.Radio.Frequency,
 		Signal:    f.Radio.SignalDBM,
-		Security:  f.Security.String(),
+		Security:  security,
 		Ciphers:   f.Security.Pairwise,
 		AKMs:      f.Security.AKMs,
 		Hidden:    f.Hidden,

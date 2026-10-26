@@ -115,6 +115,21 @@ func parseIEs(b []byte) (IEs, error) {
 	return out, nil
 }
 
+// ieHTOp is the HT Operation element; its first byte is the primary channel.
+const ieHTOp = 61
+
+// channel returns the AP's primary channel from the DS Parameter Set, or the
+// HT Operation element, or 0 when neither is present.
+func (ies IEs) channel() int {
+	if b, ok := ies.find(ieDS); ok && len(b) >= 1 {
+		return int(b[0])
+	}
+	if b, ok := ies.find(ieHTOp); ok && len(b) >= 1 {
+		return int(b[0])
+	}
+	return 0
+}
+
 func (ies IEs) find(id byte) ([]byte, bool) {
 	for _, ie := range ies {
 		if ie.ID == id {
