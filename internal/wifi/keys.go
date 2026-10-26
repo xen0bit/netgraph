@@ -129,6 +129,7 @@ type EAPOLKey struct {
 	KeyLength  uint16
 	Replay     uint64
 	Nonce      [32]byte
+	IV         [16]byte
 	MIC        [16]byte
 	KeyData    []byte
 	Raw        []byte
@@ -224,6 +225,7 @@ func ParseEAPOL(b []byte) (*EAPOLKey, error) {
 	k.KeyLength = binary.BigEndian.Uint16(body[3:])
 	k.Replay = binary.BigEndian.Uint64(body[5:])
 	copy(k.Nonce[:], body[13:45])
+	copy(k.IV[:], body[45:61])
 	copy(k.MIC[:], body[77:93])
 	kd := int(binary.BigEndian.Uint16(body[93:95]))
 	if 95+kd > len(body) {
@@ -242,7 +244,13 @@ type HandshakeInfo struct {
 	Cipher    string
 	Valid     bool
 	Installed bool
-	Err       error
+	// Group marks a group-key handshake message (a GTK rekey) rather
+	// than a 4-way handshake message; GTK that a group key was learned.
+	Group, GTK bool
+	// GroupKey, when a GTK was installed, is the message's wrapped key
+	// data and KEK inputs, for the server to share with other sensors.
+	GroupKey *GroupKeyRecord
+	Err      error
 
 	SSID           string
 	AP, STA        string
@@ -253,21 +261,47 @@ type handshake struct {
 	anonce, snonce []byte
 }
 
+// pairSource is what a PTK was derived from: the network whose PMK was
+// used and the handshake's nonces. It lets a resync skip handshakes whose
+// key is already installed.
+type pairSource struct {
+	ssid   string
+	nonces [64]byte
+}
+
+func newPairSource(ssid string, anonce, snonce []byte) pairSource {
+	s := pairSource{ssid: strings.ToLower(ssid)}
+	copy(s.nonces[:32], anonce)
+	copy(s.nonces[32:], snonce)
+	return s
+}
+
 type network struct {
 	ssid     string
 	security Security
 }
 
 // Keyring holds what a passive observer knows: network names and security,
-// WEP keys, WPA passphrases or PMKs, and PTKs learned from 4-way handshakes.
+// WEP keys, WPA PMKs, and PTKs learned from 4-way handshakes. It lives only
+// in memory; the sensor gets its PMKs and WEP keys from the server.
 type Keyring struct {
 	mu sync.RWMutex
 
 	networks   map[string]network
-	pmks       map[string][]byte // SSID -> PMK
-	pairs      map[string]*PTK   // "bssid|sta" -> PTK
+	pmks       map[string][]byte     // SSID -> PMK
+	pairs      map[string]*PTK       // "bssid|sta" -> PTK
+	pairNet    map[string]pairSource // "bssid|sta" -> what derived the PTK
 	handshakes map[string]*handshake
+	groups     map[string]*apGroup // BSSID -> GTKs
 	wep        [4][]byte
+}
+
+// Secrets are the operator's Wi-Fi keys: a PMK per network and up to four
+// WEP keys. The server reads them from its key file and serves them to
+// sensors, which hold them only in memory (Keyring.SetSecrets).
+type Secrets struct {
+	PMKs map[string][]byte // lower-case SSID -> 32-byte PMK
+	WEP  [4][]byte
 }
 
 // LoadKeyFile reads Wi-Fi keys from a file. Each non-comment line is one of:
@@ -277,8 +311,9 @@ type Keyring struct {
 //	wep  <0-3>  <5, 13 or 16 bytes of hex>
 //
 // The format is deliberately separate from command-line flags so a
-// passphrase does not appear in `ps` or a shell history.
-func LoadKeyFile(path string) (*Keyring, error) {
+// passphrase does not appear in `ps` or a shell history. Passphrases are
+// turned into PMKs here and not kept.
+func LoadKeyFile(path string) (*Secrets, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return nil, err
@@ -288,18 +323,18 @@ func LoadKeyFile(path string) (*Keyring, error) {
 }
 
 // ParseKeyFile parses the key-file format documented on LoadKeyFile.
-func ParseKeyFile(r io.Reader) (*Keyring, error) {
-	k := NewKeyring()
+func ParseKeyFile(r io.Reader) (*Secrets, error) {
+	s := &Secrets{PMKs: map[string][]byte{}}
 	sc := bufio.NewScanner(r)
 	sc.Buffer(make([]byte, 0, 4096), 64*1024)
 	line := 0
 	for sc.Scan() {
 		line++
-		s := strings.TrimSpace(sc.Text())
-		if s == "" || strings.HasPrefix(s, "#") {
+		t := strings.TrimSpace(sc.Text())
+		if t == "" || strings.HasPrefix(t, "#") {
 			continue
 		}
-		kind, rest, _ := strings.Cut(s, " ")
+		kind, rest, _ := strings.Cut(t, " ")
 		rest = strings.TrimSpace(rest)
 		switch strings.ToLower(kind) {
 		case "wpa", "wpa2":
@@ -307,21 +342,21 @@ func ParseKeyFile(r io.Reader) (*Keyring, error) {
 			if !ok || ssid == "" || strings.TrimSpace(pass) == "" {
 				return nil, fmt.Errorf("line %d: expected <%s ssid passphrase>", line, kind)
 			}
-			if err := k.AddPassphrase(ssid, strings.TrimSpace(pass)); err != nil {
+			pmk, err := PMK(strings.TrimSpace(pass), ssid)
+			if err != nil {
 				return nil, fmt.Errorf("line %d: %w", line, err)
 			}
+			s.PMKs[strings.ToLower(ssid)] = pmk
 		case "pmk":
 			ssid, pmk, ok := strings.Cut(rest, " ")
-			if !ok {
+			if !ok || ssid == "" {
 				return nil, fmt.Errorf("line %d: expected <pmk ssid hex>", line)
 			}
 			b, err := hex.DecodeString(strings.TrimSpace(pmk))
 			if err != nil || len(b) != 32 {
 				return nil, fmt.Errorf("line %d: PMK must be 64 hex digits", line)
 			}
-			if err := k.AddPMK(ssid, b); err != nil {
-				return nil, fmt.Errorf("line %d: %w", line, err)
-			}
+			s.PMKs[strings.ToLower(ssid)] = b
 		case "wep":
 			idx, hexKey, ok := strings.Cut(rest, " ")
 			if !ok {
@@ -331,9 +366,11 @@ func ParseKeyFile(r io.Reader) (*Keyring, error) {
 			if err != nil {
 				return nil, fmt.Errorf("line %d: WEP index: %w", line, err)
 			}
-			if err := k.AddWEPKey(n, strings.TrimSpace(hexKey)); err != nil {
+			b, err := ParseWEPKey(n, hexKey)
+			if err != nil {
 				return nil, fmt.Errorf("line %d: %w", line, err)
 			}
+			s.WEP[n] = b
 		default:
 			return nil, fmt.Errorf("line %d: unknown key kind %q", line, kind)
 		}
@@ -341,7 +378,19 @@ func ParseKeyFile(r io.Reader) (*Keyring, error) {
 	if err := sc.Err(); err != nil {
 		return nil, err
 	}
-	return k, nil
+	return s, nil
+}
+
+// ParseWEPKey validates a WEP key index (0..3) and decodes its hex.
+func ParseWEPKey(index int, hexKey string) ([]byte, error) {
+	if index < 0 || index > 3 {
+		return nil, fmt.Errorf("wifi: WEP key index %d", index)
+	}
+	b, err := hex.DecodeString(strings.TrimSpace(hexKey))
+	if err != nil || len(b) != 5 && len(b) != 13 && len(b) != 16 {
+		return nil, fmt.Errorf("wifi: WEP key must be 5, 13 or 16 bytes of hex")
+	}
+	return b, nil
 }
 
 // NewKeyring returns an empty Keyring.
@@ -350,8 +399,43 @@ func NewKeyring() *Keyring {
 		networks:   map[string]network{},
 		pmks:       map[string][]byte{},
 		pairs:      map[string]*PTK{},
+		pairNet:    map[string]pairSource{},
 		handshakes: map[string]*handshake{},
+		groups:     map[string]*apGroup{},
 	}
+}
+
+// SetSecrets replaces the PMKs and WEP keys. A pairwise key derived from a
+// PMK that was removed or changed is dropped with it, so revoking a
+// network's key on the server stops its decryption on the next sync.
+func (k *Keyring) SetSecrets(s *Secrets) {
+	pmks := map[string][]byte{}
+	var wep [4][]byte
+	if s != nil {
+		for ssid, pmk := range s.PMKs {
+			if len(pmk) == 32 {
+				pmks[strings.ToLower(ssid)] = append([]byte(nil), pmk...)
+			}
+		}
+		for i, b := range s.WEP {
+			wep[i] = append([]byte(nil), b...)
+		}
+	}
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	for key, src := range k.pairNet {
+		if !bytes.Equal(k.pmks[src.ssid], pmks[src.ssid]) {
+			delete(k.pairs, key)
+			delete(k.pairNet, key)
+		}
+	}
+	for bssid, g := range k.groups {
+		if !bytes.Equal(k.pmks[g.ssid], pmks[g.ssid]) {
+			delete(k.groups, bssid)
+		}
+	}
+	k.pmks = pmks
+	k.wep = wep
 }
 
 // AddPassphrase registers a WPA/WPA2 passphrase for an SSID.
@@ -380,12 +464,9 @@ func (k *Keyring) AddPMK(ssid string, pmk []byte) error {
 
 // AddWEPKey sets one of the four WEP keys from hex. index is 0..3.
 func (k *Keyring) AddWEPKey(index int, hexKey string) error {
-	if index < 0 || index > 3 {
-		return fmt.Errorf("wifi: WEP key index %d", index)
-	}
-	b, err := hex.DecodeString(strings.TrimSpace(hexKey))
-	if err != nil || len(b) != 5 && len(b) != 13 && len(b) != 16 {
-		return fmt.Errorf("wifi: WEP key must be 5, 13 or 16 bytes of hex")
+	b, err := ParseWEPKey(index, hexKey)
+	if err != nil {
+		return err
 	}
 	k.mu.Lock()
 	k.wep[index] = b
@@ -437,7 +518,13 @@ func pairKey(ap, sta net.HardwareAddr) string {
 // possible, and installs the PTK once message 2 or 3 completes the nonces.
 func (k *Keyring) ProcessEAPOL(f *Frame, msg *EAPOLKey) HandshakeInfo {
 	info := HandshakeInfo{Message: msg.Message(), Version: msg.Version(), Cipher: msg.Cipher()}
-	if info.Message == 0 || !msg.Pairwise() || msg.Request() || msg.Error() {
+	if msg.Request() || msg.Error() {
+		return info
+	}
+	if !msg.Pairwise() {
+		return k.processGroupKey(f, msg, info)
+	}
+	if info.Message == 0 {
 		return info
 	}
 	ap, sta := f.BSSID, f.Dst
@@ -516,13 +603,16 @@ func (k *Keyring) ProcessEAPOL(f *Frame, msg *EAPOLKey) HandshakeInfo {
 			return info
 		}
 	}
-	k.mu.Lock()
-	if len(k.pairs) > 50_000 {
-		clear(k.pairs)
-	}
-	k.pairs[key] = split
-	k.mu.Unlock()
+	k.install(key, newPairSource(ssid, anonce, snonce), split)
 	info.Installed = true
+	if info.Message == 3 {
+		// Message 3 carries the AP's current GTK, wrapped with the KEK.
+		id, ok, err := k.installGTK(ap.String(), ssid, msg, split.KEK, f.TS)
+		info.GTK, info.Err = ok, err
+		if ok {
+			info.GroupKey = record(ap, sta, ssid, id, newPairSource(ssid, anonce, snonce), msg, f.TS)
+		}
+	}
 	info.SSID, info.AP, info.STA = ssid, ap.String(), sta.String()
 	info.ANonce = append([]byte(nil), anonce...)
 	info.SNonce = append([]byte(nil), snonce...)
@@ -530,7 +620,7 @@ func (k *Keyring) ProcessEAPOL(f *Frame, msg *EAPOLKey) HandshakeInfo {
 }
 
 // LoadHandshake re-derives and installs a pairwise key from a stored
-// handshake: the public nonces plus the key-file PMK for ssid. It returns
+// handshake: the public nonces plus the PMK the server supplied for ssid. It returns
 // false (no error) when no PMK is known for the SSID, since nothing can be
 // derived then. This is how a restarted or additional sensor recovers keys
 // from the server without re-capturing the 4-way handshake.
@@ -546,6 +636,15 @@ func (k *Keyring) LoadHandshake(bssid, sta, ssid string, anonce, snonce []byte, 
 	if err != nil {
 		return false, err
 	}
+	key, src := pairKey(ap, st), newPairSource(ssid, anonce, snonce)
+	k.mu.RLock()
+	installed, ok := k.pairNet[key]
+	k.mu.RUnlock()
+	if ok && installed == src {
+		// Already derived from this handshake, and SetSecrets drops a key
+		// whose PMK changed: nothing to redo on a periodic resync.
+		return true, nil
+	}
 	pmk := k.pmkFor(ssid)
 	if len(pmk) != 32 {
 		return false, nil
@@ -559,13 +658,20 @@ func (k *Keyring) LoadHandshake(bssid, sta, ssid string, anonce, snonce []byte, 
 	if err != nil {
 		return false, err
 	}
+	k.install(key, src, splitPTK(ptk, tkip))
+	return true, nil
+}
+
+// install records a pairwise key and what it was derived from.
+func (k *Keyring) install(key string, src pairSource, ptk *PTK) {
 	k.mu.Lock()
 	if len(k.pairs) > 50_000 {
 		clear(k.pairs)
+		clear(k.pairNet)
 	}
-	k.pairs[pairKey(ap, st)] = splitPTK(ptk, tkip)
+	k.pairs[key] = ptk
+	k.pairNet[key] = src
 	k.mu.Unlock()
-	return true, nil
 }
 
 // keyDataSSID pulls an SSID out of an EAPOL-Key data field when a probe
@@ -596,6 +702,20 @@ func (k *Keyring) Decrypt(f *Frame) ([]byte, string, error) {
 		return nil, "", fmt.Errorf("wifi: short protected frame")
 	}
 	ap := f.BSSID.String()
+	if f.FromDS && !f.ToDS && len(f.Dst) == 6 && f.Dst[0]&1 != 0 {
+		// Broadcast/multicast from the AP: the group key, by key ID.
+		if gk := k.group(ap, int(body[3]>>6)); gk != nil {
+			if f.Src != nil && k.ptk(ap, f.Src.String()) != nil {
+				return nil, "", errRelayed
+			}
+			if gk.tkip {
+				out, err := tkipDecrypt(f.rawHeader(), body, gk.tk, true)
+				return out, "TKIP", err
+			}
+			out, err := ccmpDecrypt(f.rawHeader(), body, gk.tk)
+			return out, "CCMP", err
+		}
+	}
 	var sta string
 	switch {
 	case f.FromDS && !f.ToDS:

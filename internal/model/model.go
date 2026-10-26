@@ -75,6 +75,8 @@ type Device struct {
 	ID           string   `json:"id"` // "device:<mac>"
 	MAC          string   `json:"mac"`
 	Label        string   `json:"label"`
+	UserLabel    bool     `json:"user_label,omitempty"` // Label was set by hand
+	AutoLabel    string   `json:"auto_label,omitempty"` // the automatic name, when UserLabel
 	Vendor       string   `json:"vendor,omitempty"`
 	VendorShort  string   `json:"vendor_short,omitempty"` // "Apple" for "Apple, Inc."
 	Randomized   bool     `json:"randomized,omitempty"`

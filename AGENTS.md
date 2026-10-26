@@ -26,17 +26,24 @@ that are easy to break.
   a map, and DNS timeouts are sorted: replaying a capture twice gives
   identical events (`TestReplayDeterministic`). Active lookups — reverse
   DNS, channel hopping — are live-capture only.
-- **Wi-Fi decryption stays on the sensor and in pure Go.** `internal/wifi`
-  derives WEP/WPA/WPA2 keys locally. No **key** leaves the sensor: not the
-  PMK, the PTK, the passphrase or a MIC — `wifi` events never carry them, and
-  the keyring is never written to disk. The one thing that does leave is a
-  `wifi_key` event's handshake **nonces** (ANonce/SNonce): these are
-  broadcast in the clear during the 4-way handshake, so they are not secret,
-  and the server stores them (`wifi_handshakes`) only so a restarted or
-  additional sensor can re-derive the PTK from its own key-file PMK. The
-  server holds no passphrase and no raw frames, so a stored nonce decrypts
-  nothing on its own. WPA3/SAE and 802.1X are parsed but need a supplied PMK;
-  never fake a handshake result.
+- **The sensor persists nothing.** It writes no file: no database, spool,
+  cache or keyring on disk. Its only inputs from disk are the token and CA
+  files it is pointed at.
+- **Wi-Fi keys are configured on the server; decryption happens on the
+  sensor, in pure Go.** `netgraph serve -wifi-key-file` holds the
+  passphrases, derives PMKs (`internal/wifi`), and serves only PMKs and WEP
+  keys on `GET /api/v1/wifi/keys` — with the ingest token, never under
+  `-no-auth`. The sensor keeps them in memory and derives PTKs there. Keys
+  flow one way: no key leaves the sensor (not the PMK, PTK, GTK or a
+  MIC), and `wifi` events never carry one. What a sensor does send, for a
+  restarted or additional sensor to re-derive keys from its own PMK: a
+  `wifi_key` event's handshake **nonces** (ANonce/SNonce, broadcast in the
+  clear), stored in `wifi_handshakes`; and a `wifi_gtk` event's group key
+  **as the AP sent it, still wrapped with the client's KEK**, plus that
+  handshake's nonces, stored in `wifi_group_keys`. Never ship an unwrapped
+  GTK. The key file is never copied into the database.
+  WPA3/SAE and 802.1X are parsed but need a supplied PMK; never fake a
+  handshake result.
 - **Decoders are pure functions over bytes from the network**, which is
   attacker-controlled: bound every length, never loop on input, and give
   each a `Fuzz*` target. The processor also recovers from panics, but a

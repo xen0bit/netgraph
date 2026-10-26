@@ -641,6 +641,9 @@ func (s *Store) Devices(ctx context.Context, f model.Filter) ([]model.Device, er
 		_ = json.Unmarshal([]byte(attrs), &a)
 		e.ID = model.EntityID(model.KindDevice, e.MAC)
 		e.Label = deviceLabel(e.MAC, e.Label, a)
+		if a["user_label"] != "" {
+			e.UserLabel, e.AutoLabel = true, deviceLabel(e.MAC, a["auto_label"], a)
+		}
 		e.Vendor, e.Role = a["vendor"], a["role"]
 		if e.Vendor == oui.Randomized {
 			e.Vendor, e.Randomized = "", true
@@ -711,6 +714,7 @@ func (s *Store) Devices(ctx context.Context, f model.Filter) ([]model.Device, er
 			continue
 		}
 		d.ID, d.MAC, d.Label, d.Vendor, d.VendorShort, d.Randomized, d.Role = e.ID, e.MAC, e.Label, e.Vendor, e.VendorShort, e.Randomized, e.Role
+		d.UserLabel, d.AutoLabel = e.UserLabel, e.AutoLabel
 		d.FirstSeen, d.LastSeen = e.FirstSeen, e.LastSeen
 		if f.IP != "" && !matchAny(d.IPs, f.IP) {
 			continue
@@ -1320,6 +1324,28 @@ func (s *Store) WiFiHandshakes(ctx context.Context) ([]wire.WiFiKey, error) {
 		if err := rows.Scan(&k.BSSID, &k.STA, &k.SSID, &k.ANonce, &k.SNonce, &k.KeyVersion); err != nil {
 			return nil, err
 		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
+// WiFiGroupKeys returns the stored group-key records (still wrapped) for
+// sensors to unwrap with their own PMKs.
+func (s *Store) WiFiGroupKeys(ctx context.Context) ([]wire.WiFiGTK, error) {
+	rows, err := s.r.QueryContext(ctx, `SELECT bssid, key_id, sta, ssid, anonce, snonce, descriptor, key_info, key_length, iv, key_data, ts
+		FROM wifi_group_keys ORDER BY ts`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []wire.WiFiGTK{}
+	for rows.Next() {
+		var k wire.WiFiGTK
+		var ts int64
+		if err := rows.Scan(&k.BSSID, &k.KeyID, &k.STA, &k.SSID, &k.ANonce, &k.SNonce, &k.Descriptor, &k.KeyInfo, &k.KeyLength, &k.IV, &k.KeyData, &ts); err != nil {
+			return nil, err
+		}
+		k.TS = time.UnixMilli(ts).UTC()
 		out = append(out, k)
 	}
 	return out, rows.Err()

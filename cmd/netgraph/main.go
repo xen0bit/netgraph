@@ -43,6 +43,8 @@ func main() {
 		err = runImport(os.Args[2:])
 	case "db":
 		err = runDB(os.Args[2:])
+	case "label":
+		err = runLabel(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "netgraph: unknown command %q\n\n", os.Args[1])
 		usage()
@@ -65,6 +67,7 @@ commands:
   query      print summary, devices, flows, dns, facts, timeseries, an entity, sensors
   graph      render the graph for a time window (.svg, .d2, .txt, .json)
   tui        interactive terminal UI
+  label      name a device by hand (or -clear the name)
   import     ingest pcap/pcapng files directly
   db         database maintenance (migrate, backup, retain, vacuum)
   version    print version information

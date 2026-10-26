@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +24,8 @@ import (
 type IngestResult struct {
 	Accepted   int
 	Duplicates int
+	// NewDevices used an address on the LAN for the first time.
+	NewDevices []NewDevice
 }
 
 // Ingest stores one batch from a sensor. Events whose sequence number was
@@ -37,7 +40,6 @@ func (s *Store) Ingest(ctx context.Context, sensor, boot string, events []wire.E
 		return IngestResult{}, errors.New("missing sensor name")
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	res, live, err := s.ing.batch(ctx, sensor, boot, events)
 	if err != nil {
 		// Caches may now describe rows that were rolled back.
@@ -45,9 +47,16 @@ func (s *Store) Ingest(ctx context.Context, sensor, boot string, events []wire.E
 		if werr := s.ing.warm(ctx); werr != nil {
 			s.log.Error("rewarm ingest caches", "err", werr)
 		}
+		s.mu.Unlock()
 		return res, err
 	}
 	s.sub.publish(live)
+	s.mu.Unlock()
+	if s.cfg.OnNewDevice != nil {
+		for _, d := range res.NewDevices {
+			s.cfg.OnNewDevice(d)
+		}
+	}
 	return res, nil
 }
 
@@ -69,7 +78,26 @@ type ingester struct {
 	traffic map[trafficKey]*trafficAgg
 	dnsAgg  map[dnsKey]int
 
-	live []LiveEvent
+	live   []LiveEvent
+	joined []joinedDevice // devices that used an address for the first time
+}
+
+type joinedDevice struct {
+	mac string
+	ip  netip.Addr
+	ts  int64
+}
+
+// NewDevice is a device seen using an address on the LAN for the first
+// time: the trigger for new-device alerts.
+type NewDevice struct {
+	ID     string     `json:"id"`
+	MAC    string     `json:"mac"`
+	Label  string     `json:"label"`
+	Vendor string     `json:"vendor,omitempty"`
+	IP     netip.Addr `json:"ip"`
+	Sensor string     `json:"sensor"`
+	TS     time.Time  `json:"ts"`
 }
 
 type entKey struct{ kind, key string }
@@ -197,6 +225,7 @@ func (g *ingester) batch(ctx context.Context, sensor, boot string, events []wire
 	}
 	g.tx = tx
 	g.live = g.live[:0]
+	g.joined = g.joined[:0]
 	defer func() { g.tx = nil }()
 
 	now := ms(g.s.cfg.Now())
@@ -245,8 +274,31 @@ func (g *ingester) batch(ctx context.Context, sensor, boot string, events []wire
 	if err := tx.Commit(); err != nil {
 		return res, nil, err
 	}
+	res.NewDevices = g.newDevices(sensor)
 	g.trim()
 	return res, append([]LiveEvent(nil), g.live...), nil
+}
+
+// newDevices describes the batch's newly joined devices, with the best
+// label the batch produced (a DHCP hostname usually arrives with the first
+// address).
+func (g *ingester) newDevices(sensor string) []NewDevice {
+	var out []NewDevice
+	for _, j := range g.joined {
+		e := g.row(model.KindDevice, j.mac)
+		if e == nil {
+			continue
+		}
+		d := NewDevice{
+			ID: model.EntityID(model.KindDevice, j.mac), MAC: j.mac, Label: deviceLabel(j.mac, e.label, e.attrs),
+			Vendor: e.attrs["vendor"], IP: j.ip, Sensor: sensor, TS: time.UnixMilli(j.ts).UTC(),
+		}
+		if d.Vendor == oui.Randomized {
+			d.Vendor = "private address"
+		}
+		out = append(out, d)
+	}
+	return out
 }
 
 func (g *ingester) sensorID(ctx context.Context, name string, now int64) (int64, error) {
@@ -311,6 +363,10 @@ func (g *ingester) event(ctx context.Context, sid int64, sensor, boot string, ev
 		if ev.WiFi != nil {
 			return g.wifi(ctx, sid, ts, ev.WiFi)
 		}
+	case wire.TypeWiFiGTK:
+		if ev.WiFiGTK != nil {
+			return g.wifiGTK(ctx, sid, ts, ev.WiFiGTK)
+		}
 	case wire.TypeWiFiKey:
 		if ev.WiFiKey != nil {
 			return g.wifiKey(ctx, sid, ts, ev.WiFiKey)
@@ -366,13 +422,28 @@ func (g *ingester) entity(ctx context.Context, kind, key string, ts int64, init 
 func (g *ingester) row(kind, key string) *entRow { return g.entities[entKey{kind, key}] }
 
 // setLabel sets an entity's label if pri beats the current label's source.
+// While a user label (SetDeviceLabel) is set, the automatic label is kept
+// in auto_label instead, ready for when the user label is cleared.
 func (g *ingester) setLabel(kind, key, label string, pri int) {
 	e := g.row(kind, key)
-	if e == nil || label == "" || pri < e.labelPri || (pri == e.labelPri && label == e.label) {
+	if e == nil || label == "" {
 		return
 	}
-	e.label, e.labelPri, e.dirty = label, pri, true
+	user := e.attrs["user_label"] != ""
+	current := e.label
+	if user {
+		current = e.attrs["auto_label"]
+	}
+	if pri < e.labelPri || (pri == e.labelPri && label == current) {
+		return
+	}
+	e.labelPri, e.dirty = pri, true
 	e.attrs["label_pri"] = strconv.Itoa(pri)
+	if user {
+		e.attrs["auto_label"] = label
+		return
+	}
+	e.label = label
 }
 
 // relabel sets a non-device entity's label to its latest form.
@@ -568,6 +639,14 @@ func (g *ingester) hasIP(ctx context.Context, mac string, ip netip.Addr, ts, unt
 	if err != nil {
 		return err
 	}
+	if e := g.row(model.KindDevice, mac); e != nil && e.attrs["joined"] == "" {
+		g.setAttr(model.KindDevice, mac, "joined", strconv.FormatInt(ts, 10))
+		// The router announces its own addresses in its hello; it is
+		// infrastructure, not a device joining.
+		if source != "sensor" && e.attrs["role"] != "router" {
+			g.joined = append(g.joined, joinedDevice{mac: mac, ip: ip, ts: ts})
+		}
+	}
 	ipID, err := g.ipEntity(ctx, ip, ts)
 	if err != nil {
 		return err
@@ -579,7 +658,9 @@ func (g *ingester) hasIP(ctx context.Context, mac string, ip netip.Addr, ts, unt
 }
 
 // deviceFor finds the device behind a local address: by the MAC that sent
-// it if known, else by the latest binding.
+// it if known, else by the latest binding. A sensor's own MAC on someone
+// else's address is the router forwarding, not evidence, so that falls back
+// to the binding too.
 func (g *ingester) deviceFor(ctx context.Context, ip netip.Addr, mac string, ts int64) (int64, string, error) {
 	if ip.IsUnspecified() && mac != "" && !isGroupMAC(mac) {
 		// 0.0.0.0: a host before DHCP has given it an address.
@@ -589,7 +670,7 @@ func (g *ingester) deviceFor(ctx context.Context, ip netip.Addr, mac string, ts 
 	if !ip.IsValid() || !g.s.nets.isLocal(ip) {
 		return 0, "", nil
 	}
-	if mac != "" && !isGroupMAC(mac) {
+	if mac != "" && !isGroupMAC(mac) && !g.s.nets.forwarded(normMACOr(mac), ip) {
 		if err := g.hasIP(ctx, mac, ip, ts, ts, "traffic"); err != nil {
 			return 0, "", err
 		}
@@ -599,6 +680,14 @@ func (g *ingester) deviceFor(ctx context.Context, ip netip.Addr, mac string, ts 
 		return b.device, "", nil
 	}
 	return 0, "", nil
+}
+
+// normMACOr is normMAC for a lookup: the canonical form, or s unchanged.
+func normMACOr(s string) string {
+	if m, ok := normMAC(s); ok {
+		return m
+	}
+	return s
 }
 
 func isGroupMAC(mac string) bool {
@@ -1264,6 +1353,12 @@ func (g *ingester) wifi(ctx context.Context, sid, ts int64, w *wire.WiFi) error 
 			if w.EAPOL.Installed {
 				attrs["installed"] = "1"
 			}
+			if w.EAPOL.Group {
+				attrs["group"] = "1"
+			}
+			if w.EAPOL.GTK {
+				attrs["gtk"] = "1"
+			}
 		}
 		if err := g.fact(ctx, model.RelHandshake, dev, apDev, ts, ts, "wifi", attrs); err != nil {
 			return err
@@ -1302,6 +1397,34 @@ func (g *ingester) wifiKey(ctx context.Context, sid, ts int64, w *wire.WiFiKey) 
 			key_version = excluded.key_version, sensor_id = excluded.sensor_id, ts = excluded.ts
 		WHERE excluded.ts >= wifi_handshakes.ts`,
 		bssid, sta, w.SSID, strings.ToLower(w.ANonce), strings.ToLower(w.SNonce), w.KeyVersion, sid, ts)
+	return err
+}
+
+// wifiGTK persists an AP's group key as it was sent to a client, still
+// wrapped with the client's KEK (see WiFiGTK), latest per (AP, key ID).
+// Every field is checked: a malformed record is dropped, not stored.
+func (g *ingester) wifiGTK(ctx context.Context, sid, ts int64, w *wire.WiFiGTK) error {
+	bssid, ok1 := normMAC(w.BSSID)
+	sta, ok2 := normMAC(w.STA)
+	hexLen := func(s string, min, max int) bool {
+		b, err := hex.DecodeString(s)
+		return err == nil && len(b) >= min && len(b) <= max
+	}
+	if !ok1 || !ok2 || w.SSID == "" || len(w.SSID) > 32 || w.KeyID < 0 || w.KeyID > 3 ||
+		(w.Descriptor != 2 && w.Descriptor != 254) || w.KeyInfo < 0 || w.KeyInfo > 0xffff || w.KeyLength < 0 || w.KeyLength > 0xffff ||
+		!hexLen(w.ANonce, 32, 32) || !hexLen(w.SNonce, 32, 32) || !hexLen(w.IV, 16, 16) || !hexLen(w.KeyData, 1, 512) {
+		return nil
+	}
+	_, err := g.tx.ExecContext(ctx, `
+		INSERT INTO wifi_group_keys (bssid, key_id, sta, ssid, anonce, snonce, descriptor, key_info, key_length, iv, key_data, sensor_id, ts)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(bssid, key_id) DO UPDATE SET
+			sta = excluded.sta, ssid = excluded.ssid, anonce = excluded.anonce, snonce = excluded.snonce,
+			descriptor = excluded.descriptor, key_info = excluded.key_info, key_length = excluded.key_length,
+			iv = excluded.iv, key_data = excluded.key_data, sensor_id = excluded.sensor_id, ts = excluded.ts
+		WHERE excluded.ts >= wifi_group_keys.ts`,
+		bssid, w.KeyID, sta, w.SSID, strings.ToLower(w.ANonce), strings.ToLower(w.SNonce), w.Descriptor, w.KeyInfo, w.KeyLength,
+		strings.ToLower(w.IV), strings.ToLower(w.KeyData), sid, ts)
 	return err
 }
 

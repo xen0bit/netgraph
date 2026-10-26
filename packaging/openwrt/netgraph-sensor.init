@@ -10,17 +10,15 @@ STOP=10
 
 start_service() {
 	config_load netgraph
-	local iface server token_file wifi_key_file wifi_hop wifi_channels
+	local iface server token_file wifi_hop wifi_channels
 	config_get iface sensor iface br-lan
 	config_get server sensor server
 	config_get token_file sensor token_file /etc/netgraph/sensor.token
-	config_get wifi_key_file sensor wifi_key_file
 	config_get_bool wifi_hop sensor wifi_hop 0
 	config_get wifi_channels sensor wifi_channels
 	[ -n "$server" ] || { echo "netgraph.sensor.server is not set" >&2; return 1; }
 
 	set -- /usr/bin/netgraph-sensor run -iface "$iface" -server "$server" -token-file "$token_file"
-	[ -n "$wifi_key_file" ] && set -- "$@" -wifi-key-file "$wifi_key_file"
 	[ "$wifi_hop" = 1 ] && set -- "$@" -wifi-hop
 	[ -n "$wifi_channels" ] && set -- "$@" -wifi-channels "$wifi_channels"
 

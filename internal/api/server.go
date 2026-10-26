@@ -6,9 +6,11 @@ package api
 
 import (
 	"bytes"
+	"cmp"
 	"compress/gzip"
 	"context"
 	"crypto/subtle"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,15 +19,19 @@ import (
 	"log/slog"
 	"net/http"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	"github.com/xen0bit/netgraph/internal/alert"
 	"github.com/xen0bit/netgraph/internal/buildinfo"
 	"github.com/xen0bit/netgraph/internal/graph"
 	"github.com/xen0bit/netgraph/internal/graph/d2render"
 	"github.com/xen0bit/netgraph/internal/model"
 	"github.com/xen0bit/netgraph/internal/store"
+	"github.com/xen0bit/netgraph/internal/wifi"
 	"github.com/xen0bit/netgraph/internal/wire"
 )
 
@@ -40,16 +46,29 @@ type Config struct {
 	// serves a page saying the UI was not built in.
 	Web    fs.FS
 	Logger *slog.Logger
+	// WiFi holds the Wi-Fi keys served to sensors; nil serves none. They
+	// are only served when IngestToken is set.
+	WiFi *wifi.Secrets
+	// Alerts reports the new-device notifier's counters for /metrics;
+	// nil when alerts are off.
+	Alerts func() alert.Stats
 	// MaxBatch bounds an ingest request body (compressed); default 32 MiB.
 	MaxBatch int64
 }
 
 // Server serves the API.
 type Server struct {
-	cfg Config
-	mux *http.ServeMux
-	log *slog.Logger
+	cfg  Config
+	mux  *http.ServeMux
+	log  *slog.Logger
+	keys atomic.Pointer[wifi.Secrets]
+
+	ingestStats ingestMetrics
 }
+
+// SetWiFi replaces the Wi-Fi keys served to sensors, such as after the key
+// file is reloaded. Sensors pick them up on their next sync.
+func (s *Server) SetWiFi(sec *wifi.Secrets) { s.keys.Store(sec) }
 
 // New returns a Server.
 func New(cfg Config) *Server {
@@ -60,8 +79,9 @@ func New(cfg Config) *Server {
 		cfg.MaxBatch = 32 << 20
 	}
 	s := &Server{cfg: cfg, mux: http.NewServeMux(), log: cfg.Logger}
+	s.keys.Store(cfg.WiFi)
 	s.mux.HandleFunc("POST /api/v1/ingest", s.ingest)
-	s.mux.HandleFunc("GET /api/v1/wifi/handshakes", s.wifiHandshakes)
+	s.mux.HandleFunc("GET /api/v1/wifi/keys", s.wifiKeys)
 	s.mux.HandleFunc("GET /api/v1/version", s.version)
 	s.mux.HandleFunc("GET /healthz", s.version)
 	read := func(p string, h http.HandlerFunc) { s.mux.Handle("GET "+p, s.requireRead(h)) }
@@ -76,6 +96,8 @@ func New(cfg Config) *Server {
 	read("/api/v1/sensors", s.sensors)
 	read("/api/v1/wifi", s.wifi)
 	read("/api/v1/live", s.live)
+	read("/metrics", s.metrics)
+	s.mux.Handle("PUT /api/v1/devices/{mac}/label", s.requireRead(http.HandlerFunc(s.setLabel)))
 	s.mux.HandleFunc("GET /", s.web)
 	return s
 }
@@ -163,12 +185,15 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, err)
 		return
 	}
+	start := time.Now()
 	res, err := s.cfg.Store.Ingest(r.Context(), sensor, r.Header.Get(wire.HeaderBoot), events)
 	if err != nil {
+		s.ingestStats.errors.Add(1)
 		s.log.Error("ingest", "sensor", sensor, "events", len(events), "err", err)
 		httpError(w, http.StatusInternalServerError, errors.New("ingest failed"))
 		return
 	}
+	s.ingestStats.observe(res.Accepted, res.Duplicates, time.Since(start))
 	s.log.Debug("ingested", "sensor", sensor, "accepted", res.Accepted, "duplicates", res.Duplicates)
 	writeJSON(w, map[string]int{"accepted": res.Accepted, "duplicates": res.Duplicates})
 }
@@ -204,6 +229,10 @@ func (s *Server) fail(w http.ResponseWriter, err error) {
 		httpError(w, http.StatusNotFound, err)
 		return
 	}
+	if errors.Is(err, store.ErrInvalid) {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
 	if errors.Is(err, context.Canceled) {
 		return
 	}
@@ -234,22 +263,62 @@ func (s *Server) wifi(w http.ResponseWriter, r *http.Request) {
 	answer(s, w, r, s.cfg.Store.WiFi)
 }
 
-// wifiHandshakes hands a sensor the stored handshake nonces so it can
-// re-derive pairwise keys after a restart, or learn keys another sensor
-// found. It is authorised with the ingest token (the sensor's own
-// credential): the response is public nonce material, useless without the
-// network passphrase, which stays on the sensor.
-func (s *Server) wifiHandshakes(w http.ResponseWriter, r *http.Request) {
+// wifiKeys hands a sensor what it needs to decrypt Wi-Fi: the PMKs and WEP
+// keys from the server's key file, and the stored handshake nonces and
+// wrapped group keys so it can re-derive pairwise and group keys after a
+// restart, or learn keys another sensor found. It is authorised with the ingest token (the sensor's own
+// credential), and keys are never served without one.
+func (s *Server) wifiKeys(w http.ResponseWriter, r *http.Request) {
 	if !tokenOK(r, s.cfg.IngestToken) {
 		httpError(w, http.StatusUnauthorized, errors.New("missing or wrong ingest token"))
 		return
 	}
-	v, err := s.cfg.Store.WiFiHandshakes(r.Context())
+	hs, err := s.cfg.Store.WiFiHandshakes(r.Context())
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, errors.New("query failed"))
 		return
 	}
-	writeJSON(w, v)
+	gks, err := s.cfg.Store.WiFiGroupKeys(r.Context())
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, errors.New("query failed"))
+		return
+	}
+	out := wire.WiFiKeys{PMKs: []wire.WiFiPMK{}, WEP: []wire.WiFiWEP{}, Handshakes: hs, GroupKeys: gks}
+	if sec := s.keys.Load(); sec != nil && s.cfg.IngestToken != "" {
+		for ssid, pmk := range sec.PMKs {
+			out.PMKs = append(out.PMKs, wire.WiFiPMK{SSID: ssid, PMK: hex.EncodeToString(pmk)})
+		}
+		slices.SortFunc(out.PMKs, func(a, b wire.WiFiPMK) int { return cmp.Compare(a.SSID, b.SSID) })
+		for i, k := range sec.WEP {
+			if k != nil {
+				out.WEP = append(out.WEP, wire.WiFiWEP{Index: i, Key: hex.EncodeToString(k)})
+			}
+		}
+	}
+	writeJSON(w, out)
+}
+
+// setLabel names a device by hand ({"label": ""} clears the name). It is
+// authorised like the UI that calls it, with the read token. A JSON body is
+// required, so a cross-origin page cannot send it without a CORS preflight,
+// which this server never grants.
+func (s *Server) setLabel(w http.ResponseWriter, r *http.Request) {
+	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		httpError(w, http.StatusUnsupportedMediaType, errors.New("expected application/json"))
+		return
+	}
+	var body struct {
+		Label *string `json:"label"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil || body.Label == nil {
+		httpError(w, http.StatusBadRequest, errors.New(`expected {"label": "..."}`))
+		return
+	}
+	if err := s.cfg.Store.SetDeviceLabel(r.Context(), r.PathValue("mac"), *body.Label); err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) timeseries(w http.ResponseWriter, r *http.Request) {

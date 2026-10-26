@@ -51,14 +51,64 @@ netgraph serve -db /var/lib/netgraph/netgraph.db -listen :8443
 | `-token-file` | `$NETGRAPH_TOKEN` | ingest token; required unless `-no-auth` |
 | `-read-token-file` | `$NETGRAPH_READ_TOKEN` | query token; when empty, queries and the UI are open (a warning is logged) |
 | `-tls-cert`, `-tls-key` | | serve HTTPS |
+| `-wifi-key-file` | `$NETGRAPH_WIFI_KEY_FILE` | WPA/WPA2 passphrases, PMKs and WEP keys for Wi-Fi sensors ([Wi-Fi capture](#wi-fi-capture)); needs an ingest token |
 | `-raw-retention` | `14d` | keep raw connections, lookups and observations |
 | `-rollup-retention` | `180d` | keep hourly rollups and facts |
 | `-exact-max` | `48h` | longer windows are answered from hourly rollups |
 | `-fact-gap` | `1h` | silence after which a relationship starts a new period |
+| `-alert-webhook` | `$NETGRAPH_ALERT_WEBHOOK` | POST a JSON alert when a new device joins ([alerts](#new-device-alerts)) |
+| `-alert-learn` | `24h` | learn the network this long after the first sensor connects before alerting |
 | `-web-dir` | | serve the UI from a directory instead of the embedded copy |
 
 Retention runs hourly. Back up a live database with `netgraph db backup
 -db netgraph.db backup.db`.
+
+### Monitoring
+
+`GET /metrics` serves Prometheus metrics, behind the read token when one
+is set. Sensors report their counters to the server, so one scrape covers
+every sensor, labelled `sensor="<name>"`:
+
+```yaml
+scrape_configs:
+  - job_name: netgraph
+    scheme: https
+    authorization: { credentials_file: /etc/prometheus/netgraph.token }
+    static_configs: [{ targets: ["netgraph.lan:8443"] }]
+```
+
+Worth alerting on: `time() - netgraph_sensor_last_seen_timestamp_seconds`
+(a sensor went quiet), `rate(netgraph_sensor_kernel_drops_total[5m])`
+(capture overload), `rate(netgraph_sensor_events_dropped_total[5m])` (the
+server was unreachable longer than the spool lasts), and
+`netgraph_ingest_errors_total`.
+
+### New-device alerts
+
+With `-alert-webhook URL`, the server posts an alert the first time a
+device uses an address on the LAN: a phone, laptop or plug joining your
+network. Devices merely heard over the air by a Wi-Fi sensor (access
+points, passers-by probing for networks) do not count, and neither does the
+router itself. For `-alert-learn` (default `24h`) after the first sensor
+connects nothing is sent, so a new install learns the house quietly; the
+devices already in an upgraded database are never reported.
+
+The body is JSON that Slack, Mattermost and Discord webhooks accept as-is,
+and that anything else can read:
+
+```json
+{"event": "new_device",
+ "text": "New device on the network: alice-iphone (192.168.1.23, 3c:22:fb:01:02:03, Apple, Inc.)",
+ "content": "…same as text…",
+ "device": {"id": "device:3c:22:fb:01:02:03", "mac": "3c:22:fb:01:02:03", "label": "alice-iphone",
+            "vendor": "Apple, Inc.", "ip": "192.168.1.23", "sensor": "router", "ts": "2026-10-26T12:00:00Z"},
+ "allowed_mentions": {"parse": []}}
+```
+
+Device names come from the LAN, so the text has mentions (`@everyone`),
+markup (`<!channel>`) and control characters neutralised; `device` carries
+the raw values. Delivery is retried three times with backoff; alerts are
+not stored, so ones queued when the server stops are lost.
 
 **Sizing.** Storage depends on how many connections the network makes. A
 busy synthetic home (40 devices, 120k connections a day) needs about
@@ -84,11 +134,12 @@ netgraph-sensor run -iface br-lan -server https://netgraph.lan:8443 -token-file 
 | `-tcp-idle`, `-udp-idle` | `5m`, `60s` | silence after which a connection is considered gone |
 | `-max-flows` | `65536` | tracked connections; about 720 B each |
 | `-spool-mb` | `32` | batches held while the server is unreachable; oldest dropped beyond |
+| `-flush` | `2s` | send batches at least this often |
+| `-log-level`, `-log-format` | `info`, `text` | `debug`/`info`/`warn`/`error`; `text` or `json` (the server takes the same two) |
 | `-mem-limit-mb` | `128` | Go soft memory limit (unless `$GOMEMLIMIT`) |
 | `-ring-mb` | `8` | AF_PACKET ring per interface |
 | `-rdns` | on | reverse DNS for local hosts while they are observed (live capture only) |
 | `-rdns-timeout`, `-rdns-workers`, `-rdns-ttl` | `2s`, `4`, `1h` | lookup bound, concurrency and answer cache |
-| `-wifi-key-file` | `$NETGRAPH_WIFI_KEY_FILE` | WPA/WPA2 passphrases, PMKs and WEP keys |
 | `-wifi-hop`, `-wifi-channels`, `-wifi-dwell` | off, common 2.4/5 GHz, `250ms` | channel hopping on monitor interfaces |
 | `-wifi-data` | off | emit one event per data frame (noisy; management and handshakes are always reported) |
 
@@ -144,7 +195,7 @@ The sensor never changes the interface type; it only sets the channel (with
 
 ```sh
 netgraph-sensor run -iface wlan1 -server https://netgraph.lan:8443 \
-  -wifi-key-file /etc/netgraph/wifi.keys -wifi-hop -wifi-channels 1,6,11,36,40,44,48,149
+  -wifi-hop -wifi-channels 1,6,11,36,40,44,48,149
 ```
 
 **Hopping vs. pinning.** `-wifi-hop` tunes the wireless extensions ioctl
@@ -169,12 +220,24 @@ A dual-band SSID runs a separate AP (and BSSID) per band, often on very
 different channels. Decryption is per-AP, so pin to the band/channel the
 target device actually uses — many clients prefer 5 GHz.
 
-**Keys** are read from a root-only file, never from flags, so they do not
-appear in `ps` or a shell history. One line per *distinct SSID* (the WPA2
-key is derived from the passphrase and the SSID, so the same SSID on both
-bands needs only one line):
+**Keys are configured on the server**, never on the sensor: the sensor has
+no key file and writes nothing to disk. Give `netgraph serve` a root-only
+key file with `-wifi-key-file` (never flags, so keys do not appear in `ps`
+or a shell history). The server turns each passphrase into its PMK and
+serves the PMKs and WEP keys — not the passphrases — to sensors that present
+the ingest token. A sensor fetches them into memory before it starts
+capturing and again every minute. After editing the file, send the server
+`SIGHUP` (`kill -HUP`, or `docker kill -s HUP <container>`) to reload it
+without a restart; a file that fails to parse is logged and the previous
+keys stay in use. The change reaches every sensor within a minute, and a
+removed network's keys are dropped from the sensors' memory. Because
+the PMKs travel to the sensors, serve over HTTPS (`-tls-cert`) or a TLS
+proxy unless the sensor link is trusted; the server warns otherwise. One
+line per *distinct SSID* (the WPA2 key is derived from the passphrase and
+the SSID, so the same SSID on both bands needs only one line):
 
 ```sh
+# on the server
 sudo mkdir -p /etc/netgraph
 sudo install -m 600 /dev/null /etc/netgraph/wifi.keys
 sudo tee /etc/netgraph/wifi.keys >/dev/null <<'EOF'
@@ -186,7 +249,14 @@ pmk some-eap-net 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcde
 # WEP: <index 0-3> <5, 13 or 16 bytes of hex>
 wep 0 0102030405
 EOF
+netgraph serve -token-file /etc/netgraph/server.token -wifi-key-file /etc/netgraph/wifi.keys ...
 ```
+
+With the systemd unit, drop the file at `/etc/netgraph/wifi.keys` and add
+`-wifi-key-file ${CREDENTIALS_DIRECTORY}/wifi-keys` to
+`/etc/netgraph/server.conf`. systemd copies credentials when the service
+starts, so after editing the file use `systemctl restart netgraph` rather
+than a reload.
 
 **What can be decrypted — WPA2-PSK yes, WPA3-SAE no.** For WPA2-PSK the
 pairwise master key is `PBKDF2(passphrase, SSID)`, a static value, so knowing
@@ -214,13 +284,13 @@ need no keys.
 **Keys survive restarts, and sync across sensors, through the server** — no
 configuration needed. Pairwise keys live only in sensor memory, but when a
 sensor installs one it ships the handshake's public nonces to the server,
-which keeps the latest per client. On startup (and every few minutes) a
-sensor fetches them and re-derives the keys from its own key file, so a
-restarted sensor recovers its decryption coverage, and a second sensor
-decrypts clients whose handshake another sensor caught. No key, passphrase
-or MIC ever leaves a sensor, and nothing is written to the sensor's disk —
-only the cleartext-broadcast nonces are stored, on the server, and they
-decrypt nothing without the passphrase.
+which keeps the latest per client. Each key fetch returns them alongside
+the PMKs, and the sensor re-derives the pairwise keys, so a restarted sensor
+recovers its decryption coverage, and a second sensor decrypts clients whose
+handshake another sensor caught. No key or MIC is ever sent by a sensor, and
+nothing is written to the sensor's disk. The server stores only the
+cleartext-broadcast nonces; the key file stays a file and is never copied
+into the database.
 
 If the interface is not in monitor mode, or no packets are 802.11, the
 sensor treats it as Ethernet. Channel hopping is only started for interfaces

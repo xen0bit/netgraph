@@ -5,17 +5,21 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/xen0bit/netgraph/internal/alert"
 	"github.com/xen0bit/netgraph/internal/api"
 	"github.com/xen0bit/netgraph/internal/buildinfo"
 	"github.com/xen0bit/netgraph/internal/model"
 	"github.com/xen0bit/netgraph/internal/store"
+	"github.com/xen0bit/netgraph/internal/wifi"
 	"github.com/xen0bit/netgraph/web"
 )
 
@@ -28,6 +32,9 @@ func runServe(args []string) error {
 	noAuth := fs.Bool("no-auth", false, "accept ingest without a token (trusted networks only)")
 	cert := fs.String("tls-cert", "", "TLS certificate (PEM)")
 	key := fs.String("tls-key", "", "TLS key (PEM)")
+	wifiKeyFile := fs.String("wifi-key-file", envOr("NETGRAPH_WIFI_KEY_FILE", ""), "WPA/WPA2 passphrases, PMKs and WEP keys served to sensors for Wi-Fi decryption; $NETGRAPH_WIFI_KEY_FILE")
+	alertURL := fs.String("alert-webhook", envOr("NETGRAPH_ALERT_WEBHOOK", ""), "POST a JSON alert here when a new device joins the network; $NETGRAPH_ALERT_WEBHOOK")
+	alertLearn := fs.String("alert-learn", "24h", "after the first sensor connects, learn the network this long before alerting on new devices")
 	webDir := fs.String("web-dir", "", "serve the web UI from this directory instead of the embedded copy")
 	raw := fs.String("raw-retention", "14d", "keep raw flows, DNS and observations this long")
 	rollup := fs.String("rollup-retention", "180d", "keep hourly rollups and facts this long")
@@ -50,6 +57,15 @@ func runServe(args []string) error {
 	if ingestTok == "" && !*noAuth {
 		return errors.New("no ingest token: set $NETGRAPH_TOKEN or -token-file (or pass -no-auth on a trusted network)")
 	}
+	var wifiKeys *wifi.Secrets
+	if *wifiKeyFile != "" {
+		if ingestTok == "" {
+			return errors.New("-wifi-key-file needs an ingest token: Wi-Fi keys are only served to authenticated sensors")
+		}
+		if wifiKeys, err = wifi.LoadKeyFile(*wifiKeyFile); err != nil {
+			return fmt.Errorf("wifi keys: %w", err)
+		}
+	}
 	rawD, err := model.ParseDuration(*raw)
 	if err != nil {
 		return fmt.Errorf("-raw-retention: %w", err)
@@ -66,19 +82,36 @@ func runServe(args []string) error {
 	if err != nil {
 		return fmt.Errorf("-exact-max: %w", err)
 	}
-	st, err := store.Open(*db, store.Config{RawRetention: rawD, RollupRetention: rollD, FactGap: gapD, ExactMax: exactD, Logger: log})
+	learnD, err := model.ParseDuration(*alertLearn)
+	if err != nil {
+		return fmt.Errorf("-alert-learn: %w", err)
+	}
+	var notifier *alert.Notifier
+	var onNew func(store.NewDevice)
+	if *alertURL != "" {
+		if u, err := url.Parse(*alertURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("-alert-webhook: want an http(s) URL")
+		}
+		notifier = alert.New(alert.Config{URL: *alertURL, Learn: learnD, Logger: log})
+		onNew = notifier.Notify
+	}
+	st, err := store.Open(*db, store.Config{RawRetention: rawD, RollupRetention: rollD, FactGap: gapD, ExactMax: exactD, Logger: log, OnNewDevice: onNew})
 	if err != nil {
 		return err
 	}
 	defer st.Close()
 
-	cfg := api.Config{Store: st, IngestToken: ingestTok, ReadToken: readTok, Web: web.FS, Logger: log}
+	cfg := api.Config{Store: st, IngestToken: ingestTok, ReadToken: readTok, WiFi: wifiKeys, Web: web.FS, Logger: log}
+	if notifier != nil {
+		cfg.Alerts = notifier.Stats
+	}
 	if *webDir != "" {
 		cfg.Web = os.DirFS(*webDir)
 	}
+	apiSrv := api.New(cfg)
 	srv := &http.Server{
 		Addr:              *listen,
-		Handler:           api.New(cfg),
+		Handler:           apiSrv,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 		ErrorLog:          nil,
@@ -86,6 +119,14 @@ func runServe(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go st.RunRetention(ctx, time.Hour)
+	if notifier != nil {
+		notifier.SetSince(st.FirstSensorSeen)
+		go notifier.Run(ctx)
+		log.Info("new-device alerts on", "learn", learnD)
+	}
+	if *wifiKeyFile != "" {
+		go reloadWiFiKeys(ctx, *wifiKeyFile, apiSrv, log)
+	}
 
 	ln, err := net.Listen("tcp", *listen)
 	if err != nil {
@@ -98,6 +139,12 @@ func runServe(args []string) error {
 	if readTok == "" {
 		if host, _, _ := net.SplitHostPort(*listen); host == "" || !net.ParseIP(host).IsLoopback() {
 			log.Warn("queries and the web UI are open to anyone who can reach this port; set $NETGRAPH_READ_TOKEN to require a token")
+		}
+	}
+	if wifiKeys != nil {
+		log.Info("serving wifi keys to sensors", "networks", len(wifiKeys.PMKs))
+		if *cert == "" {
+			log.Warn("wifi keys are sent to sensors without TLS; use -tls-cert, or a TLS proxy, unless the sensor link is trusted")
 		}
 	}
 	if cfg.Web == nil {
@@ -121,4 +168,27 @@ func runServe(args []string) error {
 	sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return srv.Shutdown(sctx)
+}
+
+// reloadWiFiKeys re-reads the Wi-Fi key file on SIGHUP, so adding or
+// revoking a network's key needs no restart. A file that fails to parse is
+// logged and the keys already loaded stay in use.
+func reloadWiFiKeys(ctx context.Context, path string, srv *api.Server, log *slog.Logger) {
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-hup:
+			sec, err := wifi.LoadKeyFile(path)
+			if err != nil {
+				log.Error("reload wifi keys; keeping the previous keys", "file", path, "err", err)
+				continue
+			}
+			srv.SetWiFi(sec)
+			log.Info("reloaded wifi keys", "networks", len(sec.PMKs))
+		}
+	}
 }

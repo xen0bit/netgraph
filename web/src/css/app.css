@@ -125,6 +125,9 @@ td .sub { color: var(--fg-2); font-size: 12px; }
 .panel .close { position: absolute; top: 10px; right: 10px; }
 .panel h2 { margin: 0 32px 2px 0; font-size: 18px; word-break: break-word; }
 .panel h3 { margin: 18px 0 6px; font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--fg-2); }
+.panel form.rename { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin: 10px 0 4px; }
+.panel form.rename input { flex: 1 1 12em; min-width: 0; }
+.panel form.rename output { flex-basis: 100%; font-size: 12px; }
 .panel dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 8px 0; font-size: 13px; }
 .panel dt { color: var(--fg-2); }
 .panel dd { margin: 0; word-break: break-word; }

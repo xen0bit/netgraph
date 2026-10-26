@@ -22,7 +22,7 @@ Times in responses are unix milliseconds.
 | Endpoint | Returns |
 |---|---|
 | `GET /api/v1/summary` | `{devices, flows, peak_connections, dns_queries, domains, remote_ips, bytes_out, bytes_in, precision, ...}` |
-| `GET /api/v1/devices` | `[{id, mac, label, vendor, vendor_short, randomized, role, ips, hostnames, services, fingerprints, user_agents, flows, dns_queries, bytes_out, bytes_in, remotes, active_from, active_to, first_seen, last_seen}]` |
+| `GET /api/v1/devices` | `[{id, mac, label, user_label, auto_label, vendor, vendor_short, randomized, role, ips, hostnames, services, fingerprints, user_agents, flows, dns_queries, bytes_out, bytes_in, remotes, active_from, active_to, first_seen, last_seen}]` |
 | `GET /api/v1/flows` | `[{key, proto, client_ip, client_port, device, device_name, remote_ip, remote_port, direction, app, name, sni, http_host, qname, alpn, ja4, user_agent, first_seen, last_seen, state, closed, end_reason, bytes_out, bytes_in, pkts_out, pkts_in}]`, busiest first |
 | `GET /api/v1/dns` | `[{ts, client_ip, device, device_name, server, qname, qtype, rcode, latency_ms, answers: [{name, type, data, ttl, expires}]}]`, newest first |
 | `GET /api/v1/facts` | `[{rel, src, src_label, dst, dst_label, first_seen, last_seen, count, source, attrs}]` |
@@ -33,6 +33,8 @@ Times in responses are unix milliseconds.
 | `GET /api/v1/sensors` | `[{name, version, interfaces, first_seen, last_seen, stats}]` |
 | `GET /api/v1/wifi` | `[{bssid, ssid, security, channel, clients, first_seen, last_seen}]`, from monitor-mode sensors |
 | `GET /api/v1/live` | server-sent events: `event: ingest` with `[{type, ts, detail}]` per batch |
+| `PUT /api/v1/devices/{mac}/label` | names a device by hand: body `{"label": "Living room TV"}` (JSON required; at most 64 printable characters), `{"label": ""}` restores the automatic name. `204`, or `400`/`404`. Read token |
+| `GET /metrics` | Prometheus text: ingest counters, each sensor's last reported stats (packets, kernel drops, queued and dropped events, ...), entities by kind, database size, alert outcomes. Read token |
 | `GET /api/v1/version`, `/healthz` | `{version, commit}`; no token needed |
 
 Graph options: `collapse=0|1` (default 1), `dns=0|1` (1), `identity=0|1`
@@ -58,11 +60,13 @@ Sensors `POST /api/v1/ingest` with:
 The body is newline-delimited JSON events, each `{seq, type, ts, <type>:
 {...}}`, as defined in [`internal/wire/event.go`](../internal/wire/event.go).
 Event types are `hello`, `stats`, `flow`, `dns`, `binding`, `dhcp`, `mdns`,
-`name`, `ssdp`, `lldp`, `wifi` and `wifi_key`. A `name` from reverse DNS has
-`"proto":"rdns"`; a `wifi` event describes an access point, client,
-association or handshake and never carries key material. A `wifi_key` event
-carries a handshake's public nonces so keys survive a sensor restart and sync
-across sensors (see below); it holds no key, PMK or MIC. Events with a
+`name`, `ssdp`, `lldp`, `wifi`, `wifi_key` and `wifi_gtk`. A `name` from
+reverse DNS has `"proto":"rdns"`; a `wifi` event describes an access point,
+client, association or handshake and never carries key material. A
+`wifi_key` event carries a handshake's public nonces, and a `wifi_gtk` event
+an AP's group key still wrapped with a client's KEK, so keys survive a
+sensor restart and sync across sensors (see [Wi-Fi keys](#wi-fi-keys));
+neither holds a usable key. Events with a
 `seq` at or below the last one ingested for that sensor boot are skipped, so
 retries are safe. The response is `{accepted, duplicates}`. Anything that
 can produce these events can feed netgraph:
@@ -73,13 +77,29 @@ curl -X POST -H "Authorization: Bearer $NETGRAPH_TOKEN" -H "X-Netgraph-Sensor: t
   --data-binary @events.jsonl http://netgraph.lan:8443/api/v1/ingest
 ```
 
-### Wi-Fi handshake sync
+### Wi-Fi keys
 
-`GET /api/v1/wifi/handshakes` returns the stored handshake nonce records a
-sensor uses to re-derive WPA pairwise keys after a restart, or to pick up
-keys another sensor found. It is authorised with the **ingest** token (it is
-sensor infrastructure), and sensors call it automatically on startup and
-every few minutes. Each record is `{bssid, sta, ssid, anonce, snonce,
-key_version}`. These are the nonces broadcast in the clear during the 4-way
-handshake — not key material — and are useless without the network
-passphrase, which never leaves the sensor.
+`GET /api/v1/wifi/keys` returns what a sensor needs to decrypt Wi-Fi. It is
+authorised with the **ingest** token (it is sensor infrastructure), and
+sensors call it automatically on startup and every minute. The response is
+`{pmks, wep, handshakes, group_keys}`:
+
+- `pmks`: `[{ssid, pmk}]`, the 32-byte PMK (hex) for each network in the
+  server's `-wifi-key-file`. Passphrases are not sent; the server derives
+  the PMKs.
+- `wep`: `[{index, key}]`, the configured WEP keys (hex).
+- `handshakes`: `[{bssid, sta, ssid, anonce, snonce, key_version}]`, the
+  latest stored 4-way handshake nonces per client, from `wifi_key` events.
+  These are broadcast in the clear and decrypt nothing on their own; with a
+  network's PMK they let a restarted or additional sensor re-derive the
+  pairwise key without seeing the handshake again.
+
+- `group_keys`: `[{bssid, sta, ssid, key_id, anonce, snonce, descriptor,
+  key_info, key_length, iv, key_data, ts}]`, the latest group key per AP and
+  key ID from `wifi_gtk` events: the EAPOL-Key fields with `key_data` still
+  wrapped by the client's KEK. A sensor re-derives that KEK from the PMK and
+  the nonces and unwraps the GTK, so it decrypts the AP's broadcasts
+  without waiting for a rekey.
+
+`pmks` and `wep` are empty unless the server has a key file **and** an
+ingest token; a server started with `-no-auth` never serves keys.

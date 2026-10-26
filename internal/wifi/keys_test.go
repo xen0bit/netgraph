@@ -75,26 +75,25 @@ func TestHandshakeDerivesPTKAndDecrypts(t *testing.T) {
 }
 
 func TestParseKeyFile(t *testing.T) {
-	k, err := ParseKeyFile(strings.NewReader(`
+	s, err := ParseKeyFile(strings.NewReader(`
 # comment
-wpa2 home pass phrase with spaces
+wpa2 Home pass phrase with spaces
 wep 1 0102030405060708090a0b0c0d
 pmk sae 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f
 `))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if pmk := k.pmkFor("home"); len(pmk) != 32 {
-		t.Errorf("home PMK length %d", len(pmk))
+	// The PMK is salted with the SSID as written, and looked up lower-case.
+	want, _ := PMK("pass phrase with spaces", "Home")
+	if !bytes.Equal(s.PMKs["home"], want) {
+		t.Errorf("home PMK = %x, want %x", s.PMKs["home"], want)
 	}
-	if pmk := k.pmkFor("sae"); len(pmk) != 32 {
+	if pmk := s.PMKs["sae"]; len(pmk) != 32 {
 		t.Errorf("SAE PMK length %d", len(pmk))
 	}
-	k.mu.RLock()
-	wep := k.wep[1]
-	k.mu.RUnlock()
-	if len(wep) != 13 {
-		t.Errorf("WEP key = %x", wep)
+	if len(s.WEP[1]) != 13 {
+		t.Errorf("WEP key = %x", s.WEP[1])
 	}
 	for _, bad := range []string{
 		"wpa2\n",
@@ -253,6 +252,59 @@ func TestHandshakeKnownAnswer(t *testing.T) {
 	}
 	if !ok {
 		t.Fatal("VerifyMIC rejected a MIC a real AP would accept (MIC must cover the 802.1X header)")
+	}
+}
+
+// TestSetSecrets checks that a sync replaces the keys, and that a pairwise key
+// goes away with the PMK it was derived from.
+func TestSetSecrets(t *testing.T) {
+	anonce := bytes.Repeat([]byte{0x11}, 32)
+	snonce := bytes.Repeat([]byte{0x22}, 32)
+	home, _ := PMK("correct horse battery", "home")
+	cafe, _ := PMK("espresso please", "cafe")
+	k := NewKeyring()
+	k.SetSecrets(&Secrets{PMKs: map[string][]byte{"home": home, "Cafe": cafe}, WEP: [4][]byte{0: {1, 2, 3, 4, 5}}})
+	for _, hs := range [][3]string{
+		{"aa:bb:cc:00:00:01", "02:00:00:00:00:01", "home"},
+		{"aa:bb:cc:00:00:02", "02:00:00:00:00:02", "cafe"},
+	} {
+		if ok, err := k.LoadHandshake(hs[0], hs[1], hs[2], anonce, snonce, 2); err != nil || !ok {
+			t.Fatalf("LoadHandshake %v: ok=%v err=%v", hs, ok, err)
+		}
+	}
+	if k.Keys() != 2 {
+		t.Fatalf("keys = %d, want 2", k.Keys())
+	}
+	// A resync of the same handshake keeps the key; a new handshake (the
+	// client reassociated) replaces it.
+	first := k.ptk("aa:bb:cc:00:00:01", "02:00:00:00:00:01")
+	if ok, err := k.LoadHandshake("aa:bb:cc:00:00:01", "02:00:00:00:00:01", "home", anonce, snonce, 2); err != nil || !ok {
+		t.Fatalf("reload: ok=%v err=%v", ok, err)
+	}
+	if k.ptk("aa:bb:cc:00:00:01", "02:00:00:00:00:01") != first {
+		t.Fatal("an unchanged handshake was re-derived")
+	}
+	if _, err := k.LoadHandshake("aa:bb:cc:00:00:01", "02:00:00:00:00:01", "home", anonce, bytes.Repeat([]byte{0x33}, 32), 2); err != nil {
+		t.Fatal(err)
+	}
+	if bytes.Equal(k.ptk("aa:bb:cc:00:00:01", "02:00:00:00:00:01").TK, first.TK) {
+		t.Fatal("a new handshake did not replace the key")
+	}
+	// The same secrets again keep both keys; dropping cafe drops its key.
+	k.SetSecrets(&Secrets{PMKs: map[string][]byte{"home": home, "cafe": cafe}})
+	if k.Keys() != 2 {
+		t.Fatalf("keys after identical sync = %d, want 2", k.Keys())
+	}
+	k.SetSecrets(&Secrets{PMKs: map[string][]byte{"home": home}})
+	if k.Keys() != 1 || k.ptk("aa:bb:cc:00:00:01", "02:00:00:00:00:01") == nil {
+		t.Fatalf("after revoking cafe: keys = %d", k.Keys())
+	}
+	if len(k.pmkFor("cafe")) != 0 || k.wep[0] != nil {
+		t.Fatal("revoked PMK or WEP key still present")
+	}
+	k.SetSecrets(nil)
+	if k.Keys() != 0 {
+		t.Fatalf("keys after clearing = %d", k.Keys())
 	}
 }
 

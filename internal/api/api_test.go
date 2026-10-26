@@ -5,9 +5,11 @@ import (
 	"bytes"
 	"compress/gzip"
 	"context"
+	"encoding/hex"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -19,6 +21,7 @@ import (
 	"github.com/xen0bit/netgraph/internal/sensor"
 	"github.com/xen0bit/netgraph/internal/store"
 	"github.com/xen0bit/netgraph/internal/testutil"
+	"github.com/xen0bit/netgraph/internal/wifi"
 	"github.com/xen0bit/netgraph/internal/wire"
 )
 
@@ -232,4 +235,185 @@ func gzipped(s string) []byte {
 	_, _ = zw.Write([]byte(s))
 	zw.Close()
 	return b.Bytes()
+}
+
+// TestWiFiKeys checks that sensors get the server's Wi-Fi keys and stored
+// handshakes with the ingest token, and that keys are never served without
+// one.
+func TestWiFiKeys(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "ng.db"), store.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	sec, err := wifi.ParseKeyFile(strings.NewReader("wpa2 Home correct horse battery\nwep 2 0102030405\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	hs := wire.WiFiKey{BSSID: "aa:bb:cc:00:00:01", STA: "02:00:00:00:00:01", SSID: "home",
+		ANonce: strings.Repeat("11", 32), SNonce: strings.Repeat("22", 32), KeyVersion: 2}
+	gk := wire.WiFiGTK{BSSID: hs.BSSID, STA: hs.STA, SSID: "home", KeyID: 1, ANonce: hs.ANonce, SNonce: hs.SNonce,
+		Descriptor: 2, KeyInfo: 0x13ca, KeyLength: 16, IV: strings.Repeat("00", 16), KeyData: strings.Repeat("ab", 32)}
+	if _, err := st.Ingest(context.Background(), "mon", "boot", []wire.Event{
+		{Seq: 1, Type: wire.TypeWiFiKey, TS: testutil.Base, WiFiKey: &hs},
+		{Seq: 2, Type: wire.TypeWiFiGTK, TS: testutil.Base, WiFiGTK: &gk},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fetch := func(cfg Config, token string) (*wire.WiFiKeys, error) {
+		cfg.Store, cfg.WiFi = st, sec
+		srv := httptest.NewServer(New(cfg))
+		defer srv.Close()
+		sh := wire.NewShipper(wire.ShipperConfig{URL: srv.URL, Token: token, Sensor: "mon"})
+		return sh.FetchWiFiKeys(context.Background())
+	}
+
+	if _, err := fetch(Config{IngestToken: "in-tok", ReadToken: "rd-tok"}, "rd-tok"); err == nil || !strings.Contains(err.Error(), "401") {
+		t.Fatalf("read token fetched wifi keys: %v", err)
+	}
+	got, err := fetch(Config{IngestToken: "in-tok"}, "in-tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pmk, _ := wifi.PMK("correct horse battery", "Home")
+	if len(got.PMKs) != 1 || got.PMKs[0].SSID != "home" || got.PMKs[0].PMK != hex.EncodeToString(pmk) {
+		t.Errorf("pmks = %+v", got.PMKs)
+	}
+	if len(got.WEP) != 1 || got.WEP[0].Index != 2 || got.WEP[0].Key != "0102030405" {
+		t.Errorf("wep = %+v", got.WEP)
+	}
+	if len(got.Handshakes) != 1 || got.Handshakes[0] != hs {
+		t.Errorf("handshakes = %+v", got.Handshakes)
+	}
+	if len(got.GroupKeys) != 1 || got.GroupKeys[0].KeyData != gk.KeyData || !got.GroupKeys[0].TS.Equal(testutil.Base) {
+		t.Errorf("group keys = %+v", got.GroupKeys)
+	}
+	// With no ingest token (-no-auth) the nonces are still shared, but no key.
+	got, err = fetch(Config{}, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.PMKs) != 0 || len(got.WEP) != 0 || len(got.Handshakes) != 1 {
+		t.Errorf("unauthenticated server served keys: %+v", got)
+	}
+}
+
+// SetWiFi swaps the served keys, as a SIGHUP reload of the key file does.
+func TestSetWiFi(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "ng.db"), store.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	api := New(Config{Store: st, IngestToken: "in-tok"})
+	srv := httptest.NewServer(api)
+	defer srv.Close()
+	sh := wire.NewShipper(wire.ShipperConfig{URL: srv.URL, Token: "in-tok", Sensor: "mon"})
+	for _, file := range []string{"wpa2 one aaaaaaaaaa\n", "wpa2 two bbbbbbbbbb\nwpa2 three cccccccccc\n"} {
+		sec, err := wifi.ParseKeyFile(strings.NewReader(file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		api.SetWiFi(sec)
+		got, err := sh.FetchWiFiKeys(context.Background())
+		if err != nil || len(got.PMKs) != len(sec.PMKs) {
+			t.Fatalf("after SetWiFi: %+v %v", got, err)
+		}
+	}
+}
+
+// A device is renamed through the API with the read token; a form post (what
+// a cross-site page could send without a preflight) is refused.
+func TestSetLabelAPI(t *testing.T) {
+	srv, _ := serve(t, nil)
+	ctx := context.Background()
+	c := apiclient.NewClient(srv.URL, "rd-tok")
+	mac := testutil.Phone.MAC.String()
+	if err := apiclient.NewClient(srv.URL, "in-tok").SetDeviceLabel(ctx, mac, "x"); err == nil || !strings.Contains(err.Error(), "401") {
+		t.Errorf("ingest token renamed a device: %v", err)
+	}
+	if err := c.SetDeviceLabel(ctx, mac, "Alice's phone"); err != nil {
+		t.Fatal(err)
+	}
+	devs, err := c.Devices(ctx, model.Filter{From: window.From, To: window.To, Device: mac})
+	if err != nil || len(devs) != 1 || devs[0].Label != "Alice's phone" || !devs[0].UserLabel {
+		t.Fatalf("devices = %+v %v", devs, err)
+	}
+	if err := c.SetDeviceLabel(ctx, "02:00:00:00:99:99", "x"); err == nil || !strings.Contains(err.Error(), "404") {
+		t.Errorf("unknown device: %v", err)
+	}
+	if err := c.SetDeviceLabel(ctx, mac, strings.Repeat("x", 100)); err == nil || !strings.Contains(err.Error(), "400") {
+		t.Errorf("long label: %v", err)
+	}
+	req, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/v1/devices/"+mac+"/label", strings.NewReader("label=pwned"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Authorization", "Bearer rd-tok")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnsupportedMediaType {
+		t.Errorf("form body: %s", resp.Status)
+	}
+}
+
+// /metrics is Prometheus text: read-token protected, one TYPE per metric,
+// and the sensor's stats and the server's ingest counters present.
+func TestMetrics(t *testing.T) {
+	srv, _ := serve(t, nil)
+	get := func(token string) (int, string) {
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/metrics", nil)
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var b strings.Builder
+		_, _ = bufio.NewReader(resp.Body).WriteTo(&b)
+		return resp.StatusCode, b.String()
+	}
+	if code, _ := get(""); code != http.StatusUnauthorized {
+		t.Errorf("anonymous /metrics: %d", code)
+	}
+	code, body := get("rd-tok")
+	if code != http.StatusOK {
+		t.Fatalf("/metrics: %d", code)
+	}
+	sample := regexp.MustCompile(`^[a-zA-Z_:][a-zA-Z0-9_:]*(\{([a-zA-Z_][a-zA-Z0-9_]*="([^"\\]|\\.)*",?)*\})? -?[0-9.eE+-]+$`)
+	types := map[string]bool{}
+	for _, line := range strings.Split(strings.TrimSpace(body), "\n") {
+		if name, ok := strings.CutPrefix(line, "# TYPE "); ok {
+			name = strings.Fields(name)[0]
+			if types[name] {
+				t.Errorf("duplicate TYPE for %s", name)
+			}
+			types[name] = true
+			continue
+		}
+		if strings.HasPrefix(line, "# HELP ") {
+			continue
+		}
+		if !sample.MatchString(line) {
+			t.Errorf("bad sample line %q", line)
+		}
+	}
+	for _, want := range []string{
+		`netgraph_ingest_batches_total `,
+		`netgraph_ingest_events_total{result="accepted"} `,
+		`netgraph_sensor_packets_total{sensor="router"} `,
+		`netgraph_sensor_last_seen_timestamp_seconds{sensor="router"} `,
+		`netgraph_entities{kind="device"} `,
+		`netgraph_db_size_bytes `,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing %q", want)
+		}
+	}
+	if strings.Contains(body, `netgraph_ingest_batches_total 0`) {
+		t.Error("ingest batches not counted")
+	}
 }

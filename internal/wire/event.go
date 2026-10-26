@@ -37,6 +37,7 @@ const (
 	TypeLLDP    Type = "lldp"     // an LLDP neighbour advertisement
 	TypeWiFi    Type = "wifi"     // a Wi-Fi network, client or handshake observation
 	TypeWiFiKey Type = "wifi_key" // handshake nonces, for restart persistence and cross-sensor sync
+	TypeWiFiGTK Type = "wifi_gtk" // a group key as the AP sent it (still wrapped), for the same
 )
 
 // Event is one observation. TS is when it was observed (the packet's capture
@@ -58,6 +59,7 @@ type Event struct {
 	LLDP    *LLDP    `json:"lldp,omitempty"`
 	WiFi    *WiFi    `json:"wifi,omitempty"`
 	WiFiKey *WiFiKey `json:"wifi_key,omitempty"`
+	WiFiGTK *WiFiGTK `json:"wifi_gtk,omitempty"`
 }
 
 // Hello describes the sensor and the interfaces it captures. The server uses
@@ -276,10 +278,52 @@ type WiFi struct {
 type WiFiKey struct {
 	BSSID      string `json:"bssid"`       // access point
 	STA        string `json:"sta"`         // client station
-	SSID       string `json:"ssid"`        // network name, to find the PMK in the key file
+	SSID       string `json:"ssid"`        // network name, to find the PMK
 	ANonce     string `json:"anonce"`      // authenticator nonce, hex (32 bytes)
 	SNonce     string `json:"snonce"`      // supplicant nonce, hex (32 bytes)
 	KeyVersion int    `json:"key_version"` // EAPOL descriptor version: 1 TKIP, 2 CCMP
+}
+
+// WiFiKeys is the Wi-Fi key material a sensor fetches from the server
+// (GET /api/v1/wifi/keys) and holds only in memory. The server derives the
+// PMKs from its key file, so a passphrase never travels.
+type WiFiKeys struct {
+	PMKs       []WiFiPMK `json:"pmks"`
+	WEP        []WiFiWEP `json:"wep"`
+	Handshakes []WiFiKey `json:"handshakes"`
+	GroupKeys  []WiFiGTK `json:"group_keys"`
+}
+
+// WiFiGTK is an access point's group key exactly as it went to one client:
+// the EAPOL-Key fields of message 3 or a group rekey, with the key data still
+// wrapped by that client's KEK, plus the handshake nonces the KEK comes from.
+// It holds no usable key: another sensor re-derives the KEK from its own PMK
+// and unwraps the GTK itself.
+type WiFiGTK struct {
+	BSSID      string    `json:"bssid"`
+	STA        string    `json:"sta"`         // the client whose KEK wraps it
+	SSID       string    `json:"ssid"`        // network name, to find the PMK
+	KeyID      int       `json:"key_id"`      // 0..3, as every group frame's header shows
+	ANonce     string    `json:"anonce"`      // hex, 32 bytes: the client's handshake
+	SNonce     string    `json:"snonce"`      // hex, 32 bytes
+	Descriptor int       `json:"descriptor"`  // EAPOL-Key descriptor type: 2 RSN, 254 WPA
+	KeyInfo    int       `json:"key_info"`    // EAPOL-Key information field
+	KeyLength  int       `json:"key_length"`  // EAPOL-Key key length field
+	IV         string    `json:"iv"`          // hex, 16 bytes: EAPOL-Key IV (keys RC4 for WPA1)
+	KeyData    string    `json:"key_data"`    // hex: the wrapped key data
+	TS         time.Time `json:"ts,omitzero"` // when it was seen (set by the server)
+}
+
+// WiFiPMK is one network's pairwise master key.
+type WiFiPMK struct {
+	SSID string `json:"ssid"`
+	PMK  string `json:"pmk"` // hex, 32 bytes
+}
+
+// WiFiWEP is one of the four WEP keys.
+type WiFiWEP struct {
+	Index int    `json:"index"` // 0..3
+	Key   string `json:"key"`   // hex, 5, 13 or 16 bytes
 }
 
 // EAPOL is the public shape of one 802.1X key message.
@@ -289,4 +333,6 @@ type EAPOL struct {
 	Cipher    string `json:"cipher,omitempty"`
 	Valid     bool   `json:"valid,omitempty"`
 	Installed bool   `json:"installed,omitempty"`
+	Group     bool   `json:"group,omitempty"` // a group-key (GTK rekey) message, not the 4-way handshake
+	GTK       bool   `json:"gtk,omitempty"`   // a group key was learned, so broadcasts decrypt
 }

@@ -99,7 +99,6 @@ func run(args []string) error {
 	rdnsTimeout := fs.Duration("rdns-timeout", 2*time.Second, "bound on one reverse DNS lookup")
 	rdnsWorkers := fs.Int("rdns-workers", 4, "concurrent reverse DNS lookups")
 	rdnsTTL := fs.Duration("rdns-ttl", time.Hour, "reuse a reverse DNS answer for this long")
-	wifiKeyFile := fs.String("wifi-key-file", envOr("NETGRAPH_WIFI_KEY_FILE", ""), "WPA/WPA2 passphrases, PMKs and WEP keys for Wi-Fi capture; $NETGRAPH_WIFI_KEY_FILE")
 	wifiHop := fs.Bool("wifi-hop", false, "hop channels on monitor-mode interfaces")
 	wifiDwell := fs.Duration("wifi-dwell", 250*time.Millisecond, "time to stay on each channel while hopping")
 	wifiChannels := fs.String("wifi-channels", "", "comma-separated channels to hop (default: common 2.4/5 GHz channels)")
@@ -167,19 +166,11 @@ func run(args []string) error {
 		Interfaces: sensor.InterfaceInfo(names), ActiveTimeout: *active,
 	}
 
-	// Wi-Fi keys are optional: without them, management frames and
-	// handshakes are still decoded and open networks still feed the IP
-	// pipeline.
-	keys := wifi.NewKeyring()
-	if *wifiKeyFile != "" {
-		k, err := wifi.LoadKeyFile(*wifiKeyFile)
-		if err != nil {
-			return fmt.Errorf("wifi keys: %w", err)
-		}
-		keys = k
-	}
+	// Wi-Fi keys come from the server (below) and live only in memory.
+	// Without them, management frames and handshakes are still decoded and
+	// open networks still feed the IP pipeline.
 	wifiProc := wifi.NewProcessor(wifi.Config{
-		Keys: keys, Logger: log, IncludeData: *wifiData,
+		Keys: wifi.NewKeyring(), Logger: log, IncludeData: *wifiData,
 		Emit: func(ev wire.Event) { out.Emit(ev) },
 	})
 
@@ -212,24 +203,26 @@ func run(args []string) error {
 		shipDone = make(chan struct{})
 		go func() { defer close(shipDone); shipper.Run(shipCtx) }()
 		log.Info("shipping to server", "server", *server, "sensor", *name, "boot", shipper.Boot())
-		// Recover WPA keys the server already holds — this sensor from
-		// before a restart, or another sensor — and keep picking up new
-		// ones. Only public handshake nonces sync; no key material is ever
-		// stored on the sensor or sent by it beyond those nonces. The first
-		// load is synchronous (bounded) so keys are in place before capture
-		// begins, but a down server never delays startup past the timeout.
+		// Wi-Fi keys are configured on the server: fetch its PMKs, WEP
+		// keys and stored handshake nonces, and keep them current. They
+		// are held in memory only; the sensor writes nothing to disk and
+		// sends no key back. The first load is synchronous (bounded) so
+		// keys are in place before capture begins, but a down server
+		// never delays startup past the timeout.
 		loadCtx, cancelLoad := context.WithTimeout(shipCtx, 10*time.Second)
-		loadHandshakes(loadCtx, shipper, wifiProc.Keys(), log)
+		if nets, pairs, ok := syncWiFiKeys(loadCtx, shipper, wifiProc.Keys(), log); ok && nets > 0 {
+			log.Info("loaded wifi keys from server", "networks", nets, "pairwise", pairs)
+		}
 		cancelLoad()
 		go func() {
-			t := time.NewTicker(5 * time.Minute)
+			t := time.NewTicker(time.Minute)
 			defer t.Stop()
 			for {
 				select {
 				case <-shipCtx.Done():
 					return
 				case <-t.C:
-					loadHandshakes(shipCtx, shipper, wifiProc.Keys(), log)
+					syncWiFiKeys(shipCtx, shipper, wifiProc.Keys(), log)
 				}
 			}
 		}()
@@ -290,8 +283,8 @@ func run(args []string) error {
 		stopHop()
 	}
 	if reverse != nil {
-		// Finish outstanding lookups before the shipper drains, so the
-		// names they found are in the final batch.
+		// Stop lookups before the shipper drains: a lookup still in
+		// flight is cancelled rather than emitted after the final batch.
 		reverse.Close()
 	}
 	if shipper != nil {
@@ -305,19 +298,33 @@ func run(args []string) error {
 	return err
 }
 
-// loadHandshakes fetches the server's WPA handshake nonces and installs the
-// pairwise keys it can re-derive from the key-file PMKs. A record whose SSID
-// has no key-file entry is skipped, since nothing can be derived without the
-// passphrase. It is best-effort: a fetch error is logged at debug and the
-// next refresh retries.
-func loadHandshakes(ctx context.Context, shipper *wire.Shipper, keys *wifi.Keyring, log *slog.Logger) {
-	recs, err := shipper.FetchHandshakes(ctx)
+// syncWiFiKeys fetches the server's Wi-Fi keys, replaces the keyring's PMKs
+// and WEP keys with them, and installs the pairwise keys it can re-derive
+// from the stored handshake nonces. A handshake for a network with no PMK is
+// skipped, since nothing can be derived without it. It is best-effort: a
+// fetch error is logged at debug, the keys already held are kept, and the
+// next refresh retries. It reports how many networks and pairwise keys it
+// loaded, and whether the fetch succeeded.
+func syncWiFiKeys(ctx context.Context, shipper *wire.Shipper, keys *wifi.Keyring, log *slog.Logger) (networks, pairwise int, ok bool) {
+	got, err := shipper.FetchWiFiKeys(ctx)
 	if err != nil {
-		log.Debug("fetch wifi handshakes", "err", err)
-		return
+		log.Debug("fetch wifi keys", "err", err)
+		return 0, 0, false
 	}
+	sec := &wifi.Secrets{PMKs: map[string][]byte{}}
+	for _, p := range got.PMKs {
+		if b, err := hex.DecodeString(p.PMK); err == nil && len(b) == 32 && p.SSID != "" {
+			sec.PMKs[p.SSID] = b
+		}
+	}
+	for _, w := range got.WEP {
+		if b, err := wifi.ParseWEPKey(w.Index, w.Key); err == nil {
+			sec.WEP[w.Index] = b
+		}
+	}
+	keys.SetSecrets(sec)
 	loaded := 0
-	for _, r := range recs {
+	for _, r := range got.Handshakes {
 		an, err1 := hex.DecodeString(r.ANonce)
 		sn, err2 := hex.DecodeString(r.SNonce)
 		if err1 != nil || err2 != nil {
@@ -327,9 +334,20 @@ func loadHandshakes(ctx context.Context, shipper *wire.Shipper, keys *wifi.Keyri
 			loaded++
 		}
 	}
-	if loaded > 0 {
-		log.Info("recovered wifi keys from server", "count", loaded)
+	// Group keys arrive still wrapped with a client's KEK; unwrapping
+	// re-derives that KEK from our own PMK.
+	groups := 0
+	for _, g := range got.GroupKeys {
+		rec, ok := wifi.GroupKeyFromWire(g)
+		if !ok {
+			continue
+		}
+		if ok, err := keys.LoadGroupKey(rec); err == nil && ok {
+			groups++
+		}
 	}
+	log.Debug("synced wifi keys", "networks", len(sec.PMKs), "pairwise", loaded, "group", groups)
+	return len(sec.PMKs), loaded, true
 }
 
 func linkName(link int) string {
