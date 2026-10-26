@@ -105,6 +105,33 @@ func NewBootID() string {
 // Boot is this run's boot ID.
 func (s *Shipper) Boot() string { return s.boot }
 
+// FetchHandshakes pulls the server's stored WPA handshake nonce records so
+// the sensor can re-derive pairwise keys after a restart, or pick up keys
+// another sensor found. It carries public nonces only; the sensor still
+// needs the network passphrase (never shipped) to derive anything.
+func (s *Shipper) FetchHandshakes(ctx context.Context) ([]WiFiKey, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.cfg.URL+"/api/v1/wifi/handshakes", nil)
+	if err != nil {
+		return nil, err
+	}
+	if s.cfg.Token != "" {
+		req.Header.Set("Authorization", "Bearer "+s.cfg.Token)
+	}
+	resp, err := s.client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		return nil, fmt.Errorf("fetch handshakes: %s", resp.Status)
+	}
+	var out []WiFiKey
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<20)).Decode(&out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // Emit queues an event, assigning its sequence number.
 func (s *Shipper) Emit(ev Event) {
 	s.mu.Lock()

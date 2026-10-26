@@ -58,9 +58,11 @@ Sensors `POST /api/v1/ingest` with:
 The body is newline-delimited JSON events, each `{seq, type, ts, <type>:
 {...}}`, as defined in [`internal/wire/event.go`](../internal/wire/event.go).
 Event types are `hello`, `stats`, `flow`, `dns`, `binding`, `dhcp`, `mdns`,
-`name`, `ssdp`, `lldp` and `wifi`. A `name` from reverse DNS has
+`name`, `ssdp`, `lldp`, `wifi` and `wifi_key`. A `name` from reverse DNS has
 `"proto":"rdns"`; a `wifi` event describes an access point, client,
-association or handshake and never carries key material. Events with a
+association or handshake and never carries key material. A `wifi_key` event
+carries a handshake's public nonces so keys survive a sensor restart and sync
+across sensors (see below); it holds no key, PMK or MIC. Events with a
 `seq` at or below the last one ingested for that sensor boot are skipped, so
 retries are safe. The response is `{accepted, duplicates}`. Anything that
 can produce these events can feed netgraph:
@@ -70,3 +72,14 @@ netgraph-sensor run -pcap capture.pcap -server - > events.jsonl   # JSON lines o
 curl -X POST -H "Authorization: Bearer $NETGRAPH_TOKEN" -H "X-Netgraph-Sensor: test" \
   --data-binary @events.jsonl http://netgraph.lan:8443/api/v1/ingest
 ```
+
+### Wi-Fi handshake sync
+
+`GET /api/v1/wifi/handshakes` returns the stored handshake nonce records a
+sensor uses to re-derive WPA pairwise keys after a restart, or to pick up
+keys another sensor found. It is authorised with the **ingest** token (it is
+sensor infrastructure), and sensors call it automatically on startup and
+every few minutes. Each record is `{bssid, sta, ssid, anonce, snonce,
+key_version}`. These are the nonces broadcast in the clear during the 4-way
+handshake — not key material — and are useless without the network
+passphrase, which never leaves the sensor.

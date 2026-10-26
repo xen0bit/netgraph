@@ -234,6 +234,8 @@ func ParseEAPOL(b []byte) (*EAPOLKey, error) {
 }
 
 // HandshakeInfo is what the processor reports about an EAPOL-Key message.
+// When Installed, it also carries the public inputs (nonces, addresses, SSID)
+// the server needs to let another sensor re-derive the same key later.
 type HandshakeInfo struct {
 	Message   int
 	Version   int
@@ -241,6 +243,10 @@ type HandshakeInfo struct {
 	Valid     bool
 	Installed bool
 	Err       error
+
+	SSID           string
+	AP, STA        string
+	ANonce, SNonce []byte
 }
 
 type handshake struct {
@@ -517,7 +523,49 @@ func (k *Keyring) ProcessEAPOL(f *Frame, msg *EAPOLKey) HandshakeInfo {
 	k.pairs[key] = split
 	k.mu.Unlock()
 	info.Installed = true
+	info.SSID, info.AP, info.STA = ssid, ap.String(), sta.String()
+	info.ANonce = append([]byte(nil), anonce...)
+	info.SNonce = append([]byte(nil), snonce...)
 	return info
+}
+
+// LoadHandshake re-derives and installs a pairwise key from a stored
+// handshake: the public nonces plus the key-file PMK for ssid. It returns
+// false (no error) when no PMK is known for the SSID, since nothing can be
+// derived then. This is how a restarted or additional sensor recovers keys
+// from the server without re-capturing the 4-way handshake.
+func (k *Keyring) LoadHandshake(bssid, sta, ssid string, anonce, snonce []byte, keyVersion int) (bool, error) {
+	if len(anonce) != 32 || len(snonce) != 32 {
+		return false, fmt.Errorf("wifi: handshake nonce must be 32 bytes")
+	}
+	ap, err := net.ParseMAC(bssid)
+	if err != nil {
+		return false, err
+	}
+	st, err := net.ParseMAC(sta)
+	if err != nil {
+		return false, err
+	}
+	pmk := k.pmkFor(ssid)
+	if len(pmk) != 32 {
+		return false, nil
+	}
+	tkip := keyVersion == 1
+	bits := 384
+	if tkip {
+		bits = 512
+	}
+	ptk, err := DerivePTK(pmk, ap, st, anonce, snonce, bits)
+	if err != nil {
+		return false, err
+	}
+	k.mu.Lock()
+	if len(k.pairs) > 50_000 {
+		clear(k.pairs)
+	}
+	k.pairs[pairKey(ap, st)] = splitPTK(ptk, tkip)
+	k.mu.Unlock()
+	return true, nil
 }
 
 // keyDataSSID pulls an SSID out of an EAPOL-Key data field when a probe

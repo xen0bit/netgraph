@@ -311,6 +311,10 @@ func (g *ingester) event(ctx context.Context, sid int64, sensor, boot string, ev
 		if ev.WiFi != nil {
 			return g.wifi(ctx, sid, ts, ev.WiFi)
 		}
+	case wire.TypeWiFiKey:
+		if ev.WiFiKey != nil {
+			return g.wifiKey(ctx, sid, ts, ev.WiFiKey)
+		}
 	}
 	return nil // unknown types are from a newer sensor; ignore them
 }
@@ -1279,6 +1283,26 @@ func (g *ingester) wifi(ctx context.Context, sid, ts int64, w *wire.WiFi) error 
 		return nil
 	}
 	return g.observation(ctx, sid, ts, "wifi", dev, netip.Addr{}, w)
+}
+
+// wifiKey persists the public nonces of a 4-way handshake so a restarted or
+// additional sensor can re-derive the pairwise key (see WiFiKey). It keeps
+// the most recent handshake per (AP, station). It stores no key material.
+func (g *ingester) wifiKey(ctx context.Context, sid, ts int64, w *wire.WiFiKey) error {
+	bssid, ok1 := normMAC(w.BSSID)
+	sta, ok2 := normMAC(w.STA)
+	if !ok1 || !ok2 || w.SSID == "" || len(w.ANonce) != 64 || len(w.SNonce) != 64 {
+		return nil // malformed; nonces are 32 bytes = 64 hex digits
+	}
+	_, err := g.tx.ExecContext(ctx, `
+		INSERT INTO wifi_handshakes (bssid, sta, ssid, anonce, snonce, key_version, sensor_id, ts)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(bssid, sta) DO UPDATE SET
+			ssid = excluded.ssid, anonce = excluded.anonce, snonce = excluded.snonce,
+			key_version = excluded.key_version, sensor_id = excluded.sensor_id, ts = excluded.ts
+		WHERE excluded.ts >= wifi_handshakes.ts`,
+		bssid, sta, w.SSID, strings.ToLower(w.ANonce), strings.ToLower(w.SNonce), w.KeyVersion, sid, ts)
+	return err
 }
 
 func (g *ingester) lldp(ctx context.Context, sid, ts int64, l *wire.LLDP) error {

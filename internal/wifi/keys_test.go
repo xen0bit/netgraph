@@ -255,3 +255,50 @@ func TestHandshakeKnownAnswer(t *testing.T) {
 		t.Fatal("VerifyMIC rejected a MIC a real AP would accept (MIC must cover the 802.1X header)")
 	}
 }
+
+// TestLoadHandshake checks that a key recovered from stored handshake nonces
+// (the server-sync path) is byte-identical to one derived live, so a
+// restarted or additional sensor decrypts exactly as the capturing one did.
+// It reuses the independent known-answer vector from TestHandshakeKnownAnswer.
+func TestLoadHandshake(t *testing.T) {
+	const ssid, pass = "netgraph-test", "testpassword"
+	ap, sta := "02:00:00:00:aa:00", "02:00:00:00:bb:00"
+	anonce := make([]byte, 32)
+	snonce := make([]byte, 32)
+	for i := range anonce {
+		anonce[i] = byte(i)
+		snonce[i] = byte(i + 32)
+	}
+
+	k := NewKeyring()
+	// With no passphrase for the SSID, nothing can be derived: no key, no error.
+	if ok, err := k.LoadHandshake(ap, sta, ssid, anonce, snonce, 2); err != nil || ok {
+		t.Fatalf("LoadHandshake without a PMK: ok=%v err=%v (want false, nil)", ok, err)
+	}
+	if k.Keys() != 0 {
+		t.Fatalf("installed a key with no PMK: %d", k.Keys())
+	}
+	if err := k.AddPassphrase(ssid, pass); err != nil {
+		t.Fatal(err)
+	}
+	ok, err := k.LoadHandshake(ap, sta, ssid, anonce, snonce, 2)
+	if err != nil || !ok {
+		t.Fatalf("LoadHandshake: ok=%v err=%v", ok, err)
+	}
+	if k.Keys() != 1 {
+		t.Fatalf("keys after load = %d, want 1", k.Keys())
+	}
+	// The recovered key must equal the live-derived PTK exactly.
+	pmk, _ := PMK(pass, ssid)
+	apMAC, _ := net.ParseMAC(ap)
+	staMAC, _ := net.ParseMAC(sta)
+	want, _ := DerivePTK(pmk, apMAC, staMAC, anonce, snonce, 384)
+	got := k.ptk(ap, sta)
+	if got == nil {
+		t.Fatal("no key installed under (ap, sta)")
+	}
+	full := append(append(append([]byte{}, got.KCK...), got.KEK...), got.TK...)
+	if !bytes.Equal(full, want) {
+		t.Fatal("recovered key differs from the live-derived PTK")
+	}
+}

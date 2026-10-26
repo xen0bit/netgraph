@@ -18,6 +18,7 @@ import (
 	"context"
 	"crypto/tls"
 	"crypto/x509"
+	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -211,6 +212,27 @@ func run(args []string) error {
 		shipDone = make(chan struct{})
 		go func() { defer close(shipDone); shipper.Run(shipCtx) }()
 		log.Info("shipping to server", "server", *server, "sensor", *name, "boot", shipper.Boot())
+		// Recover WPA keys the server already holds — this sensor from
+		// before a restart, or another sensor — and keep picking up new
+		// ones. Only public handshake nonces sync; no key material is ever
+		// stored on the sensor or sent by it beyond those nonces. The first
+		// load is synchronous (bounded) so keys are in place before capture
+		// begins, but a down server never delays startup past the timeout.
+		loadCtx, cancelLoad := context.WithTimeout(shipCtx, 10*time.Second)
+		loadHandshakes(loadCtx, shipper, wifiProc.Keys(), log)
+		cancelLoad()
+		go func() {
+			t := time.NewTicker(5 * time.Minute)
+			defer t.Stop()
+			for {
+				select {
+				case <-shipCtx.Done():
+					return
+				case <-t.C:
+					loadHandshakes(shipCtx, shipper, wifiProc.Keys(), log)
+				}
+			}
+		}()
 	}
 
 	var err error
@@ -281,6 +303,33 @@ func run(args []string) error {
 		err = nil
 	}
 	return err
+}
+
+// loadHandshakes fetches the server's WPA handshake nonces and installs the
+// pairwise keys it can re-derive from the key-file PMKs. A record whose SSID
+// has no key-file entry is skipped, since nothing can be derived without the
+// passphrase. It is best-effort: a fetch error is logged at debug and the
+// next refresh retries.
+func loadHandshakes(ctx context.Context, shipper *wire.Shipper, keys *wifi.Keyring, log *slog.Logger) {
+	recs, err := shipper.FetchHandshakes(ctx)
+	if err != nil {
+		log.Debug("fetch wifi handshakes", "err", err)
+		return
+	}
+	loaded := 0
+	for _, r := range recs {
+		an, err1 := hex.DecodeString(r.ANonce)
+		sn, err2 := hex.DecodeString(r.SNonce)
+		if err1 != nil || err2 != nil {
+			continue
+		}
+		if ok, err := keys.LoadHandshake(r.BSSID, r.STA, r.SSID, an, sn, r.KeyVersion); err == nil && ok {
+			loaded++
+		}
+	}
+	if loaded > 0 {
+		log.Info("recovered wifi keys from server", "count", loaded)
+	}
 }
 
 func linkName(link int) string {

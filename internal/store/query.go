@@ -18,6 +18,7 @@ import (
 	"github.com/xen0bit/netgraph/internal/graph"
 	"github.com/xen0bit/netgraph/internal/model"
 	"github.com/xen0bit/netgraph/internal/oui"
+	"github.com/xen0bit/netgraph/internal/wire"
 )
 
 func init() {
@@ -1304,6 +1305,26 @@ func (s *Store) WiFi(ctx context.Context, f model.Filter) ([]model.WiFiNetwork, 
 }
 
 // Sensors lists the sensors that have sent data.
+// WiFiHandshakes returns the stored handshake nonce records so a sensor can
+// re-derive pairwise keys on startup. It returns public nonces only, never a
+// key: a caller still needs the network's passphrase to derive anything.
+func (s *Store) WiFiHandshakes(ctx context.Context) ([]wire.WiFiKey, error) {
+	rows, err := s.r.QueryContext(ctx, `SELECT bssid, sta, ssid, anonce, snonce, key_version FROM wifi_handshakes ORDER BY ts`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []wire.WiFiKey{}
+	for rows.Next() {
+		var k wire.WiFiKey
+		if err := rows.Scan(&k.BSSID, &k.STA, &k.SSID, &k.ANonce, &k.SNonce, &k.KeyVersion); err != nil {
+			return nil, err
+		}
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) Sensors(ctx context.Context) ([]model.Sensor, error) {
 	rows, err := s.r.QueryContext(ctx, `SELECT name, version, first_seen, last_seen, hello, stats FROM sensors ORDER BY name`)
 	if err != nil {

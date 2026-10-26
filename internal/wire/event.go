@@ -25,17 +25,18 @@ const Version = 1
 type Type string
 
 const (
-	TypeHello   Type = "hello"   // sensor identity and interfaces, on start and periodically
-	TypeStats   Type = "stats"   // sensor counters, periodically
-	TypeFlow    Type = "flow"    // one interval of one flow
-	TypeDNS     Type = "dns"     // a DNS query and its response
-	TypeBinding Type = "binding" // a MAC was seen using an IP (ARP, NDP)
-	TypeDHCP    Type = "dhcp"    // a DHCPv4 or DHCPv6 message
-	TypeMDNS    Type = "mdns"    // an mDNS/DNS-SD announcement or response
-	TypeName    Type = "name"    // a NetBIOS or LLMNR name claim
-	TypeSSDP    Type = "ssdp"    // an SSDP/UPnP announcement or response
-	TypeLLDP    Type = "lldp"    // an LLDP neighbour advertisement
-	TypeWiFi    Type = "wifi"    // a Wi-Fi network, client or handshake observation
+	TypeHello   Type = "hello"    // sensor identity and interfaces, on start and periodically
+	TypeStats   Type = "stats"    // sensor counters, periodically
+	TypeFlow    Type = "flow"     // one interval of one flow
+	TypeDNS     Type = "dns"      // a DNS query and its response
+	TypeBinding Type = "binding"  // a MAC was seen using an IP (ARP, NDP)
+	TypeDHCP    Type = "dhcp"     // a DHCPv4 or DHCPv6 message
+	TypeMDNS    Type = "mdns"     // an mDNS/DNS-SD announcement or response
+	TypeName    Type = "name"     // a NetBIOS or LLMNR name claim
+	TypeSSDP    Type = "ssdp"     // an SSDP/UPnP announcement or response
+	TypeLLDP    Type = "lldp"     // an LLDP neighbour advertisement
+	TypeWiFi    Type = "wifi"     // a Wi-Fi network, client or handshake observation
+	TypeWiFiKey Type = "wifi_key" // handshake nonces, for restart persistence and cross-sensor sync
 )
 
 // Event is one observation. TS is when it was observed (the packet's capture
@@ -56,6 +57,7 @@ type Event struct {
 	SSDP    *SSDP    `json:"ssdp,omitempty"`
 	LLDP    *LLDP    `json:"lldp,omitempty"`
 	WiFi    *WiFi    `json:"wifi,omitempty"`
+	WiFiKey *WiFiKey `json:"wifi_key,omitempty"`
 }
 
 // Hello describes the sensor and the interfaces it captures. The server uses
@@ -262,6 +264,22 @@ type WiFi struct {
 	// EAPOL describes a 4-way handshake message, never its nonces or MIC.
 	EAPOL *EAPOL `json:"eapol,omitempty"`
 	Error string `json:"error,omitempty"`
+}
+
+// WiFiKey carries the public inputs needed to re-derive a WPA pairwise key
+// on a restarted or additional sensor: the two handshake nonces, which the
+// AP and client broadcast in the clear during the 4-way handshake. It never
+// carries a derived key, the PMK or the passphrase — those stay on the
+// sensor. Without the passphrase (never shipped) and the raw frames (never
+// stored on the server) these values decrypt nothing, so the server can hold
+// and redistribute them without being able to read any traffic.
+type WiFiKey struct {
+	BSSID      string `json:"bssid"`       // access point
+	STA        string `json:"sta"`         // client station
+	SSID       string `json:"ssid"`        // network name, to find the PMK in the key file
+	ANonce     string `json:"anonce"`      // authenticator nonce, hex (32 bytes)
+	SNonce     string `json:"snonce"`      // supplicant nonce, hex (32 bytes)
+	KeyVersion int    `json:"key_version"` // EAPOL descriptor version: 1 TKIP, 2 CCMP
 }
 
 // EAPOL is the public shape of one 802.1X key message.

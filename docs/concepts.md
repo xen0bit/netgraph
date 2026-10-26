@@ -155,10 +155,24 @@ the message number and cipher.
 Decrypted data frames are rebuilt as Ethernet and enter the normal flow,
 DNS, TLS and HTTP pipeline, so a Wi-Fi capture produces the same connection
 graph as a bridge capture. Only pairwise keys are followed; group/broadcast
-keys are not derived, so multicast Wi-Fi data stays encrypted. Key material
-never leaves the sensor: `wifi` events carry only public facts (BSSID, SSID,
-client, channel, security, cipher, handshake message number and whether its
-MIC verified).
+keys are not derived, so multicast Wi-Fi data stays encrypted. No key leaves
+the sensor — not the PMK, PTK, passphrase or MIC — and the keyring is never
+written to disk; `wifi` events carry only public facts (BSSID, SSID, client,
+channel, security, cipher, handshake message number and whether its MIC
+verified).
+
+**Handshake persistence and sync.** Pairwise keys live only in sensor
+memory, so a sensor restart would otherwise lose them until each client
+re-associated. To avoid that, a sensor that installs a key ships a
+`wifi_key` event carrying just the handshake's two **nonces** — values the
+AP and client broadcast in the clear, so not secret. The server keeps the
+latest per `(AP, client)` in `wifi_handshakes`, and a sensor fetches them on
+startup (and every few minutes) to re-derive the PTK from its own key-file
+PMK. The same mechanism lets several sensors share keys: one sensor catches
+a client's handshake, the rest decrypt that client too. The server never
+sees the passphrase and stores no raw frames, so the stored nonces decrypt
+nothing on their own. A sensor only ships a `wifi_key` for a network whose
+passphrase it holds, so the table only ever covers your own networks.
 
 Channel hopping is available with `-wifi-hop`. It uses the wireless
 extensions ioctl, so it works with mac80211 monitor interfaces and not with

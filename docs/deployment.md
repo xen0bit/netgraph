@@ -97,7 +97,12 @@ Capturing needs `CAP_NET_RAW`. Run as root, use the systemd unit
 
 ```sh
 sudo setcap cap_net_raw+ep /usr/bin/netgraph-sensor
+# Wi-Fi channel hopping (-wifi-hop) also needs CAP_NET_ADMIN:
+sudo setcap cap_net_raw,cap_net_admin+ep /usr/bin/netgraph-sensor
 ```
+
+File capabilities are ignored on a `nosuid` mount (such as many `/tmp`
+setups), so install the binary on a normal filesystem.
 
 The sensor ignores its own connection to the server. If the server is
 unreachable it keeps capturing, holds up to `-spool-mb` of batches, and
@@ -112,45 +117,114 @@ twice gives the same events.
 
 ### Wi-Fi capture
 
-A monitor-mode interface gets 802.11 frames, so the sensor decodes Wi-Fi
-natively (no bridge or router capture is needed):
+A monitor-mode interface gives the sensor raw 802.11 frames, so it decodes
+Wi-Fi natively — no bridge or router capture needed. This sees what a wired
+sensor cannot: beacons, probe requests, (re)associations, deauth/disassoc,
+signal strength and nearby/rogue APs, plus, for WPA2-PSK networks whose
+passphrase you hold, the decrypted traffic itself.
+
+**Put the interface into monitor mode.** The adapter and its driver must
+support monitor mode (`iw phy <phyN> info` should list `* monitor` under
+"Supported interface modes"). Then:
 
 ```sh
-iw dev wlan0 interface add mon0 type monitor
-ip link set mon0 up
-netgraph-sensor run -iface mon0 -server https://netgraph.lan:8443 \
-  -wifi-key-file /etc/netgraph/wifi.keys -wifi-hop -wifi-channels 1,6,11,36,40,44,48
+# Stop NetworkManager (or wpa_supplicant) from managing the adapter, or it
+# will reset monitor mode mid-capture. This is the most common failure.
+sudo nmcli dev set wlan1 managed no
+
+sudo ip link set wlan1 down
+sudo iw dev wlan1 set type monitor
+sudo ip link set wlan1 up
+sudo iw dev wlan1 set channel 6         # or let -wifi-hop manage it
+iw dev wlan1 info | grep -E 'type|channel'   # expect: type monitor
 ```
 
-`-wifi-hop` uses the wireless extensions ioctl. It works with ordinary
-mac80211 monitor interfaces; 6 GHz channels and some fullmac drivers need a
-fixed channel instead. The interface must already be in monitor mode; the
-sensor never changes that.
-
-Keys are read from a root-only file, never from flags, so they do not appear
-in `ps` or a shell history:
+The sensor never changes the interface type; it only sets the channel (with
+`-wifi-hop`). Run it against the monitor interface:
 
 ```sh
+netgraph-sensor run -iface wlan1 -server https://netgraph.lan:8443 \
+  -wifi-key-file /etc/netgraph/wifi.keys -wifi-hop -wifi-channels 1,6,11,36,40,44,48,149
+```
+
+**Hopping vs. pinning.** `-wifi-hop` tunes the wireless extensions ioctl
+(`SIOCSIWFREQ`) through the channel list, dwelling `-wifi-dwell` (default
+250 ms) on each. Hopping is the right default for open-ended monitoring: a
+key learned from a 4-way handshake is kept for the whole session, so once a
+client's handshake is captured the sensor decrypts that client's traffic on
+any channel from then on — leaving a channel and returning does **not**
+invalidate the key. What hopping costs is only the chance of being on a
+client's channel at the moment it associates; since clients associate rarely
+and then stay connected, a single pass will not catch every handshake, but
+coverage accumulates over time as devices reboot, reconnect and roam. A key
+only goes stale if that client re-associates (a new handshake, a new key)
+while the sensor is on another channel. To capture a *specific* network's
+handshake within a short window — for example when you deliberately trigger a
+reconnect — **pin to its channel** instead (`-wifi-channels <ch>` with one
+channel, or set a fixed channel with `iw` and omit `-wifi-hop`). Hopping
+works for ordinary mac80211 interfaces on 2.4 and 5 GHz; 6 GHz and some
+fullmac drivers need a fixed channel.
+
+A dual-band SSID runs a separate AP (and BSSID) per band, often on very
+different channels. Decryption is per-AP, so pin to the band/channel the
+target device actually uses — many clients prefer 5 GHz.
+
+**Keys** are read from a root-only file, never from flags, so they do not
+appear in `ps` or a shell history. One line per *distinct SSID* (the WPA2
+key is derived from the passphrase and the SSID, so the same SSID on both
+bands needs only one line):
+
+```sh
+sudo mkdir -p /etc/netgraph
 sudo install -m 600 /dev/null /etc/netgraph/wifi.keys
 sudo tee /etc/netgraph/wifi.keys >/dev/null <<'EOF'
-# WPA/WPA2-PSK: <ssid> <passphrase or 64 hex digits>
-wpa2 home correct horse battery staple
-# WPA3/SAE or 802.1X: the PMK must be obtained out of band
-pmk modern 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+# WPA/WPA2-PSK: <ssid> <passphrase or 64 hex digits>. The passphrase is the
+# rest of the line, so it may contain spaces; the SSID may not.
+wpa2 home-iot correct horse battery staple
+# WPA3/SAE or 802.1X: see below. A PMK is <ssid> <64 hex digits>.
+pmk some-eap-net 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 # WEP: <index 0-3> <5, 13 or 16 bytes of hex>
 wep 0 0102030405
 EOF
 ```
 
-Open networks need no keys. WEP and WPA/WPA2-PSK are decrypted from the
-air; WPA3/SAE, OWE and 802.1X have no passively derivable PMK and need a
-`pmk` entry. Decrypted data frames enter the normal flow, DNS, TLS and HTTP
-pipeline, so the connection graph looks the same as for a wired capture.
-Wi-Fi events carry no key material.
+**What can be decrypted — WPA2-PSK yes, WPA3-SAE no.** For WPA2-PSK the
+pairwise master key is `PBKDF2(passphrase, SSID)`, a static value, so knowing
+the passphrase and capturing a client's 4-way handshake is enough to derive
+its keys and decrypt its traffic. WEP likewise. **WPA3-SAE is different by
+design**: the master key comes from an ephemeral per-session Dragonfly
+exchange, so even with the passphrase a passive observer cannot derive it
+(this is SAE's forward secrecy). OWE (open WPA3) is the same. These show up
+fully in management and handshake events but their data is not decryptable;
+a `pmk` entry only helps if you obtain that session's PMK out of band (and
+for SAE the PMK changes every association). **WPA2/WPA3 "transition" networks
+are decryptable per client:** a device that joins over WPA2-PSK can be
+decrypted; one that chooses SAE (most modern phones) cannot, on the same
+SSID.
+
+For WPA3 devices, capture on the **router/bridge with a wired sensor**
+instead — there the AP has already decrypted the traffic. The Wi-Fi sensor's
+strengths are WPA2-PSK/IoT decryption and the layer-2 visibility a wired
+sensor cannot see.
+
+Decrypted data frames enter the normal flow, DNS, TLS and HTTP pipeline, so
+the connection graph looks the same as for a wired capture. Open networks
+need no keys.
+
+**Keys survive restarts, and sync across sensors, through the server** — no
+configuration needed. Pairwise keys live only in sensor memory, but when a
+sensor installs one it ships the handshake's public nonces to the server,
+which keeps the latest per client. On startup (and every few minutes) a
+sensor fetches them and re-derives the keys from its own key file, so a
+restarted sensor recovers its decryption coverage, and a second sensor
+decrypts clients whose handshake another sensor caught. No key, passphrase
+or MIC ever leaves a sensor, and nothing is written to the sensor's disk —
+only the cleartext-broadcast nonces are stored, on the server, and they
+decrypt nothing without the passphrase.
 
 If the interface is not in monitor mode, or no packets are 802.11, the
-sensor treats it as Ethernet. Channel hopping is only started for
-interfaces whose kernel link type is 802.11.
+sensor treats it as Ethernet. Channel hopping is only started for interfaces
+whose kernel link type is 802.11.
 
 ### OpenWrt
 

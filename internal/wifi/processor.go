@@ -2,6 +2,7 @@ package wifi
 
 import (
 	"encoding/binary"
+	"encoding/hex"
 	"hash/crc32"
 	"hash/fnv"
 	"log/slog"
@@ -209,6 +210,17 @@ func (p *Processor) data(ts time.Time, f *Frame) {
 				e.Error = info.Err.Error()
 			}
 			p.emit(ts, e)
+			if info.Installed && len(info.ANonce) == 32 && len(info.SNonce) == 32 && p.cfg.Emit != nil {
+				// Ship the public nonces so the server can persist them and
+				// hand them to other or restarted sensors. No key, PMK or MIC
+				// leaves here; the nonces were broadcast in the clear.
+				p.cfg.Emit(wire.Event{Type: wire.TypeWiFiKey, TS: ts, WiFiKey: &wire.WiFiKey{
+					BSSID: info.AP, STA: info.STA, SSID: info.SSID,
+					ANonce:     hex.EncodeToString(info.ANonce),
+					SNonce:     hex.EncodeToString(info.SNonce),
+					KeyVersion: info.Version,
+				}})
+			}
 		}
 		return
 	}

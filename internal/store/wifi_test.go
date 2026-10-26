@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -125,5 +126,41 @@ func TestWiFiIngest(t *testing.T) {
 	}
 	if !slices.ContainsFunc(facts, func(f model.Fact) bool { return f.Rel == model.RelBroadcasts }) {
 		t.Error("facts missing broadcasts")
+	}
+}
+
+func TestWiFiKeyStoreRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	at := testutil.Base
+	st, err := Open(filepath.Join(t.TempDir(), "ng.db"), Config{Now: func() time.Time { return at.Add(time.Hour) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	ap, sta := "aa:bb:cc:00:00:01", "3c:22:fb:01:02:03"
+	an1, sn1 := strings.Repeat("11", 32), strings.Repeat("22", 32)
+	an2, sn2 := strings.Repeat("33", 32), strings.Repeat("44", 32)
+	evs := []wire.Event{
+		{Seq: 1, Type: wire.TypeWiFiKey, TS: at, WiFiKey: &wire.WiFiKey{BSSID: ap, STA: sta, SSID: "cafe", ANonce: an1, SNonce: sn1, KeyVersion: 2}},
+		// A newer handshake for the same pair replaces the older one.
+		{Seq: 2, Type: wire.TypeWiFiKey, TS: at.Add(time.Minute), WiFiKey: &wire.WiFiKey{BSSID: ap, STA: sta, SSID: "cafe", ANonce: an2, SNonce: sn2, KeyVersion: 2}},
+		// Hostile input: a bad MAC and a malformed nonce are dropped, not stored.
+		{Seq: 3, Type: wire.TypeWiFiKey, TS: at, WiFiKey: &wire.WiFiKey{BSSID: "not a mac", STA: sta, SSID: "x", ANonce: an1, SNonce: sn1, KeyVersion: 2}},
+		{Seq: 4, Type: wire.TypeWiFiKey, TS: at, WiFiKey: &wire.WiFiKey{BSSID: "aa:bb:cc:00:00:09", STA: sta, SSID: "x", ANonce: "short", SNonce: sn1, KeyVersion: 2}},
+	}
+	if _, err := st.Ingest(ctx, "mon", "boot", evs); err != nil {
+		t.Fatal(err)
+	}
+	recs, err := st.WiFiHandshakes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 1 {
+		t.Fatalf("want 1 handshake after upsert and hostile drops, got %d: %+v", len(recs), recs)
+	}
+	r := recs[0]
+	if r.BSSID != ap || r.STA != sta || r.SSID != "cafe" || r.ANonce != an2 || r.SNonce != sn2 || r.KeyVersion != 2 {
+		t.Fatalf("latest-wins round-trip failed: %+v", r)
 	}
 }
