@@ -310,4 +310,6 @@ type EAPOL struct {
 	Cipher    string `json:"cipher,omitempty"`
 	Valid     bool   `json:"valid,omitempty"`
 	Installed bool   `json:"installed,omitempty"`
+	Group     bool   `json:"group,omitempty"` // a group-key (GTK rekey) message, not the 4-way handshake
+	GTK       bool   `json:"gtk,omitempty"`   // a group key was learned, so broadcasts decrypt
 }

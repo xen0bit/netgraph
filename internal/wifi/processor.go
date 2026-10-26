@@ -3,6 +3,7 @@ package wifi
 import (
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"hash/crc32"
 	"hash/fnv"
@@ -162,6 +163,9 @@ func (p *Processor) data(ts time.Time, f *Frame) {
 	llc := f.Body
 	if f.Protected {
 		plain, _, err := p.keys.Decrypt(f)
+		if errors.Is(err, errRelayed) {
+			return
+		}
 		if err != nil {
 			if p.cfg.IncludeData {
 				e := f.WireEvent()
@@ -233,7 +237,8 @@ func (p *Processor) eapol(ts time.Time, f *Frame, msg *EAPOLKey) {
 	e.Protected = false
 	e.Decrypted = false
 	p.describeNetwork(e, f)
-	e.EAPOL = &wire.EAPOL{Message: info.Message, Version: info.Version, Cipher: info.Cipher, Valid: info.Valid, Installed: info.Installed}
+	e.EAPOL = &wire.EAPOL{Message: info.Message, Version: info.Version, Cipher: info.Cipher, Valid: info.Valid, Installed: info.Installed,
+		Group: info.Group, GTK: info.GTK}
 	if info.Err != nil {
 		e.Error = info.Err.Error()
 	}

@@ -156,11 +156,16 @@ the sensor fetches from the server and holds only in memory:
 
 Decrypted data frames are rebuilt as Ethernet and enter the normal flow,
 DNS, TLS and HTTP pipeline, so a Wi-Fi capture produces the same connection
-graph as a bridge capture. Only pairwise keys are followed; group/broadcast
-keys are not derived, so multicast Wi-Fi data stays encrypted. Keys flow one
-way, server to sensor: the server keeps the passphrases in its key file and
-serves only the derived PMKs and WEP keys, over the ingest-token endpoint.
-No key leaves the sensor — not the PMK, PTK or MIC — and the sensor writes
+graph as a bridge capture. A-MSDU aggregates (common with 802.11n/ac/ax
+clients) are split into their subframes. The AP's **group key** (GTK),
+which encrypts its broadcasts and multicasts, is unwrapped from handshake
+message 3 or a later group rekey to any client whose pairwise key the
+sensor holds, so the mDNS, SSDP and DHCP broadcasts that name devices are
+decoded too. A broadcast the AP relays from a client the sensor already
+decrypts is skipped rather than counted twice. Keys flow one way, server to
+sensor: the server keeps the passphrases in its key file and serves only
+the derived PMKs and WEP keys, over the ingest-token endpoint. No key leaves
+the sensor — not the PMK, PTK, GTK or MIC — and the sensor writes
 nothing to disk; `wifi` events carry only public facts (BSSID, SSID, client,
 channel, security, cipher, handshake message number and whether its MIC
 verified).
@@ -199,10 +204,12 @@ extensions ioctl, so it works with mac80211 monitor interfaces and not with
   segment, which covers ordinary lookups but not zone transfers.
 - **WPA3/SAE, OWE and 802.1X** Wi-Fi has no passively derivable PMK; without
   an explicitly supplied PMK, their data frames stay encrypted.
-- **Wi-Fi group keys** (broadcast/multicast) are not derived, even when the
-  pairwise handshake was captured. GCMP ciphers (some WPA3 suites) are also
-  not implemented yet; CCMP and TKIP are.
-- **Wi-Fi aggregates and fragments** (A-MSDU, fragmented 802.11 frames) are
-  not reassembled yet; those data frames are counted but not decoded.
+- **Wi-Fi group keys** are learned only from a message 3 or group rekey the
+  sensor sees, and are not synced through the server: a restarted sensor
+  decrypts broadcasts again after the AP's next rekey (typically within an
+  hour or a day) or any client's next association. GCMP ciphers (some WPA3
+  suites) are not implemented yet; CCMP and TKIP are.
+- **Fragmented 802.11 frames** are not reassembled; those data frames are
+  counted but not decoded. (Fragmentation is rare on modern networks.)
 - **Wi-Fi on other channels** is missed while the monitor interface is
   hopping. A busy network also loses frames during the hop itself.

@@ -242,7 +242,10 @@ type HandshakeInfo struct {
 	Cipher    string
 	Valid     bool
 	Installed bool
-	Err       error
+	// Group marks a group-key handshake message (a GTK rekey) rather
+	// than a 4-way handshake message; GTK that a group key was learned.
+	Group, GTK bool
+	Err        error
 
 	SSID           string
 	AP, STA        string
@@ -284,6 +287,7 @@ type Keyring struct {
 	pairs      map[string]*PTK       // "bssid|sta" -> PTK
 	pairNet    map[string]pairSource // "bssid|sta" -> what derived the PTK
 	handshakes map[string]*handshake
+	groups     map[string]*apGroup // BSSID -> GTKs
 	wep        [4][]byte
 }
 
@@ -392,6 +396,7 @@ func NewKeyring() *Keyring {
 		pairs:      map[string]*PTK{},
 		pairNet:    map[string]pairSource{},
 		handshakes: map[string]*handshake{},
+		groups:     map[string]*apGroup{},
 	}
 }
 
@@ -417,6 +422,11 @@ func (k *Keyring) SetSecrets(s *Secrets) {
 		if !bytes.Equal(k.pmks[src.ssid], pmks[src.ssid]) {
 			delete(k.pairs, key)
 			delete(k.pairNet, key)
+		}
+	}
+	for bssid, g := range k.groups {
+		if !bytes.Equal(k.pmks[g.ssid], pmks[g.ssid]) {
+			delete(k.groups, bssid)
 		}
 	}
 	k.pmks = pmks
@@ -503,7 +513,13 @@ func pairKey(ap, sta net.HardwareAddr) string {
 // possible, and installs the PTK once message 2 or 3 completes the nonces.
 func (k *Keyring) ProcessEAPOL(f *Frame, msg *EAPOLKey) HandshakeInfo {
 	info := HandshakeInfo{Message: msg.Message(), Version: msg.Version(), Cipher: msg.Cipher()}
-	if info.Message == 0 || !msg.Pairwise() || msg.Request() || msg.Error() {
+	if msg.Request() || msg.Error() {
+		return info
+	}
+	if !msg.Pairwise() {
+		return k.processGroupKey(f, msg, info)
+	}
+	if info.Message == 0 {
 		return info
 	}
 	ap, sta := f.BSSID, f.Dst
@@ -584,6 +600,11 @@ func (k *Keyring) ProcessEAPOL(f *Frame, msg *EAPOLKey) HandshakeInfo {
 	}
 	k.install(key, newPairSource(ssid, anonce, snonce), split)
 	info.Installed = true
+	if info.Message == 3 {
+		// Message 3 carries the AP's current GTK, wrapped with the KEK.
+		ok, err := k.installGTK(ap.String(), ssid, msg, split.KEK)
+		info.GTK, info.Err = ok, err
+	}
 	info.SSID, info.AP, info.STA = ssid, ap.String(), sta.String()
 	info.ANonce = append([]byte(nil), anonce...)
 	info.SNonce = append([]byte(nil), snonce...)
@@ -673,6 +694,20 @@ func (k *Keyring) Decrypt(f *Frame) ([]byte, string, error) {
 		return nil, "", fmt.Errorf("wifi: short protected frame")
 	}
 	ap := f.BSSID.String()
+	if f.FromDS && !f.ToDS && len(f.Dst) == 6 && f.Dst[0]&1 != 0 {
+		// Broadcast/multicast from the AP: the group key, by key ID.
+		if gk := k.group(ap, int(body[3]>>6)); gk != nil {
+			if f.Src != nil && k.ptk(ap, f.Src.String()) != nil {
+				return nil, "", errRelayed
+			}
+			if gk.tkip {
+				out, err := tkipDecrypt(f.rawHeader(), body, gk.tk, true)
+				return out, "TKIP", err
+			}
+			out, err := ccmpDecrypt(f.rawHeader(), body, gk.tk)
+			return out, "CCMP", err
+		}
+	}
 	var sta string
 	switch {
 	case f.FromDS && !f.ToDS:

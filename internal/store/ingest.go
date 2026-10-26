@@ -1274,6 +1274,12 @@ func (g *ingester) wifi(ctx context.Context, sid, ts int64, w *wire.WiFi) error 
 			if w.EAPOL.Installed {
 				attrs["installed"] = "1"
 			}
+			if w.EAPOL.Group {
+				attrs["group"] = "1"
+			}
+			if w.EAPOL.GTK {
+				attrs["gtk"] = "1"
+			}
 		}
 		if err := g.fact(ctx, model.RelHandshake, dev, apDev, ts, ts, "wifi", attrs); err != nil {
 			return err
