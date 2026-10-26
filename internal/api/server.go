@@ -25,6 +25,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/xen0bit/netgraph/internal/alert"
 	"github.com/xen0bit/netgraph/internal/buildinfo"
 	"github.com/xen0bit/netgraph/internal/graph"
 	"github.com/xen0bit/netgraph/internal/graph/d2render"
@@ -48,6 +49,9 @@ type Config struct {
 	// WiFi holds the Wi-Fi keys served to sensors; nil serves none. They
 	// are only served when IngestToken is set.
 	WiFi *wifi.Secrets
+	// Alerts reports the new-device notifier's counters for /metrics;
+	// nil when alerts are off.
+	Alerts func() alert.Stats
 	// MaxBatch bounds an ingest request body (compressed); default 32 MiB.
 	MaxBatch int64
 }
@@ -58,6 +62,8 @@ type Server struct {
 	mux  *http.ServeMux
 	log  *slog.Logger
 	keys atomic.Pointer[wifi.Secrets]
+
+	ingestStats ingestMetrics
 }
 
 // SetWiFi replaces the Wi-Fi keys served to sensors, such as after the key
@@ -90,6 +96,7 @@ func New(cfg Config) *Server {
 	read("/api/v1/sensors", s.sensors)
 	read("/api/v1/wifi", s.wifi)
 	read("/api/v1/live", s.live)
+	read("/metrics", s.metrics)
 	s.mux.Handle("PUT /api/v1/devices/{mac}/label", s.requireRead(http.HandlerFunc(s.setLabel)))
 	s.mux.HandleFunc("GET /", s.web)
 	return s
@@ -178,12 +185,15 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, err)
 		return
 	}
+	start := time.Now()
 	res, err := s.cfg.Store.Ingest(r.Context(), sensor, r.Header.Get(wire.HeaderBoot), events)
 	if err != nil {
+		s.ingestStats.errors.Add(1)
 		s.log.Error("ingest", "sensor", sensor, "events", len(events), "err", err)
 		httpError(w, http.StatusInternalServerError, errors.New("ingest failed"))
 		return
 	}
+	s.ingestStats.observe(res.Accepted, res.Duplicates, time.Since(start))
 	s.log.Debug("ingested", "sensor", sensor, "accepted", res.Accepted, "duplicates", res.Duplicates)
 	writeJSON(w, map[string]int{"accepted": res.Accepted, "duplicates": res.Duplicates})
 }

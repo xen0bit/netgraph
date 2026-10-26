@@ -63,6 +63,26 @@ netgraph serve -db /var/lib/netgraph/netgraph.db -listen :8443
 Retention runs hourly. Back up a live database with `netgraph db backup
 -db netgraph.db backup.db`.
 
+### Monitoring
+
+`GET /metrics` serves Prometheus metrics, behind the read token when one
+is set. Sensors report their counters to the server, so one scrape covers
+every sensor, labelled `sensor="<name>"`:
+
+```yaml
+scrape_configs:
+  - job_name: netgraph
+    scheme: https
+    authorization: { credentials_file: /etc/prometheus/netgraph.token }
+    static_configs: [{ targets: ["netgraph.lan:8443"] }]
+```
+
+Worth alerting on: `time() - netgraph_sensor_last_seen_timestamp_seconds`
+(a sensor went quiet), `rate(netgraph_sensor_kernel_drops_total[5m])`
+(capture overload), `rate(netgraph_sensor_events_dropped_total[5m])` (the
+server was unreachable longer than the spool lasts), and
+`netgraph_ingest_errors_total`.
+
 ### New-device alerts
 
 With `-alert-webhook URL`, the server posts an alert the first time a

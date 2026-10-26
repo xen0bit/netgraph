@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode"
 
@@ -57,6 +58,18 @@ type Notifier struct {
 	log     *slog.Logger
 	queue   chan store.NewDevice
 	backoff time.Duration // first retry delay; tests shorten it
+
+	sent, failed, dropped, learning atomic.Uint64
+}
+
+// Stats counts alerts by outcome, for /metrics.
+type Stats struct {
+	Sent, Failed, Dropped, Learning uint64
+}
+
+// Stats returns the counters.
+func (n *Notifier) Stats() Stats {
+	return Stats{Sent: n.sent.Load(), Failed: n.failed.Load(), Dropped: n.dropped.Load(), Learning: n.learning.Load()}
 }
 
 // New returns a Notifier; call Run to deliver.
@@ -83,6 +96,7 @@ func (n *Notifier) Notify(d store.NewDevice) {
 	select {
 	case n.queue <- d:
 	default:
+		n.dropped.Add(1)
 		n.log.Warn("alert queue full; dropping new-device alert", "mac", d.MAC)
 	}
 }
@@ -94,7 +108,8 @@ func (n *Notifier) Run(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case d := <-n.queue:
-			if n.learning(ctx, d.TS) {
+			if n.inLearning(ctx, d.TS) {
+				n.learning.Add(1)
 				n.log.Debug("new device during learning period; not alerting", "mac", d.MAC, "label", d.Label)
 				continue
 			}
@@ -103,7 +118,7 @@ func (n *Notifier) Run(ctx context.Context) {
 	}
 }
 
-func (n *Notifier) learning(ctx context.Context, ts time.Time) bool {
+func (n *Notifier) inLearning(ctx context.Context, ts time.Time) bool {
 	if n.cfg.Learn <= 0 || n.cfg.Since == nil {
 		return false
 	}
@@ -123,10 +138,12 @@ func (n *Notifier) deliver(ctx context.Context, d store.NewDevice) {
 	for attempt := 1; ; attempt++ {
 		err := n.post(ctx, body)
 		if err == nil {
+			n.sent.Add(1)
 			n.log.Info("sent new-device alert", "mac", d.MAC, "label", d.Label)
 			return
 		}
 		if attempt == 4 || ctx.Err() != nil {
+			n.failed.Add(1)
 			n.log.Warn("new-device alert not delivered", "mac", d.MAC, "err", err)
 			return
 		}

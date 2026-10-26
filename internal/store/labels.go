@@ -113,3 +113,22 @@ func (s *Store) FirstSensorSeen(ctx context.Context) (time.Time, error) {
 	}
 	return time.UnixMilli(first.Int64).UTC(), nil
 }
+
+// EntityCounts counts the entities in the database by kind.
+func (s *Store) EntityCounts(ctx context.Context) (map[string]int64, error) {
+	rows, err := s.r.QueryContext(ctx, `SELECT kind, count(*) FROM entities GROUP BY kind`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]int64{}
+	for rows.Next() {
+		var k string
+		var n int64
+		if err := rows.Scan(&k, &n); err != nil {
+			return nil, err
+		}
+		out[k] = n
+	}
+	return out, rows.Err()
+}

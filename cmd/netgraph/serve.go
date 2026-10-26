@@ -102,6 +102,9 @@ func runServe(args []string) error {
 	defer st.Close()
 
 	cfg := api.Config{Store: st, IngestToken: ingestTok, ReadToken: readTok, WiFi: wifiKeys, Web: web.FS, Logger: log}
+	if notifier != nil {
+		cfg.Alerts = notifier.Stats
+	}
 	if *webDir != "" {
 		cfg.Web = os.DirFS(*webDir)
 	}

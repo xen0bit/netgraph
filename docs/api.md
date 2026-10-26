@@ -34,6 +34,7 @@ Times in responses are unix milliseconds.
 | `GET /api/v1/wifi` | `[{bssid, ssid, security, channel, clients, first_seen, last_seen}]`, from monitor-mode sensors |
 | `GET /api/v1/live` | server-sent events: `event: ingest` with `[{type, ts, detail}]` per batch |
 | `PUT /api/v1/devices/{mac}/label` | names a device by hand: body `{"label": "Living room TV"}` (JSON required; at most 64 printable characters), `{"label": ""}` restores the automatic name. `204`, or `400`/`404`. Read token |
+| `GET /metrics` | Prometheus text: ingest counters, each sensor's last reported stats (packets, kernel drops, queued and dropped events, ...), entities by kind, database size, alert outcomes. Read token |
 | `GET /api/v1/version`, `/healthz` | `{version, commit}`; no token needed |
 
 Graph options: `collapse=0|1` (default 1), `dns=0|1` (1), `identity=0|1`

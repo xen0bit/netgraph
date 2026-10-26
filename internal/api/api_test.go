@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -348,5 +349,65 @@ func TestSetLabelAPI(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusUnsupportedMediaType {
 		t.Errorf("form body: %s", resp.Status)
+	}
+}
+
+// /metrics is Prometheus text: read-token protected, one TYPE per metric,
+// and the sensor's stats and the server's ingest counters present.
+func TestMetrics(t *testing.T) {
+	srv, _ := serve(t, nil)
+	get := func(token string) (int, string) {
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/metrics", nil)
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		var b strings.Builder
+		_, _ = bufio.NewReader(resp.Body).WriteTo(&b)
+		return resp.StatusCode, b.String()
+	}
+	if code, _ := get(""); code != http.StatusUnauthorized {
+		t.Errorf("anonymous /metrics: %d", code)
+	}
+	code, body := get("rd-tok")
+	if code != http.StatusOK {
+		t.Fatalf("/metrics: %d", code)
+	}
+	sample := regexp.MustCompile(`^[a-zA-Z_:][a-zA-Z0-9_:]*(\{([a-zA-Z_][a-zA-Z0-9_]*="([^"\\]|\\.)*",?)*\})? -?[0-9.eE+-]+$`)
+	types := map[string]bool{}
+	for _, line := range strings.Split(strings.TrimSpace(body), "\n") {
+		if name, ok := strings.CutPrefix(line, "# TYPE "); ok {
+			name = strings.Fields(name)[0]
+			if types[name] {
+				t.Errorf("duplicate TYPE for %s", name)
+			}
+			types[name] = true
+			continue
+		}
+		if strings.HasPrefix(line, "# HELP ") {
+			continue
+		}
+		if !sample.MatchString(line) {
+			t.Errorf("bad sample line %q", line)
+		}
+	}
+	for _, want := range []string{
+		`netgraph_ingest_batches_total `,
+		`netgraph_ingest_events_total{result="accepted"} `,
+		`netgraph_sensor_packets_total{sensor="router"} `,
+		`netgraph_sensor_last_seen_timestamp_seconds{sensor="router"} `,
+		`netgraph_entities{kind="device"} `,
+		`netgraph_db_size_bytes `,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("missing %q", want)
+		}
+	}
+	if strings.Contains(body, `netgraph_ingest_batches_total 0`) {
+		t.Error("ingest batches not counted")
 	}
 }
