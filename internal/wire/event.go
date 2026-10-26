@@ -35,6 +35,7 @@ const (
 	TypeName    Type = "name"    // a NetBIOS or LLMNR name claim
 	TypeSSDP    Type = "ssdp"    // an SSDP/UPnP announcement or response
 	TypeLLDP    Type = "lldp"    // an LLDP neighbour advertisement
+	TypeWiFi    Type = "wifi"    // a Wi-Fi network, client or handshake observation
 )
 
 // Event is one observation. TS is when it was observed (the packet's capture
@@ -54,6 +55,7 @@ type Event struct {
 	Name    *Name    `json:"name,omitempty"`
 	SSDP    *SSDP    `json:"ssdp,omitempty"`
 	LLDP    *LLDP    `json:"lldp,omitempty"`
+	WiFi    *WiFi    `json:"wifi,omitempty"`
 }
 
 // Hello describes the sensor and the interfaces it captures. The server uses
@@ -204,12 +206,13 @@ type Service struct {
 	TXT      map[string]string `json:"txt,omitempty"`
 }
 
-// Name is a NetBIOS or LLMNR name a host claimed for itself.
+// Name is a name a host claimed for itself, or that was found for it:
+// NetBIOS, LLMNR, or reverse DNS.
 type Name struct {
 	MAC    string     `json:"mac,omitempty"`
 	IP     netip.Addr `json:"ip"`
 	Name   string     `json:"name"`
-	Proto  string     `json:"proto"`            // nbns, llmnr
+	Proto  string     `json:"proto"`            // nbns, llmnr, rdns
 	Suffix string     `json:"suffix,omitempty"` // NetBIOS suffix, e.g. "workstation"
 	Group  bool       `json:"group,omitempty"`
 }
@@ -235,4 +238,37 @@ type LLDP struct {
 	SystemName  string `json:"sys_name,omitempty"`
 	SystemDesc  string `json:"sys_desc,omitempty"`
 	MgmtAddress string `json:"mgmt,omitempty"`
+}
+
+// WiFi is one observation from a monitor-mode 802.11 capture. It deliberately
+// carries no key material: the sensor does decryption locally and may forward
+// the decrypted IP traffic as ordinary flow events.
+type WiFi struct {
+	Kind      string   `json:"kind"` // beacon, probe_request, association_request, handshake, data, ...
+	BSSID     string   `json:"bssid,omitempty"`
+	SSID      string   `json:"ssid,omitempty"`
+	Client    string   `json:"client,omitempty"`
+	Channel   int      `json:"channel,omitempty"`
+	Frequency int      `json:"freq,omitempty"`   // MHz
+	Signal    int      `json:"signal,omitempty"` // dBm
+	Security  string   `json:"security,omitempty"`
+	Ciphers   []string `json:"ciphers,omitempty"`
+	AKMs      []string `json:"akms,omitempty"`
+	Hidden    bool     `json:"hidden,omitempty"`
+	Protected bool     `json:"protected,omitempty"`
+	Decrypted bool     `json:"decrypted,omitempty"`
+	Bytes     uint64   `json:"bytes,omitempty"`
+	Reason    int      `json:"reason,omitempty"`
+	// EAPOL describes a 4-way handshake message, never its nonces or MIC.
+	EAPOL *EAPOL `json:"eapol,omitempty"`
+	Error string `json:"error,omitempty"`
+}
+
+// EAPOL is the public shape of one 802.1X key message.
+type EAPOL struct {
+	Message   int    `json:"message"` // 1..4
+	Version   int    `json:"version,omitempty"`
+	Cipher    string `json:"cipher,omitempty"`
+	Valid     bool   `json:"valid,omitempty"`
+	Installed bool   `json:"installed,omitempty"`
 }

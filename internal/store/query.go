@@ -1254,6 +1254,55 @@ func (s *Store) Summary(ctx context.Context, f model.Filter) (*model.Summary, er
 	return sum, nil
 }
 
+// WiFi lists the SSIDs access points were seen broadcasting in the window,
+// with how many clients associated to each AP. It is empty unless a
+// monitor-mode sensor has reported Wi-Fi observations.
+func (s *Store) WiFi(ctx context.Context, f model.Filter) ([]model.WiFiNetwork, error) {
+	from, to := s.window(f)
+	w := &where{}
+	w.add("f.rel = 'broadcasts' AND f.first_seen < ? AND f.last_seen >= ?", to, from)
+	if f.Device != "" {
+		ids, err := s.deviceIDs(ctx, f.Device)
+		if err != nil {
+			return nil, err
+		}
+		w.add("f.src IN (" + idList(ids) + ")")
+	}
+	if f.Domain != "" {
+		w.add("lower(b.key) GLOB ?", glob(f.Domain))
+	}
+	rows, err := s.r.QueryContext(ctx, `
+		SELECT a.key, b.key, b.label, f.attrs, min(f.first_seen), max(f.last_seen),
+			(SELECT count(DISTINCT c.src) FROM facts c WHERE c.rel = 'associates' AND c.dst = a.id
+			 AND c.first_seen < ? AND c.last_seen >= ?)
+		FROM facts f JOIN entities a ON a.id = f.src JOIN entities b ON b.id = f.dst
+		WHERE `+w.sql()+`
+		GROUP BY a.id, b.id
+		ORDER BY max(f.last_seen) DESC LIMIT ?`,
+		append([]any{to, from}, append(w.args, limit(f, 1000, 10000))...)...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []model.WiFiNetwork{}
+	for rows.Next() {
+		var n model.WiFiNetwork
+		var attrs, label string
+		if err := rows.Scan(&n.BSSID, &n.SSID, &label, &attrs, &n.FirstSeen, &n.LastSeen, &n.Clients); err != nil {
+			return nil, err
+		}
+		if label != "" {
+			n.SSID = label
+		}
+		var a map[string]string
+		_ = json.Unmarshal([]byte(attrs), &a)
+		n.Security = a["security"]
+		n.Channel, _ = strconv.Atoi(a["channel"])
+		out = append(out, n)
+	}
+	return out, rows.Err()
+}
+
 // Sensors lists the sensors that have sent data.
 func (s *Store) Sensors(ctx context.Context) ([]model.Sensor, error) {
 	rows, err := s.r.QueryContext(ctx, `SELECT name, version, first_seen, last_seen, hello, stats FROM sensors ORDER BY name`)

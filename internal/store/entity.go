@@ -221,6 +221,16 @@ func summarizeObservation(typ, data string) string {
 	case "lldp":
 		add("", "sys_name")
 		add("port ", "port")
+	case "wifi":
+		add("", "kind")
+		add("ssid=", "ssid")
+		add("client=", "client")
+		add("security=", "security")
+		if e, ok := m["eapol"].(map[string]any); ok {
+			if v, ok := e["message"]; ok {
+				parts = append(parts, "message="+fmt.Sprint(v))
+			}
+		}
 	default:
 		add("", "proto")
 		add("", "name")

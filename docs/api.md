@@ -31,6 +31,7 @@ Times in responses are unix milliseconds.
 | `GET /api/v1/graph?format=svg\|d2\|txt` | the graph drawn by the server; `theme=dark`, `layout=elk\|dagre` |
 | `GET /api/v1/entity?id=device:3c:22:fb:01:02:03` | `{id, kind, key, label, attrs, device, facts, flows, dns, timeline: [{ts, type, detail}]}` |
 | `GET /api/v1/sensors` | `[{name, version, interfaces, first_seen, last_seen, stats}]` |
+| `GET /api/v1/wifi` | `[{bssid, ssid, security, channel, clients, first_seen, last_seen}]`, from monitor-mode sensors |
 | `GET /api/v1/live` | server-sent events: `event: ingest` with `[{type, ts, detail}]` per batch |
 | `GET /api/v1/version`, `/healthz` | `{version, commit}`; no token needed |
 
@@ -56,9 +57,13 @@ Sensors `POST /api/v1/ingest` with:
 
 The body is newline-delimited JSON events, each `{seq, type, ts, <type>:
 {...}}`, as defined in [`internal/wire/event.go`](../internal/wire/event.go).
-Events with a `seq` at or below the last one ingested for that sensor boot
-are skipped, so retries are safe. The response is `{accepted,
-duplicates}`. Anything that can produce these events can feed netgraph:
+Event types are `hello`, `stats`, `flow`, `dns`, `binding`, `dhcp`, `mdns`,
+`name`, `ssdp`, `lldp` and `wifi`. A `name` from reverse DNS has
+`"proto":"rdns"`; a `wifi` event describes an access point, client,
+association or handshake and never carries key material. Events with a
+`seq` at or below the last one ingested for that sensor boot are skipped, so
+retries are safe. The response is `{accepted, duplicates}`. Anything that
+can produce these events can feed netgraph:
 
 ```sh
 netgraph-sensor run -pcap capture.pcap -server - > events.jsonl   # JSON lines on stdout

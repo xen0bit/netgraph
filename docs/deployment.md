@@ -86,6 +86,11 @@ netgraph-sensor run -iface br-lan -server https://netgraph.lan:8443 -token-file 
 | `-spool-mb` | `32` | batches held while the server is unreachable; oldest dropped beyond |
 | `-mem-limit-mb` | `128` | Go soft memory limit (unless `$GOMEMLIMIT`) |
 | `-ring-mb` | `8` | AF_PACKET ring per interface |
+| `-rdns` | on | reverse DNS for local hosts while they are observed (live capture only) |
+| `-rdns-timeout`, `-rdns-workers`, `-rdns-ttl` | `2s`, `4`, `1h` | lookup bound, concurrency and answer cache |
+| `-wifi-key-file` | `$NETGRAPH_WIFI_KEY_FILE` | WPA/WPA2 passphrases, PMKs and WEP keys |
+| `-wifi-hop`, `-wifi-channels`, `-wifi-dwell` | off, common 2.4/5 GHz, `250ms` | channel hopping on monitor interfaces |
+| `-wifi-data` | off | emit one event per data frame (noisy; management and handshakes are always reported) |
 
 Capturing needs `CAP_NET_RAW`. Run as root, use the systemd unit
 (below), or grant the capability once:
@@ -98,6 +103,54 @@ The sensor ignores its own connection to the server. If the server is
 unreachable it keeps capturing, holds up to `-spool-mb` of batches, and
 delivers them in order when the server is back. Retried batches are
 recognised and not counted twice.
+
+Reverse DNS uses the system resolver (`/etc/resolv.conf`), which on a
+router normally means dnsmasq and its DHCP leases. It runs only for live
+capture, at most four lookups at once, and is turned off with `-rdns=false`.
+A `-pcap` replay never performs active lookups, so replaying the same file
+twice gives the same events.
+
+### Wi-Fi capture
+
+A monitor-mode interface gets 802.11 frames, so the sensor decodes Wi-Fi
+natively (no bridge or router capture is needed):
+
+```sh
+iw dev wlan0 interface add mon0 type monitor
+ip link set mon0 up
+netgraph-sensor run -iface mon0 -server https://netgraph.lan:8443 \
+  -wifi-key-file /etc/netgraph/wifi.keys -wifi-hop -wifi-channels 1,6,11,36,40,44,48
+```
+
+`-wifi-hop` uses the wireless extensions ioctl. It works with ordinary
+mac80211 monitor interfaces; 6 GHz channels and some fullmac drivers need a
+fixed channel instead. The interface must already be in monitor mode; the
+sensor never changes that.
+
+Keys are read from a root-only file, never from flags, so they do not appear
+in `ps` or a shell history:
+
+```sh
+sudo install -m 600 /dev/null /etc/netgraph/wifi.keys
+sudo tee /etc/netgraph/wifi.keys >/dev/null <<'EOF'
+# WPA/WPA2-PSK: <ssid> <passphrase or 64 hex digits>
+wpa2 home correct horse battery staple
+# WPA3/SAE or 802.1X: the PMK must be obtained out of band
+pmk modern 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
+# WEP: <index 0-3> <5, 13 or 16 bytes of hex>
+wep 0 0102030405
+EOF
+```
+
+Open networks need no keys. WEP and WPA/WPA2-PSK are decrypted from the
+air; WPA3/SAE, OWE and 802.1X have no passively derivable PMK and need a
+`pmk` entry. Decrypted data frames enter the normal flow, DNS, TLS and HTTP
+pipeline, so the connection graph looks the same as for a wired capture.
+Wi-Fi events carry no key material.
+
+If the interface is not in monitor mode, or no packets are 802.11, the
+sensor treats it as Ethernet. Channel hopping is only started for
+interfaces whose kernel link type is 802.11.
 
 ### OpenWrt
 
@@ -156,11 +209,15 @@ else and run read-only.
 
 ## Several sensors
 
-Any number of sensors can ship to one server, each with its own `-name`.
-The server learns each sensor's interface prefixes and uses them, together
-with the private ranges, to decide which addresses are local. Two sensors
-that see the same packets (say on both sides of a bridge) record them
-twice, so capture each segment once.
+Any number of sensors can ship to one server, each with its own `-name`
+(set it explicitly: the default is the hostname, and two sensors on one host
+would otherwise merge). The server learns each sensor's interface prefixes
+and uses them, together with the private ranges, to decide which addresses
+are local. Sequence numbers, boot IDs and flow IDs are scoped per sensor, so
+two sensors can record the same flow ID without colliding; the `sensors`
+query and the web UI's Sensors tab show each one's version, interfaces and
+counters. Two sensors that see the same packets (say on both sides of a
+bridge) record them twice, so capture each segment once.
 
 ## Securing it
 

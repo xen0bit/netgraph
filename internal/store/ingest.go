@@ -307,6 +307,10 @@ func (g *ingester) event(ctx context.Context, sid int64, sensor, boot string, ev
 		if ev.LLDP != nil {
 			return g.lldp(ctx, sid, ts, ev.LLDP)
 		}
+	case wire.TypeWiFi:
+		if ev.WiFi != nil {
+			return g.wifi(ctx, sid, ts, ev.WiFi)
+		}
 	}
 	return nil // unknown types are from a newer sensor; ignore them
 }
@@ -383,7 +387,11 @@ func (g *ingester) setAttr(kind, key, k, v string) {
 }
 
 // Label priorities: which source names a device best.
+// Higher numbers are better names. Reverse DNS is deliberately the weakest
+// source: a host that announced a name through DHCP, mDNS, NetBIOS, LLMNR or
+// LLDP keeps it, and the sensor's own name for the router wins too.
 const (
+	priRDNS   = 5
 	priRouter = 10
 	priLLDP   = 20
 	priLLMNR  = 30
@@ -1094,8 +1102,11 @@ func (g *ingester) name(ctx context.Context, sid, ts int64, n *wire.Name) error 
 		return g.observation(ctx, sid, ts, n.Proto, dev, n.IP, n)
 	}
 	pri := priNBNS
-	if n.Proto == "llmnr" {
+	switch n.Proto {
+	case "llmnr":
 		pri = priLLMNR
+	case "rdns":
+		pri = priRDNS
 	}
 	if err := g.hostname(ctx, dev, mac, n.Name, ts, n.Proto, pri); err != nil {
 		return err
@@ -1126,6 +1137,148 @@ func (g *ingester) ssdp(ctx context.Context, sid, ts int64, s *wire.SSDP) error 
 		}
 	}
 	return g.observation(ctx, sid, ts, "ssdp", dev, s.IP, s)
+}
+
+// normMAC returns the canonical form of a MAC, or false for a missing or
+// malformed one. Wi-Fi frames come from the air, so no value is trusted.
+func normMAC(s string) (string, bool) {
+	if s == "" {
+		return "", false
+	}
+	hw, err := net.ParseMAC(s)
+	if err != nil || len(hw) != 6 || hw[0]&1 != 0 {
+		return "", false
+	}
+	return hw.String(), true
+}
+
+// wifi stores what a monitor-mode sensor decoded. Access points become
+// devices with the role access_point; their SSIDs are entities, so the graph
+// can show "ap broadcasts ssid" and "client probes/associates ap". Handshake
+// events carry no key material, only whether the 4-way exchange completed.
+func (g *ingester) wifi(ctx context.Context, sid, ts int64, w *wire.WiFi) error {
+	ap, hasAP := normMAC(w.BSSID)
+	client, hasClient := normMAC(w.Client)
+	var dev int64
+	var err error
+	switch w.Kind {
+	case "beacon", "probe_response":
+		if !hasAP {
+			return nil
+		}
+		if dev, err = g.device(ctx, ap, ts); err != nil {
+			return err
+		}
+		if e := g.row(model.KindDevice, ap); e != nil && e.attrs["role"] == "" {
+			g.setAttr(model.KindDevice, ap, "role", "access_point")
+		}
+		for k, v := range map[string]string{
+			"ssid": w.SSID, "wifi_security": w.Security, "wifi_channel": strconv.Itoa(w.Channel),
+		} {
+			if v != "" && v != "0" {
+				g.setAttr(model.KindDevice, ap, k, v)
+			}
+		}
+		if w.SSID != "" {
+			ssid, err := g.entity(ctx, model.KindSSID, strings.ToLower(w.SSID), ts, func(e *entRow) {
+				e.label = w.SSID
+			})
+			if err != nil {
+				return err
+			}
+			g.setAttr(model.KindSSID, strings.ToLower(w.SSID), "security", w.Security)
+			attrs := map[string]string{}
+			if w.Channel != 0 {
+				attrs["channel"] = strconv.Itoa(w.Channel)
+			}
+			if w.Security != "" {
+				attrs["security"] = w.Security
+			}
+			if err := g.fact(ctx, model.RelBroadcasts, dev, ssid, ts, ts, "wifi", attrs); err != nil {
+				return err
+			}
+		}
+	case "probe_request":
+		if !hasClient || w.SSID == "" {
+			return nil
+		}
+		if dev, err = g.device(ctx, client, ts); err != nil {
+			return err
+		}
+		ssid, err := g.entity(ctx, model.KindSSID, strings.ToLower(w.SSID), ts, func(e *entRow) { e.label = w.SSID })
+		if err != nil {
+			return err
+		}
+		if err := g.fact(ctx, model.RelProbes, dev, ssid, ts, ts, "wifi", nil); err != nil {
+			return err
+		}
+	case "association_request", "association_response":
+		if !hasAP || !hasClient {
+			return nil
+		}
+		if dev, err = g.device(ctx, client, ts); err != nil {
+			return err
+		}
+		apDev, err := g.device(ctx, ap, ts)
+		if err != nil {
+			return err
+		}
+		if e := g.row(model.KindDevice, ap); e != nil && e.attrs["role"] == "" {
+			g.setAttr(model.KindDevice, ap, "role", "access_point")
+		}
+		attrs := map[string]string{}
+		if w.SSID != "" {
+			attrs["ssid"] = w.SSID
+		}
+		if err := g.fact(ctx, model.RelAssociates, dev, apDev, ts, ts, "wifi", attrs); err != nil {
+			return err
+		}
+	case "data":
+		// Debug data-frame events are for live inspection; storing one
+		// row per frame would dwarf the useful Wi-Fi facts.
+		return nil
+	case "handshake":
+		if !hasAP || !hasClient {
+			return nil
+		}
+		if dev, err = g.device(ctx, client, ts); err != nil {
+			return err
+		}
+		apDev, err := g.device(ctx, ap, ts)
+		if err != nil {
+			return err
+		}
+		attrs := map[string]string{"cipher": ""}
+		if w.EAPOL != nil {
+			attrs["message"] = strconv.Itoa(w.EAPOL.Message)
+			if w.EAPOL.Cipher != "" {
+				attrs["cipher"] = w.EAPOL.Cipher
+			}
+			if w.EAPOL.Valid {
+				attrs["valid"] = "1"
+			}
+			if w.EAPOL.Installed {
+				attrs["installed"] = "1"
+			}
+		}
+		if err := g.fact(ctx, model.RelHandshake, dev, apDev, ts, ts, "wifi", attrs); err != nil {
+			return err
+		}
+	default:
+		if hasClient {
+			if dev, err = g.device(ctx, client, ts); err != nil {
+				return err
+			}
+		} else if hasAP {
+			if dev, err = g.device(ctx, ap, ts); err != nil {
+				return err
+			}
+		}
+	}
+	if dev == 0 {
+		return nil
+	}
+	return g.observation(ctx, sid, ts, "wifi", dev, netip.Addr{}, w)
 }
 
 func (g *ingester) lldp(ctx context.Context, sid, ts int64, l *wire.LLDP) error {

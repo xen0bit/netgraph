@@ -11,13 +11,20 @@ import (
 
 // Link types (tcpdump.org/linktypes.html) the sensor parses.
 const (
-	LinkEthernet = 1
-	LinkRaw      = 101
-	LinkSLL      = 113
-	LinkIPv4     = 228
-	LinkIPv6     = 229
-	LinkSLL2     = 276
+	LinkEthernet          = 1
+	LinkRaw               = 101
+	LinkIEEE80211         = 105
+	LinkSLL               = 113
+	LinkIEEE80211Radiotap = 127
+	LinkIPv4              = 228
+	LinkIPv6              = 229
+	LinkSLL2              = 276
 )
+
+// IsWiFi reports a link type that carries 802.11 frames.
+func IsWiFi(link int) bool {
+	return link == LinkIEEE80211 || link == LinkIEEE80211Radiotap
+}
 
 // ErrTimeout is returned by ReadPacket when no packet arrived within the
 // source's poll interval; the caller loops, checking for shutdown.

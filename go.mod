@@ -13,6 +13,7 @@ require (
 	github.com/klauspost/compress v1.20.3
 	github.com/muesli/termenv v0.16.0
 	golang.org/x/net v0.61.0
+	golang.org/x/sys v0.49.0
 	modernc.org/sqlite v1.57.0
 	oss.terrastruct.com/d2 v0.7.1
 )
@@ -54,7 +55,6 @@ require (
 	github.com/yuin/goldmark v1.7.17 // indirect
 	golang.org/x/exp v0.0.0-20240909161429-701f63a606c0 // indirect
 	golang.org/x/image v0.20.0 // indirect
-	golang.org/x/sys v0.49.0 // indirect
 	golang.org/x/text v0.43.0 // indirect
 	golang.org/x/xerrors v0.0.0-20240903120638-7835f813f4da // indirect
 	modernc.org/libc v1.74.4 // indirect

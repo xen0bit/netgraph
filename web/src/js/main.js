@@ -187,7 +187,7 @@ async function renderTab(seq) {
   const t = state.tab;
   try {
     if (t === "graph") return await renderGraph(seq);
-    const path = { devices: "devices", flows: "flows", dns: "dns", facts: "facts", sensors: "sensors" }[t];
+    const path = { devices: "devices", flows: "flows", dns: "dns", facts: "facts", wifi: "wifi", sensors: "sensors" }[t];
     const rows = await track(api(path));
     if (seq !== refreshSeq) return;
     state.data[t] = rows || [];
@@ -320,6 +320,18 @@ const tables = {
     ],
     id: (f) => f.dst,
   },
+  wifi: {
+    cols: ["SSID", "BSSID", "Security", "Channel", "Clients", "First seen", "Last seen"],
+    num: [3, 4],
+    row: (n) => [
+      esc(n.ssid) || badge("hidden", "closed"),
+      `<span class="mono">${esc(n.bssid)}</span>`,
+      n.security ? badge(n.security) : "",
+      n.channel || "",
+      n.clients ?? 0, stamp(n.first_seen), stamp(n.last_seen),
+    ],
+    id: (n) => `device:${n.bssid}`,
+  },
   sensors: {
     cols: ["Sensor", "Version", "Interfaces", "First seen", "Last seen", "Packets", "Kernel drops", "Events dropped"],
     num: [5, 6, 7],
@@ -372,6 +384,7 @@ async function renderGraph(seq) {
     await engineReady;
   }
   if (seq !== refreshSeq) return;
+  diagram.loading("Loading graph…");
   const query = params(graphOpts()).toString();
   const serverDraw = async () => {
     const [g, svg] = await Promise.all([api("graph", graphOpts()), api("graph", { ...graphOpts(), format: "svg", theme: theme(), layout: state.layout }, true)]);
@@ -584,7 +597,7 @@ function init() {
     else if (k === "]") $("#fwd").click();
     else if (k === "l") $("#live").click();
     else if (k === "/") { e.preventDefault(); $("#filter").focus(); }
-    else if (k >= "1" && k <= "6") selectTab($$(".tabs button")[Number(k) - 1].dataset.tab);
+    else if (k >= "1" && Number(k) <= $$(".tabs button").length) selectTab($$(".tabs button")[Number(k) - 1].dataset.tab);
   });
   brush();
   addEventListener("resize", () => renderSpark(series));

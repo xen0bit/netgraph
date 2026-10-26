@@ -24,7 +24,12 @@ that are easy to break.
   totals and prorate only edge-crossing connections (`connBytes`).
 - **Replays are deterministic.** The flow table walks its LRU list, never
   a map, and DNS timeouts are sorted: replaying a capture twice gives
-  identical events (`TestReplayDeterministic`).
+  identical events (`TestReplayDeterministic`). Active lookups — reverse
+  DNS, channel hopping — are live-capture only.
+- **Wi-Fi decryption stays on the sensor and in pure Go.** `internal/wifi`
+  derives WEP/WPA/WPA2 keys locally; `wifi` events carry no key material,
+  nonces or MICs. WPA3/SAE and 802.1X are parsed but need a supplied PMK;
+  never fake a handshake result.
 - **Decoders are pure functions over bytes from the network**, which is
   attacker-controlled: bound every length, never loop on input, and give
   each a `Fuzz*` target. The processor also recovers from panics, but a

@@ -38,7 +38,9 @@ import (
 	"github.com/xen0bit/netgraph/internal/buildinfo"
 	"github.com/xen0bit/netgraph/internal/capture"
 	"github.com/xen0bit/netgraph/internal/flow"
+	"github.com/xen0bit/netgraph/internal/rdns"
 	"github.com/xen0bit/netgraph/internal/sensor"
+	"github.com/xen0bit/netgraph/internal/wifi"
 	"github.com/xen0bit/netgraph/internal/wire"
 )
 
@@ -92,6 +94,15 @@ func run(args []string) error {
 	maxFlows := fs.Int("max-flows", 65536, "flow table capacity; least recently used flows are evicted beyond it")
 	spoolMB := fs.Int("spool-mb", 32, "memory for batches awaiting delivery, MiB; oldest are dropped beyond it")
 	flushEvery := fs.Duration("flush", 2*time.Second, "send batches at least this often")
+	rdnsOn := fs.Bool("rdns", true, "resolve reverse DNS names for local hosts as they are observed (live capture only)")
+	rdnsTimeout := fs.Duration("rdns-timeout", 2*time.Second, "bound on one reverse DNS lookup")
+	rdnsWorkers := fs.Int("rdns-workers", 4, "concurrent reverse DNS lookups")
+	rdnsTTL := fs.Duration("rdns-ttl", time.Hour, "reuse a reverse DNS answer for this long")
+	wifiKeyFile := fs.String("wifi-key-file", envOr("NETGRAPH_WIFI_KEY_FILE", ""), "WPA/WPA2 passphrases, PMKs and WEP keys for Wi-Fi capture; $NETGRAPH_WIFI_KEY_FILE")
+	wifiHop := fs.Bool("wifi-hop", false, "hop channels on monitor-mode interfaces")
+	wifiDwell := fs.Duration("wifi-dwell", 250*time.Millisecond, "time to stay on each channel while hopping")
+	wifiChannels := fs.String("wifi-channels", "", "comma-separated channels to hop (default: common 2.4/5 GHz channels)")
+	wifiData := fs.Bool("wifi-data", false, "emit one event per Wi-Fi data frame (noisy; management and handshakes are always reported)")
 	memLimit := fs.Int("mem-limit-mb", 128, "Go soft memory limit, MiB, unless $GOMEMLIMIT is set (0: none)")
 	logLevel := fs.String("log-level", "info", "debug, info, warn or error")
 	logFormat := fs.String("log-format", "text", "text or json")
@@ -140,10 +151,6 @@ func run(args []string) error {
 		ignore = self.match
 	}
 
-	proc := sensor.NewProcessor(sensor.Config{
-		Flow:   flow.Config{ActiveTimeout: *active, TCPIdle: *tcpIdle, UDPIdle: *udpIdle, MaxFlows: *maxFlows},
-		Logger: log, Ignore: ignore,
-	}, out)
 	var names []string
 	if *ifaces != "" {
 		for _, v := range strings.Split(*ifaces, ",") {
@@ -154,13 +161,47 @@ func run(args []string) error {
 			names = append(names, n)
 		}
 	}
-	r := &sensor.Runner{
-		Processor: proc, Out: out,
-		Hello: wire.Hello{
-			Name: *name, Version: buildinfo.Version, OS: runtime.GOOS, Arch: runtime.GOARCH,
-			Interfaces: sensor.InterfaceInfo(names), ActiveTimeout: *active,
-		},
+	hello := wire.Hello{
+		Name: *name, Version: buildinfo.Version, OS: runtime.GOOS, Arch: runtime.GOARCH,
+		Interfaces: sensor.InterfaceInfo(names), ActiveTimeout: *active,
 	}
+
+	// Wi-Fi keys are optional: without them, management frames and
+	// handshakes are still decoded and open networks still feed the IP
+	// pipeline.
+	keys := wifi.NewKeyring()
+	if *wifiKeyFile != "" {
+		k, err := wifi.LoadKeyFile(*wifiKeyFile)
+		if err != nil {
+			return fmt.Errorf("wifi keys: %w", err)
+		}
+		keys = k
+	}
+	wifiProc := wifi.NewProcessor(wifi.Config{
+		Keys: keys, Logger: log, IncludeData: *wifiData,
+		Emit: func(ev wire.Event) { out.Emit(ev) },
+	})
+
+	// Reverse DNS is an active lookup, so it is only done on live capture:
+	// a replay must not depend on the resolver of the machine replaying it.
+	var reverse *rdns.Lookup
+	if *rdnsOn && *pcap == "" {
+		reverse = rdns.New(rdns.Config{
+			Timeout: *rdnsTimeout, Workers: *rdnsWorkers, TTL: *rdnsTTL, Logger: log,
+			Emit: func(n rdns.Name) {
+				out.Emit(wire.Event{Type: wire.TypeName, TS: n.TS, Name: &wire.Name{
+					MAC: n.MAC, IP: n.IP, Name: n.Name, Proto: "rdns",
+				}})
+			},
+		})
+		defer reverse.Close()
+	}
+	proc := sensor.NewProcessor(sensor.Config{
+		Flow:   flow.Config{ActiveTimeout: *active, TCPIdle: *tcpIdle, UDPIdle: *udpIdle, MaxFlows: *maxFlows},
+		Logger: log, Ignore: ignore,
+		RDNS: reverse, IsLocal: sensor.LocalChecker(hello.Interfaces), WiFi: wifiProc,
+	}, out)
+	r := &sensor.Runner{Processor: proc, Out: out, Hello: hello}
 
 	var shipDone chan struct{}
 	shipCtx, cancelShip := context.WithCancel(context.Background())
@@ -191,9 +232,45 @@ func run(args []string) error {
 				return oerr
 			}
 			sources = append(sources, src)
-			log.Info("capturing", "iface", n)
+			log.Info("capturing", "iface", n, "link", linkName(src.LinkType()))
+		}
+		hopCtx, stopHop := context.WithCancel(ctx)
+		defer stopHop()
+		if *wifiHop {
+			channels := wifi.DefaultChannels()
+			if *wifiChannels != "" {
+				var perr error
+				if channels, perr = wifi.ParseChannels(*wifiChannels); perr != nil {
+					for _, s := range sources {
+						s.Close()
+					}
+					return perr
+				}
+			}
+			started := 0
+			for _, src := range sources {
+				if !capture.IsWiFi(src.LinkType()) {
+					continue
+				}
+				started++
+				go func(iface string) {
+					h := &wifi.Hopper{Interface: iface, Channels: channels, Dwell: *wifiDwell, Logger: log}
+					if err := h.Run(hopCtx); err != nil {
+						log.Warn("wifi channel hopping", "iface", iface, "err", err)
+					}
+				}(src.Name())
+			}
+			if started == 0 {
+				log.Warn("-wifi-hop was set but no capture interface is in monitor mode")
+			}
 		}
 		err = r.RunLive(ctx, sources)
+		stopHop()
+	}
+	if reverse != nil {
+		// Finish outstanding lookups before the shipper drains, so the
+		// names they found are in the final batch.
+		reverse.Close()
 	}
 	if shipper != nil {
 		// Run drains the spool (bounded) when its context ends.
@@ -204,6 +281,21 @@ func run(args []string) error {
 		err = nil
 	}
 	return err
+}
+
+func linkName(link int) string {
+	switch link {
+	case capture.LinkEthernet:
+		return "ethernet"
+	case capture.LinkRaw:
+		return "raw-ip"
+	case capture.LinkIEEE80211:
+		return "802.11"
+	case capture.LinkIEEE80211Radiotap:
+		return "802.11+radiotap"
+	default:
+		return strconv.Itoa(link)
+	}
 }
 
 func envOr(k, def string) string {

@@ -30,6 +30,7 @@ var palette = map[string][2]string{
 	model.KindUserAgent:   {"#e0e7ff", "#4338ca"},
 	model.KindUPnP:        {"#fae8ff", "#a21caf"},
 	model.KindLLDP:        {"#fef3c7", "#b45309"},
+	model.KindSSID:        {"#e0f2fe", "#0369a1"},
 }
 
 var darkPalette = map[string][2]string{
@@ -43,6 +44,7 @@ var darkPalette = map[string][2]string{
 	model.KindUserAgent:   {"#312e81", "#a5b4fc"},
 	model.KindUPnP:        {"#701a75", "#f0abfc"},
 	model.KindLLDP:        {"#78350f", "#fcd34d"},
+	model.KindSSID:        {"#075985", "#7dd3fc"},
 }
 
 // RenderD2 writes a graph as a d2 script. Every key is quoted: an
@@ -69,7 +71,7 @@ func RenderD2(g *model.Graph, o RenderOptions) string {
 			c := pal[k]
 			shape := "rectangle"
 			switch k {
-			case model.KindDomain:
+			case model.KindDomain, model.KindSSID:
 				shape = "oval"
 			case model.KindService, model.KindUPnP:
 				shape = "hexagon"

@@ -80,6 +80,7 @@ TIME                 DEVICE           TYPE  NAME               RCODE     MS    A
 | `query timeseries [-step 5m]` | traffic per step |
 | `query entity ID` | everything about one entity (`device:<mac>`, `ip:<addr>`, `domain:<name>`), with a timeline |
 | `query sensors` | sensors and their counters (packets, kernel drops, events dropped) |
+| `query wifi` | Wi-Fi networks, security, channel and associated clients |
 | `graph -o FILE` | the window's graph: `.svg`, `.d2`, `.txt`, `.json`, or `-` for text on stdout |
 | `import FILE.pcap...` | ingest captures directly (re-importing a file is a no-op) |
 | `db migrate`/`backup`/`retain`/`vacuum` | maintenance |
@@ -143,9 +144,12 @@ page asks for it once and keeps it in the browser.
   pointed. Drag to pan, scroll to zoom, click a node for its details.
   Download the SVG or the d2 script. The graph is laid out in your
   browser by the same Go code as the server, compiled to WebAssembly
-  (dagre). The **elk** layout is drawn by the server.
-- **Tables:** devices, connections, DNS, facts and sensors. Click a row
-  for details.
+  (dagre). The **elk** layout is drawn by the server. While the next
+  window is fetched and laid out, the current graph stays visible under a
+  small spinner rather than blanking.
+- **Tables:** devices, connections, DNS, facts, Wi-Fi networks and sensors. Click a row
+  for details. The Wi-Fi table lists only networks reported by a
+  monitor-mode sensor; it stays empty on an Ethernet-only deployment.
 - **Details:** an entity's relationships in the window, its connections,
   and a timeline merging DHCP, mDNS, ARP/NDP, lookups and connections
   opening and closing.

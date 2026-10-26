@@ -10,8 +10,10 @@
 | `internal/wire` | event schema, batch codec, shipper (spool, retry) |
 | `internal/decode` | protocol parsers: DNS/mDNS/LLMNR/NBNS, DHCPv4/v6, ARP/NDP, LLDP, SSDP, HTTP, TLS ClientHello + JA4, QUIC Initial |
 | `internal/flow` | the flow table and interval export |
-| `internal/capture` | AF_PACKET (pure Go, TPACKET_V3) and a pcap/pcapng reader |
+| `internal/capture` | AF_PACKET (pure Go, TPACKET_V3), pcap/pcapng, radiotap/802.11 link types |
 | `internal/sensor` | frame parsing, dispatch, DNS matching, dedupe, runners |
+| `internal/rdns` | bounded background reverse-DNS lookups at observation time |
+| `internal/wifi` | 802.11/radiotap parsing, WEP/WPA/WPA2 key derivation and decryption, channel hopping |
 | `internal/store` | SQLite schema, ingest and correlation, queries, retention |
 | `internal/graph`, `internal/graph/d2render` | graph assembly and d2 rendering |
 | `internal/api`, `internal/apiclient` | HTTP server and client (`model.Backend`) |
@@ -54,6 +56,12 @@ the TUI are tested end to end against exact expectations.
 `internal/sensor/testdata/curl-clienthello.pcap` pins JA4 against values
 Wireshark 4.6 computed. `go run ./internal/testutil/genpcap out.pcap`
 writes the scenario for manual use.
+
+`internal/wifi` pins AES-CCM against RFC 3610 packet vector #1 and the WPA
+PMK against the 802.11i passphrase vector, then checks CCMP/TKIP/WEP
+round-trips and a complete EAPOL 4-way handshake. `make fuzz` covers the
+radiotap/802.11 parsers; a panic on a malformed frame is a bug, not an
+expected drop.
 
 ### The Docker lab
 

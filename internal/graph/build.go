@@ -205,7 +205,8 @@ func Build(in Input, o model.GraphOptions) *model.Graph {
 			}
 			kind, _, _ := model.SplitEntityID(ft.Dst)
 			switch ft.Rel {
-			case model.RelHasIP, model.RelHostname, model.RelAnnounces, model.RelFingerprint, model.RelUserAgent, model.RelUPnP, model.RelNeighbor:
+			case model.RelHasIP, model.RelHostname, model.RelAnnounces, model.RelFingerprint, model.RelUserAgent, model.RelUPnP, model.RelNeighbor,
+				model.RelBroadcasts, model.RelProbes, model.RelAssociates, model.RelHandshake:
 			default:
 				continue
 			}

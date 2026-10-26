@@ -5,11 +5,14 @@ time.
 
 A small sensor on your router watches the LAN and learns what it can
 without being told: which devices are there (DHCP, mDNS/DNS-SD, NetBIOS,
-LLMNR, SSDP/UPnP, LLDP, ARP/NDP, MAC vendors), what they look up (DNS, with
-answers and TTLs), and what they talk to (connections with bytes each way,
-TLS and QUIC server names, ALPN, JA4 fingerprints, HTTP hosts and user
-agents). It ships all of it to a netgraph server, which keeps it in SQLite
-as **entities and relationships over time**.
+LLMNR, SSDP/UPnP, LLDP, ARP/NDP, reverse DNS, MAC vendors), what they look
+up (DNS, with answers and TTLs), and what they talk to (connections with
+bytes each way, TLS and QUIC server names, ALPN, JA4 fingerprints, HTTP
+hosts and user agents). With a monitor-mode wireless interface it also sees
+Wi-Fi networks and their clients, and can decrypt open, WEP, WPA and WPA2
+traffic when the keys are supplied. It ships all of it to a netgraph
+server, which keeps it in SQLite as **entities and relationships over
+time**.
 
 For any window `t0 → t1` you can ask:
 
@@ -30,7 +33,7 @@ the browser.
 
 | Binary | Runs on | Does |
 |---|---|---|
-| `netgraph-sensor` | the router: any Linux, x86, ARM v5–v8, MIPS (softfloat), RISC-V, ppc64le | captures with pure-Go AF_PACKET, decodes, ships compressed batches; about 8 MB, about 45 MiB of memory at 64k tracked connections |
+| `netgraph-sensor` | the router: any Linux, x86, ARM v5–v8, MIPS (softfloat), RISC-V, ppc64le | captures with pure-Go AF_PACKET, decodes (Ethernet or monitor-mode 802.11), ships compressed batches; about 8 MB, about 45 MiB of memory at 64k tracked connections |
 | `netgraph` | any host: Linux, macOS, Windows | ingest, SQLite storage and correlation, `query`, `graph`, `tui`, the web UI, `import` for pcap files |
 
 Both are static binaries with no C dependencies.

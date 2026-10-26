@@ -73,6 +73,7 @@ func New(cfg Config) *Server {
 	read("/api/v1/graph", s.graph)
 	read("/api/v1/entity", s.entity)
 	read("/api/v1/sensors", s.sensors)
+	read("/api/v1/wifi", s.wifi)
 	read("/api/v1/live", s.live)
 	s.mux.HandleFunc("GET /", s.web)
 	return s
@@ -226,6 +227,10 @@ func (s *Server) sensors(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, v)
+}
+
+func (s *Server) wifi(w http.ResponseWriter, r *http.Request) {
+	answer(s, w, r, s.cfg.Store.WiFi)
 }
 
 func (s *Server) timeseries(w http.ResponseWriter, r *http.Request) {
