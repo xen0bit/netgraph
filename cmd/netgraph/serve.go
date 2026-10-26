@@ -8,11 +8,13 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"os/signal"
 	"syscall"
 	"time"
 
+	"github.com/xen0bit/netgraph/internal/alert"
 	"github.com/xen0bit/netgraph/internal/api"
 	"github.com/xen0bit/netgraph/internal/buildinfo"
 	"github.com/xen0bit/netgraph/internal/model"
@@ -31,6 +33,8 @@ func runServe(args []string) error {
 	cert := fs.String("tls-cert", "", "TLS certificate (PEM)")
 	key := fs.String("tls-key", "", "TLS key (PEM)")
 	wifiKeyFile := fs.String("wifi-key-file", envOr("NETGRAPH_WIFI_KEY_FILE", ""), "WPA/WPA2 passphrases, PMKs and WEP keys served to sensors for Wi-Fi decryption; $NETGRAPH_WIFI_KEY_FILE")
+	alertURL := fs.String("alert-webhook", envOr("NETGRAPH_ALERT_WEBHOOK", ""), "POST a JSON alert here when a new device joins the network; $NETGRAPH_ALERT_WEBHOOK")
+	alertLearn := fs.String("alert-learn", "24h", "after the first sensor connects, learn the network this long before alerting on new devices")
 	webDir := fs.String("web-dir", "", "serve the web UI from this directory instead of the embedded copy")
 	raw := fs.String("raw-retention", "14d", "keep raw flows, DNS and observations this long")
 	rollup := fs.String("rollup-retention", "180d", "keep hourly rollups and facts this long")
@@ -78,7 +82,20 @@ func runServe(args []string) error {
 	if err != nil {
 		return fmt.Errorf("-exact-max: %w", err)
 	}
-	st, err := store.Open(*db, store.Config{RawRetention: rawD, RollupRetention: rollD, FactGap: gapD, ExactMax: exactD, Logger: log})
+	learnD, err := model.ParseDuration(*alertLearn)
+	if err != nil {
+		return fmt.Errorf("-alert-learn: %w", err)
+	}
+	var notifier *alert.Notifier
+	var onNew func(store.NewDevice)
+	if *alertURL != "" {
+		if u, err := url.Parse(*alertURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("-alert-webhook: want an http(s) URL")
+		}
+		notifier = alert.New(alert.Config{URL: *alertURL, Learn: learnD, Logger: log})
+		onNew = notifier.Notify
+	}
+	st, err := store.Open(*db, store.Config{RawRetention: rawD, RollupRetention: rollD, FactGap: gapD, ExactMax: exactD, Logger: log, OnNewDevice: onNew})
 	if err != nil {
 		return err
 	}
@@ -99,6 +116,11 @@ func runServe(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go st.RunRetention(ctx, time.Hour)
+	if notifier != nil {
+		notifier.SetSince(st.FirstSensorSeen)
+		go notifier.Run(ctx)
+		log.Info("new-device alerts on", "learn", learnD)
+	}
 	if *wifiKeyFile != "" {
 		go reloadWiFiKeys(ctx, *wifiKeyFile, apiSrv, log)
 	}

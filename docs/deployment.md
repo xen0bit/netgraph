@@ -56,10 +56,39 @@ netgraph serve -db /var/lib/netgraph/netgraph.db -listen :8443
 | `-rollup-retention` | `180d` | keep hourly rollups and facts |
 | `-exact-max` | `48h` | longer windows are answered from hourly rollups |
 | `-fact-gap` | `1h` | silence after which a relationship starts a new period |
+| `-alert-webhook` | `$NETGRAPH_ALERT_WEBHOOK` | POST a JSON alert when a new device joins ([alerts](#new-device-alerts)) |
+| `-alert-learn` | `24h` | learn the network this long after the first sensor connects before alerting |
 | `-web-dir` | | serve the UI from a directory instead of the embedded copy |
 
 Retention runs hourly. Back up a live database with `netgraph db backup
 -db netgraph.db backup.db`.
+
+### New-device alerts
+
+With `-alert-webhook URL`, the server posts an alert the first time a
+device uses an address on the LAN: a phone, laptop or plug joining your
+network. Devices merely heard over the air by a Wi-Fi sensor (access
+points, passers-by probing for networks) do not count, and neither does the
+router itself. For `-alert-learn` (default `24h`) after the first sensor
+connects nothing is sent, so a new install learns the house quietly; the
+devices already in an upgraded database are never reported.
+
+The body is JSON that Slack, Mattermost and Discord webhooks accept as-is,
+and that anything else can read:
+
+```json
+{"event": "new_device",
+ "text": "New device on the network: alice-iphone (192.168.1.23, 3c:22:fb:01:02:03, Apple, Inc.)",
+ "content": "…same as text…",
+ "device": {"id": "device:3c:22:fb:01:02:03", "mac": "3c:22:fb:01:02:03", "label": "alice-iphone",
+            "vendor": "Apple, Inc.", "ip": "192.168.1.23", "sensor": "router", "ts": "2026-10-26T12:00:00Z"},
+ "allowed_mentions": {"parse": []}}
+```
+
+Device names come from the LAN, so the text has mentions (`@everyone`),
+markup (`<!channel>`) and control characters neutralised; `device` carries
+the raw values. Delivery is retried three times with backoff; alerts are
+not stored, so ones queued when the server stops are lost.
 
 **Sizing.** Storage depends on how many connections the network makes. A
 busy synthetic home (40 devices, 120k connections a day) needs about

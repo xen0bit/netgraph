@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 	"unicode"
 	"unicode/utf8"
 
@@ -98,4 +99,17 @@ func (g *ingester) userLabel(ctx context.Context, mac, label string) error {
 	}
 	e.dirty = false
 	return nil
+}
+
+// FirstSensorSeen is when the first sensor first reported: when the network
+// started being learned. It is the zero time before any sensor has.
+func (s *Store) FirstSensorSeen(ctx context.Context) (time.Time, error) {
+	var first sql.NullInt64
+	if err := s.r.QueryRowContext(ctx, `SELECT min(first_seen) FROM sensors`).Scan(&first); err != nil {
+		return time.Time{}, err
+	}
+	if !first.Valid {
+		return time.Time{}, nil
+	}
+	return time.UnixMilli(first.Int64).UTC(), nil
 }

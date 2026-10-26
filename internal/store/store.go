@@ -44,6 +44,10 @@ type Config struct {
 	// (default 1h).
 	FactGap time.Duration
 	Logger  *slog.Logger
+	// OnNewDevice, when set, is called after a batch commits, once per
+	// device that used an address on the LAN for the first time. It runs
+	// on the ingest path, so it should only hand the event off.
+	OnNewDevice func(NewDevice)
 	// Now is the clock; tests set it.
 	Now func() time.Time
 }

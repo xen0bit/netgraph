@@ -23,6 +23,8 @@ import (
 type IngestResult struct {
 	Accepted   int
 	Duplicates int
+	// NewDevices used an address on the LAN for the first time.
+	NewDevices []NewDevice
 }
 
 // Ingest stores one batch from a sensor. Events whose sequence number was
@@ -37,7 +39,6 @@ func (s *Store) Ingest(ctx context.Context, sensor, boot string, events []wire.E
 		return IngestResult{}, errors.New("missing sensor name")
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	res, live, err := s.ing.batch(ctx, sensor, boot, events)
 	if err != nil {
 		// Caches may now describe rows that were rolled back.
@@ -45,9 +46,16 @@ func (s *Store) Ingest(ctx context.Context, sensor, boot string, events []wire.E
 		if werr := s.ing.warm(ctx); werr != nil {
 			s.log.Error("rewarm ingest caches", "err", werr)
 		}
+		s.mu.Unlock()
 		return res, err
 	}
 	s.sub.publish(live)
+	s.mu.Unlock()
+	if s.cfg.OnNewDevice != nil {
+		for _, d := range res.NewDevices {
+			s.cfg.OnNewDevice(d)
+		}
+	}
 	return res, nil
 }
 
@@ -69,7 +77,26 @@ type ingester struct {
 	traffic map[trafficKey]*trafficAgg
 	dnsAgg  map[dnsKey]int
 
-	live []LiveEvent
+	live   []LiveEvent
+	joined []joinedDevice // devices that used an address for the first time
+}
+
+type joinedDevice struct {
+	mac string
+	ip  netip.Addr
+	ts  int64
+}
+
+// NewDevice is a device seen using an address on the LAN for the first
+// time: the trigger for new-device alerts.
+type NewDevice struct {
+	ID     string     `json:"id"`
+	MAC    string     `json:"mac"`
+	Label  string     `json:"label"`
+	Vendor string     `json:"vendor,omitempty"`
+	IP     netip.Addr `json:"ip"`
+	Sensor string     `json:"sensor"`
+	TS     time.Time  `json:"ts"`
 }
 
 type entKey struct{ kind, key string }
@@ -197,6 +224,7 @@ func (g *ingester) batch(ctx context.Context, sensor, boot string, events []wire
 	}
 	g.tx = tx
 	g.live = g.live[:0]
+	g.joined = g.joined[:0]
 	defer func() { g.tx = nil }()
 
 	now := ms(g.s.cfg.Now())
@@ -245,8 +273,31 @@ func (g *ingester) batch(ctx context.Context, sensor, boot string, events []wire
 	if err := tx.Commit(); err != nil {
 		return res, nil, err
 	}
+	res.NewDevices = g.newDevices(sensor)
 	g.trim()
 	return res, append([]LiveEvent(nil), g.live...), nil
+}
+
+// newDevices describes the batch's newly joined devices, with the best
+// label the batch produced (a DHCP hostname usually arrives with the first
+// address).
+func (g *ingester) newDevices(sensor string) []NewDevice {
+	var out []NewDevice
+	for _, j := range g.joined {
+		e := g.row(model.KindDevice, j.mac)
+		if e == nil {
+			continue
+		}
+		d := NewDevice{
+			ID: model.EntityID(model.KindDevice, j.mac), MAC: j.mac, Label: deviceLabel(j.mac, e.label, e.attrs),
+			Vendor: e.attrs["vendor"], IP: j.ip, Sensor: sensor, TS: time.UnixMilli(j.ts).UTC(),
+		}
+		if d.Vendor == oui.Randomized {
+			d.Vendor = "private address"
+		}
+		out = append(out, d)
+	}
+	return out
 }
 
 func (g *ingester) sensorID(ctx context.Context, name string, now int64) (int64, error) {
@@ -582,6 +633,14 @@ func (g *ingester) hasIP(ctx context.Context, mac string, ip netip.Addr, ts, unt
 	dev, err := g.device(ctx, mac, ts)
 	if err != nil {
 		return err
+	}
+	if e := g.row(model.KindDevice, mac); e != nil && e.attrs["joined"] == "" {
+		g.setAttr(model.KindDevice, mac, "joined", strconv.FormatInt(ts, 10))
+		// The router announces its own addresses in its hello; it is
+		// infrastructure, not a device joining.
+		if source != "sensor" && e.attrs["role"] != "router" {
+			g.joined = append(g.joined, joinedDevice{mac: mac, ip: ip, ts: ts})
+		}
 	}
 	ipID, err := g.ipEntity(ctx, ip, ts)
 	if err != nil {
