@@ -252,8 +252,11 @@ func TestWiFiKeys(t *testing.T) {
 	}
 	hs := wire.WiFiKey{BSSID: "aa:bb:cc:00:00:01", STA: "02:00:00:00:00:01", SSID: "home",
 		ANonce: strings.Repeat("11", 32), SNonce: strings.Repeat("22", 32), KeyVersion: 2}
+	gk := wire.WiFiGTK{BSSID: hs.BSSID, STA: hs.STA, SSID: "home", KeyID: 1, ANonce: hs.ANonce, SNonce: hs.SNonce,
+		Descriptor: 2, KeyInfo: 0x13ca, KeyLength: 16, IV: strings.Repeat("00", 16), KeyData: strings.Repeat("ab", 32)}
 	if _, err := st.Ingest(context.Background(), "mon", "boot", []wire.Event{
 		{Seq: 1, Type: wire.TypeWiFiKey, TS: testutil.Base, WiFiKey: &hs},
+		{Seq: 2, Type: wire.TypeWiFiGTK, TS: testutil.Base, WiFiGTK: &gk},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -281,6 +284,9 @@ func TestWiFiKeys(t *testing.T) {
 	}
 	if len(got.Handshakes) != 1 || got.Handshakes[0] != hs {
 		t.Errorf("handshakes = %+v", got.Handshakes)
+	}
+	if len(got.GroupKeys) != 1 || got.GroupKeys[0].KeyData != gk.KeyData || !got.GroupKeys[0].TS.Equal(testutil.Base) {
+		t.Errorf("group keys = %+v", got.GroupKeys)
 	}
 	// With no ingest token (-no-auth) the nonces are still shared, but no key.
 	got, err = fetch(Config{}, "")

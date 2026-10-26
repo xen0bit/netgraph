@@ -12,6 +12,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"time"
 
 	"github.com/xen0bit/netgraph/internal/wire"
 )
@@ -69,6 +70,8 @@ type Frame struct {
 
 	// Radio is filled by ParseRadiotap.
 	Radio Radio
+	// TS is the capture time, set by the processor.
+	TS time.Time
 }
 
 // Parse decodes a frame without a radiotap header.

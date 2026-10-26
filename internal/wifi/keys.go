@@ -129,6 +129,7 @@ type EAPOLKey struct {
 	KeyLength  uint16
 	Replay     uint64
 	Nonce      [32]byte
+	IV         [16]byte
 	MIC        [16]byte
 	KeyData    []byte
 	Raw        []byte
@@ -224,6 +225,7 @@ func ParseEAPOL(b []byte) (*EAPOLKey, error) {
 	k.KeyLength = binary.BigEndian.Uint16(body[3:])
 	k.Replay = binary.BigEndian.Uint64(body[5:])
 	copy(k.Nonce[:], body[13:45])
+	copy(k.IV[:], body[45:61])
 	copy(k.MIC[:], body[77:93])
 	kd := int(binary.BigEndian.Uint16(body[93:95]))
 	if 95+kd > len(body) {
@@ -245,7 +247,10 @@ type HandshakeInfo struct {
 	// Group marks a group-key handshake message (a GTK rekey) rather
 	// than a 4-way handshake message; GTK that a group key was learned.
 	Group, GTK bool
-	Err        error
+	// GroupKey, when a GTK was installed, is the message's wrapped key
+	// data and KEK inputs, for the server to share with other sensors.
+	GroupKey *GroupKeyRecord
+	Err      error
 
 	SSID           string
 	AP, STA        string
@@ -602,8 +607,11 @@ func (k *Keyring) ProcessEAPOL(f *Frame, msg *EAPOLKey) HandshakeInfo {
 	info.Installed = true
 	if info.Message == 3 {
 		// Message 3 carries the AP's current GTK, wrapped with the KEK.
-		ok, err := k.installGTK(ap.String(), ssid, msg, split.KEK)
+		id, ok, err := k.installGTK(ap.String(), ssid, msg, split.KEK, f.TS)
 		info.GTK, info.Err = ok, err
+		if ok {
+			info.GroupKey = record(ap, sta, ssid, id, newPairSource(ssid, anonce, snonce), msg, f.TS)
+		}
 	}
 	info.SSID, info.AP, info.STA = ssid, ap.String(), sta.String()
 	info.ANonce = append([]byte(nil), anonce...)

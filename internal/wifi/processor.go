@@ -104,6 +104,7 @@ func (p *Processor) Handle(ts time.Time, data []byte, radiotap bool) {
 		return
 	}
 	f.Radio = radio
+	f.TS = ts
 	if radio.DataPad && f.Type == TypeData {
 		pad := (f.HeaderLen+3)&^3 - f.HeaderLen
 		if pad > len(f.Body) {
@@ -253,6 +254,11 @@ func (p *Processor) eapol(ts time.Time, f *Frame, msg *EAPOLKey) {
 			SNonce:     hex.EncodeToString(info.SNonce),
 			KeyVersion: info.Version,
 		}})
+	}
+	if g := info.GroupKey; g != nil && p.cfg.Emit != nil {
+		// The GTK goes out still wrapped with the client's KEK; a sensor
+		// that receives it unwraps it with its own PMK.
+		p.cfg.Emit(wire.Event{Type: wire.TypeWiFiGTK, TS: ts, WiFiGTK: g.Wire()})
 	}
 }
 

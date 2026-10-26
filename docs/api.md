@@ -60,11 +60,13 @@ Sensors `POST /api/v1/ingest` with:
 The body is newline-delimited JSON events, each `{seq, type, ts, <type>:
 {...}}`, as defined in [`internal/wire/event.go`](../internal/wire/event.go).
 Event types are `hello`, `stats`, `flow`, `dns`, `binding`, `dhcp`, `mdns`,
-`name`, `ssdp`, `lldp`, `wifi` and `wifi_key`. A `name` from reverse DNS has
-`"proto":"rdns"`; a `wifi` event describes an access point, client,
-association or handshake and never carries key material. A `wifi_key` event
-carries a handshake's public nonces so keys survive a sensor restart and sync
-across sensors (see [Wi-Fi keys](#wi-fi-keys)); it holds no key, PMK or MIC. Events with a
+`name`, `ssdp`, `lldp`, `wifi`, `wifi_key` and `wifi_gtk`. A `name` from
+reverse DNS has `"proto":"rdns"`; a `wifi` event describes an access point,
+client, association or handshake and never carries key material. A
+`wifi_key` event carries a handshake's public nonces, and a `wifi_gtk` event
+an AP's group key still wrapped with a client's KEK, so keys survive a
+sensor restart and sync across sensors (see [Wi-Fi keys](#wi-fi-keys));
+neither holds a usable key. Events with a
 `seq` at or below the last one ingested for that sensor boot are skipped, so
 retries are safe. The response is `{accepted, duplicates}`. Anything that
 can produce these events can feed netgraph:
@@ -80,7 +82,7 @@ curl -X POST -H "Authorization: Bearer $NETGRAPH_TOKEN" -H "X-Netgraph-Sensor: t
 `GET /api/v1/wifi/keys` returns what a sensor needs to decrypt Wi-Fi. It is
 authorised with the **ingest** token (it is sensor infrastructure), and
 sensors call it automatically on startup and every minute. The response is
-`{pmks, wep, handshakes}`:
+`{pmks, wep, handshakes, group_keys}`:
 
 - `pmks`: `[{ssid, pmk}]`, the 32-byte PMK (hex) for each network in the
   server's `-wifi-key-file`. Passphrases are not sent; the server derives
@@ -91,6 +93,13 @@ sensors call it automatically on startup and every minute. The response is
   These are broadcast in the clear and decrypt nothing on their own; with a
   network's PMK they let a restarted or additional sensor re-derive the
   pairwise key without seeing the handshake again.
+
+- `group_keys`: `[{bssid, sta, ssid, key_id, anonce, snonce, descriptor,
+  key_info, key_length, iv, key_data, ts}]`, the latest group key per AP and
+  key ID from `wifi_gtk` events: the EAPOL-Key fields with `key_data` still
+  wrapped by the client's KEK. A sensor re-derives that KEK from the PMK and
+  the nonces and unwraps the GTK, so it decrypts the AP's broadcasts
+  without waiting for a rekey.
 
 `pmks` and `wep` are empty unless the server has a key file **and** an
 ingest token; a server started with `-no-auth` never serves keys.

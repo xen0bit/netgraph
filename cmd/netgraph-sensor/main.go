@@ -334,7 +334,19 @@ func syncWiFiKeys(ctx context.Context, shipper *wire.Shipper, keys *wifi.Keyring
 			loaded++
 		}
 	}
-	log.Debug("synced wifi keys", "networks", len(sec.PMKs), "pairwise", loaded)
+	// Group keys arrive still wrapped with a client's KEK; unwrapping
+	// re-derives that KEK from our own PMK.
+	groups := 0
+	for _, g := range got.GroupKeys {
+		rec, ok := wifi.GroupKeyFromWire(g)
+		if !ok {
+			continue
+		}
+		if ok, err := keys.LoadGroupKey(rec); err == nil && ok {
+			groups++
+		}
+	}
+	log.Debug("synced wifi keys", "networks", len(sec.PMKs), "pairwise", loaded, "group", groups)
 	return len(sec.PMKs), loaded, true
 }
 

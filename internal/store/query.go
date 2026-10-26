@@ -1329,6 +1329,28 @@ func (s *Store) WiFiHandshakes(ctx context.Context) ([]wire.WiFiKey, error) {
 	return out, rows.Err()
 }
 
+// WiFiGroupKeys returns the stored group-key records (still wrapped) for
+// sensors to unwrap with their own PMKs.
+func (s *Store) WiFiGroupKeys(ctx context.Context) ([]wire.WiFiGTK, error) {
+	rows, err := s.r.QueryContext(ctx, `SELECT bssid, key_id, sta, ssid, anonce, snonce, descriptor, key_info, key_length, iv, key_data, ts
+		FROM wifi_group_keys ORDER BY ts`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []wire.WiFiGTK{}
+	for rows.Next() {
+		var k wire.WiFiGTK
+		var ts int64
+		if err := rows.Scan(&k.BSSID, &k.KeyID, &k.STA, &k.SSID, &k.ANonce, &k.SNonce, &k.Descriptor, &k.KeyInfo, &k.KeyLength, &k.IV, &k.KeyData, &ts); err != nil {
+			return nil, err
+		}
+		k.TS = time.UnixMilli(ts).UTC()
+		out = append(out, k)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) Sensors(ctx context.Context) ([]model.Sensor, error) {
 	rows, err := s.r.QueryContext(ctx, `SELECT name, version, first_seen, last_seen, hello, stats FROM sensors ORDER BY name`)
 	if err != nil {

@@ -43,8 +43,8 @@ func TestNewDevices(t *testing.T) {
 	}
 	st.Close()
 
-	// Simulate a database from before the joined attribute: strip it and
-	// step the schema back so migration 0004 runs on reopen.
+	// Simulate a database from before the joined attribute: strip it, then
+	// apply migration 0004 as an upgrade would.
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
@@ -52,7 +52,11 @@ func TestNewDevices(t *testing.T) {
 	if _, err := db.Exec(`UPDATE entities SET attrs = json_remove(attrs, '$.joined') WHERE kind = 'device'`); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(`PRAGMA user_version = 3`); err != nil {
+	m, err := migrations.ReadFile("migrations/0004_device_joined.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(string(m)); err != nil {
 		t.Fatal(err)
 	}
 	db.Close()

@@ -176,11 +176,24 @@ re-associated. To avoid that, a sensor that installs a key ships a
 `wifi_key` event carrying just the handshake's two **nonces** — values the
 AP and client broadcast in the clear, so not secret. The server keeps the
 latest per `(AP, client)` in `wifi_handshakes`, and a sensor fetches them
-with its PMKs on startup (and every minute) to re-derive the PTK. The same mechanism lets several sensors share keys: one sensor catches
-a client's handshake, the rest decrypt that client too. The server stores
-no raw frames and never copies the key file into the database, so the stored
-nonces decrypt nothing on their own. A sensor only ships a `wifi_key` for a
-network whose PMK it holds, so the table only ever covers your own networks.
+with its PMKs on startup (and every minute) to re-derive the PTK. The same
+mechanism lets several sensors share keys: one sensor catches a client's
+handshake, the rest decrypt that client too.
+
+Group keys sync the same way. When a sensor learns an AP's GTK it ships a
+`wifi_gtk` event with the GTK **as the AP sent it — still wrapped with the
+client's KEK** — and the nonces of that client's handshake. The server keeps
+the latest per `(AP, key ID)` in `wifi_group_keys`. Another sensor
+re-derives the client's KEK from its own PMK and the nonces, unwraps the
+GTK, and decrypts the AP's broadcasts straight away instead of waiting for
+the next rekey. A record older than the key a sensor already holds in that
+slot is ignored.
+
+Neither table holds a usable key: the nonces are public and the GTK is
+ciphertext. Both decrypt something only with the network's PMK, which the
+server derives from its key file and never stores in the database. A
+sensor only ships these for a network whose PMK it holds, so the tables only
+ever cover your own networks.
 
 Channel hopping is available with `-wifi-hop`. It uses the wireless
 extensions ioctl, so it works with mac80211 monitor interfaces and not with
@@ -204,11 +217,11 @@ extensions ioctl, so it works with mac80211 monitor interfaces and not with
   segment, which covers ordinary lookups but not zone transfers.
 - **WPA3/SAE, OWE and 802.1X** Wi-Fi has no passively derivable PMK; without
   an explicitly supplied PMK, their data frames stay encrypted.
-- **Wi-Fi group keys** are learned only from a message 3 or group rekey the
-  sensor sees, and are not synced through the server: a restarted sensor
-  decrypts broadcasts again after the AP's next rekey (typically within an
-  hour or a day) or any client's next association. GCMP ciphers (some WPA3
-  suites) are not implemented yet; CCMP and TKIP are.
+- **Wi-Fi group keys** come from a message 3 or group rekey that some
+  sensor saw. A network whose GTK no sensor has seen since netgraph started
+  (no client joined and the AP has not rekeyed) keeps its broadcasts
+  encrypted until one does. GCMP ciphers (some WPA3 suites) are not
+  implemented yet; CCMP and TKIP are.
 - **Fragmented 802.11 frames** are not reassembled; those data frames are
   counted but not decoded. (Fragmentation is rare on modern networks.)
 - **Wi-Fi on other channels** is missed while the monitor interface is

@@ -5,9 +5,14 @@ import (
 	"crypto/rc4" //nolint:gosec // WPA1/TKIP key data is RC4 by definition
 	"crypto/subtle"
 	"encoding/binary"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
+	"time"
+
+	"github.com/xen0bit/netgraph/internal/wire"
 )
 
 // Group keys. An access point encrypts broadcast and multicast frames to its
@@ -26,7 +31,28 @@ var errRelayed = errors.New("wifi: group frame relays a known client")
 type groupKey struct {
 	tk   []byte // 16 bytes for CCMP, 32 for TKIP (with Michael keys)
 	tkip bool
+	ts   time.Time // when the AP sent it: a later key in the slot wins
 }
+
+// GroupKeyRecord is a GTK as the AP sent it to one client, still wrapped
+// with that client's KEK, with what is needed to re-derive the KEK from a
+// PMK: the addresses, the SSID and the client's handshake nonces. It holds
+// no usable key, so a sensor can ship it for others to unwrap themselves.
+type GroupKeyRecord struct {
+	BSSID, STA, SSID string
+	KeyID            int
+	ANonce, SNonce   []byte
+	Descriptor       byte
+	KeyInfo          uint16
+	KeyLength        uint16
+	IV               []byte
+	KeyData          []byte // wrapped
+	TS               time.Time
+}
+
+// maxWrappedKeyData bounds the key data taken from a stored record. An RSN
+// message 3 carries the RSN IE and a GTK KDE: well under this.
+const maxWrappedKeyData = 512
 
 // apGroup is an access point's GTKs by key ID, and the network whose PMK
 // led to them (so revoking that PMK drops them).
@@ -36,12 +62,7 @@ type apGroup struct {
 }
 
 // IV is the EAPOL-Key IV, which keys RC4 for WPA1/TKIP key data.
-func (k *EAPOLKey) keyIV() []byte {
-	if len(k.Raw) < 4+61 {
-		return nil
-	}
-	return k.Raw[4+45 : 4+61]
-}
+func (k *EAPOLKey) keyIV() []byte { return k.IV[:] }
 
 // encryptedKeyData reports whether the key data is encrypted with the KEK:
 // the RSN Encrypted Key Data bit, or a WPA1 group-key message (which always
@@ -65,9 +86,6 @@ func (k *EAPOLKey) decryptKeyData(kek []byte) ([]byte, error) {
 	switch k.Version() {
 	case 1:
 		iv := k.keyIV()
-		if iv == nil {
-			return nil, fmt.Errorf("eapol: short key frame")
-		}
 		key := make([]byte, 0, 32)
 		key = append(append(key, iv...), kek...)
 		rc, err := rc4.NewCipher(key) //nolint:gosec // see import
@@ -163,14 +181,15 @@ func gtkKDE(kd []byte) (int, []byte, bool) {
 }
 
 // installGTK takes the GTK out of a key message's decrypted key data and
-// installs it for the access point. It reports whether one was installed.
-func (k *Keyring) installGTK(bssid, ssid string, msg *EAPOLKey, kek []byte) (bool, error) {
+// installs it for the access point, unless the slot already holds a key the
+// AP sent later. It reports the key ID and whether the message carried one.
+func (k *Keyring) installGTK(bssid, ssid string, msg *EAPOLKey, kek []byte, ts time.Time) (int, bool, error) {
 	if !msg.encryptedKeyData() {
-		return false, nil
+		return 0, false, nil
 	}
 	kd, err := msg.decryptKeyData(kek)
 	if err != nil {
-		return false, err
+		return 0, false, err
 	}
 	var idx int
 	var gtk []byte
@@ -183,17 +202,16 @@ func (k *Keyring) installGTK(bssid, ssid string, msg *EAPOLKey, kek []byte) (boo
 	} else {
 		var ok bool
 		if idx, gtk, ok = gtkKDE(kd); !ok {
-			return false, nil
+			return 0, false, nil
 		}
 	}
-	var gk groupKey
+	gk := groupKey{tk: append([]byte(nil), gtk...), ts: ts}
 	switch len(gtk) {
 	case 16:
-		gk = groupKey{tk: append([]byte(nil), gtk...)}
 	case 32:
-		gk = groupKey{tk: append([]byte(nil), gtk...), tkip: true}
+		gk.tkip = true
 	default:
-		return false, fmt.Errorf("eapol: GTK length %d", len(gtk))
+		return 0, false, fmt.Errorf("eapol: GTK length %d", len(gtk))
 	}
 	key := strings.ToLower(bssid)
 	k.mu.Lock()
@@ -206,8 +224,88 @@ func (k *Keyring) installGTK(bssid, ssid string, msg *EAPOLKey, kek []byte) (boo
 		g = &apGroup{ssid: strings.ToLower(ssid)}
 		k.groups[key] = g
 	}
-	g.keys[idx] = &gk
-	return true, nil
+	if old := g.keys[idx]; old == nil || !old.ts.After(ts) {
+		g.keys[idx] = &gk
+	}
+	return idx, true, nil
+}
+
+// record describes a GTK message for shipping: the wrapped key data and
+// the inputs that re-derive the KEK that wraps it.
+func record(ap, sta net.HardwareAddr, ssid string, keyID int, src pairSource, msg *EAPOLKey, ts time.Time) *GroupKeyRecord {
+	return &GroupKeyRecord{
+		BSSID: ap.String(), STA: sta.String(), SSID: ssid, KeyID: keyID,
+		ANonce: append([]byte(nil), src.nonces[:32]...), SNonce: append([]byte(nil), src.nonces[32:]...),
+		Descriptor: msg.Descriptor, KeyInfo: msg.KeyInfo, KeyLength: msg.KeyLength,
+		IV: append([]byte(nil), msg.IV[:]...), KeyData: append([]byte(nil), msg.KeyData...), TS: ts,
+	}
+}
+
+// GroupKeyFromWire decodes a group-key record from the server; ok is false
+// for a malformed one.
+func GroupKeyFromWire(g wire.WiFiGTK) (GroupKeyRecord, bool) {
+	an, err1 := hex.DecodeString(g.ANonce)
+	sn, err2 := hex.DecodeString(g.SNonce)
+	iv, err3 := hex.DecodeString(g.IV)
+	kd, err4 := hex.DecodeString(g.KeyData)
+	if err := errors.Join(err1, err2, err3, err4); err != nil || g.Descriptor < 0 || g.Descriptor > 255 ||
+		g.KeyInfo < 0 || g.KeyInfo > 0xffff || g.KeyLength < 0 || g.KeyLength > 0xffff {
+		return GroupKeyRecord{}, false
+	}
+	return GroupKeyRecord{
+		BSSID: g.BSSID, STA: g.STA, SSID: g.SSID, KeyID: g.KeyID, ANonce: an, SNonce: sn,
+		Descriptor: byte(g.Descriptor), KeyInfo: uint16(g.KeyInfo), KeyLength: uint16(g.KeyLength),
+		IV: iv, KeyData: kd, TS: g.TS,
+	}, true
+}
+
+// Wire is the record as a wifi_gtk event carries it.
+func (r *GroupKeyRecord) Wire() *wire.WiFiGTK {
+	return &wire.WiFiGTK{
+		BSSID: r.BSSID, STA: r.STA, SSID: r.SSID, KeyID: r.KeyID,
+		ANonce: hex.EncodeToString(r.ANonce), SNonce: hex.EncodeToString(r.SNonce),
+		Descriptor: int(r.Descriptor), KeyInfo: int(r.KeyInfo), KeyLength: int(r.KeyLength),
+		IV: hex.EncodeToString(r.IV), KeyData: hex.EncodeToString(r.KeyData),
+	}
+}
+
+// LoadGroupKey installs a GTK from a stored record (another sensor's, or
+// this one's before a restart): it re-derives the client's PTK from the PMK
+// for the record's SSID and the nonces, and unwraps the key data with its
+// KEK. It returns false (no error) without a PMK for the SSID, and skips
+// work when the slot already holds a key at least as recent.
+func (k *Keyring) LoadGroupKey(r GroupKeyRecord) (bool, error) {
+	if len(r.ANonce) != 32 || len(r.SNonce) != 32 || len(r.IV) != 16 || len(r.KeyData) > maxWrappedKeyData || r.KeyID < 0 || r.KeyID > 3 {
+		return false, fmt.Errorf("wifi: malformed group key record")
+	}
+	ap, err := net.ParseMAC(r.BSSID)
+	if err != nil {
+		return false, err
+	}
+	sta, err := net.ParseMAC(r.STA)
+	if err != nil {
+		return false, err
+	}
+	if g := k.group(ap.String(), r.KeyID); g != nil && !g.ts.Before(r.TS) {
+		return true, nil
+	}
+	pmk := k.pmkFor(r.SSID)
+	if len(pmk) != 32 {
+		return false, nil
+	}
+	msg := &EAPOLKey{Descriptor: r.Descriptor, KeyInfo: r.KeyInfo, KeyLength: r.KeyLength, KeyData: r.KeyData}
+	copy(msg.IV[:], r.IV)
+	tkip := msg.Version() == 1
+	bits := 384
+	if tkip {
+		bits = 512
+	}
+	ptk, err := DerivePTK(pmk, ap, sta, r.ANonce, r.SNonce, bits)
+	if err != nil {
+		return false, err
+	}
+	_, ok, err := k.installGTK(ap.String(), r.SSID, msg, splitPTK(ptk, tkip).KEK, r.TS)
+	return ok, err
 }
 
 // processGroupKey follows group-key handshake message 1, in which the AP
@@ -237,7 +335,11 @@ func (k *Keyring) processGroupKey(f *Frame, msg *EAPOLKey, info HandshakeInfo) H
 		return info
 	}
 	info.Valid = true
-	info.GTK, info.Err = k.installGTK(f.BSSID.String(), src.ssid, msg, ptk.KEK)
+	id, ok, err := k.installGTK(f.BSSID.String(), src.ssid, msg, ptk.KEK, f.TS)
+	info.GTK, info.Err = ok, err
+	if ok {
+		info.GroupKey = record(f.BSSID, f.Dst, src.ssid, id, src, msg, f.TS)
+	}
 	return info
 }
 

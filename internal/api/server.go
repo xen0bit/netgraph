@@ -264,9 +264,9 @@ func (s *Server) wifi(w http.ResponseWriter, r *http.Request) {
 }
 
 // wifiKeys hands a sensor what it needs to decrypt Wi-Fi: the PMKs and WEP
-// keys from the server's key file, and the stored handshake nonces so it can
-// re-derive pairwise keys after a restart, or learn keys another sensor
-// found. It is authorised with the ingest token (the sensor's own
+// keys from the server's key file, and the stored handshake nonces and
+// wrapped group keys so it can re-derive pairwise and group keys after a
+// restart, or learn keys another sensor found. It is authorised with the ingest token (the sensor's own
 // credential), and keys are never served without one.
 func (s *Server) wifiKeys(w http.ResponseWriter, r *http.Request) {
 	if !tokenOK(r, s.cfg.IngestToken) {
@@ -278,7 +278,12 @@ func (s *Server) wifiKeys(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusInternalServerError, errors.New("query failed"))
 		return
 	}
-	out := wire.WiFiKeys{PMKs: []wire.WiFiPMK{}, WEP: []wire.WiFiWEP{}, Handshakes: hs}
+	gks, err := s.cfg.Store.WiFiGroupKeys(r.Context())
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, errors.New("query failed"))
+		return
+	}
+	out := wire.WiFiKeys{PMKs: []wire.WiFiPMK{}, WEP: []wire.WiFiWEP{}, Handshakes: hs, GroupKeys: gks}
 	if sec := s.keys.Load(); sec != nil && s.cfg.IngestToken != "" {
 		for ssid, pmk := range sec.PMKs {
 			out.PMKs = append(out.PMKs, wire.WiFiPMK{SSID: ssid, PMK: hex.EncodeToString(pmk)})

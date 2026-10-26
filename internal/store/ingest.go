@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -361,6 +362,10 @@ func (g *ingester) event(ctx context.Context, sid int64, sensor, boot string, ev
 	case wire.TypeWiFi:
 		if ev.WiFi != nil {
 			return g.wifi(ctx, sid, ts, ev.WiFi)
+		}
+	case wire.TypeWiFiGTK:
+		if ev.WiFiGTK != nil {
+			return g.wifiGTK(ctx, sid, ts, ev.WiFiGTK)
 		}
 	case wire.TypeWiFiKey:
 		if ev.WiFiKey != nil {
@@ -1392,6 +1397,34 @@ func (g *ingester) wifiKey(ctx context.Context, sid, ts int64, w *wire.WiFiKey) 
 			key_version = excluded.key_version, sensor_id = excluded.sensor_id, ts = excluded.ts
 		WHERE excluded.ts >= wifi_handshakes.ts`,
 		bssid, sta, w.SSID, strings.ToLower(w.ANonce), strings.ToLower(w.SNonce), w.KeyVersion, sid, ts)
+	return err
+}
+
+// wifiGTK persists an AP's group key as it was sent to a client, still
+// wrapped with the client's KEK (see WiFiGTK), latest per (AP, key ID).
+// Every field is checked: a malformed record is dropped, not stored.
+func (g *ingester) wifiGTK(ctx context.Context, sid, ts int64, w *wire.WiFiGTK) error {
+	bssid, ok1 := normMAC(w.BSSID)
+	sta, ok2 := normMAC(w.STA)
+	hexLen := func(s string, min, max int) bool {
+		b, err := hex.DecodeString(s)
+		return err == nil && len(b) >= min && len(b) <= max
+	}
+	if !ok1 || !ok2 || w.SSID == "" || len(w.SSID) > 32 || w.KeyID < 0 || w.KeyID > 3 ||
+		(w.Descriptor != 2 && w.Descriptor != 254) || w.KeyInfo < 0 || w.KeyInfo > 0xffff || w.KeyLength < 0 || w.KeyLength > 0xffff ||
+		!hexLen(w.ANonce, 32, 32) || !hexLen(w.SNonce, 32, 32) || !hexLen(w.IV, 16, 16) || !hexLen(w.KeyData, 1, 512) {
+		return nil
+	}
+	_, err := g.tx.ExecContext(ctx, `
+		INSERT INTO wifi_group_keys (bssid, key_id, sta, ssid, anonce, snonce, descriptor, key_info, key_length, iv, key_data, sensor_id, ts)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(bssid, key_id) DO UPDATE SET
+			sta = excluded.sta, ssid = excluded.ssid, anonce = excluded.anonce, snonce = excluded.snonce,
+			descriptor = excluded.descriptor, key_info = excluded.key_info, key_length = excluded.key_length,
+			iv = excluded.iv, key_data = excluded.key_data, sensor_id = excluded.sensor_id, ts = excluded.ts
+		WHERE excluded.ts >= wifi_group_keys.ts`,
+		bssid, w.KeyID, sta, w.SSID, strings.ToLower(w.ANonce), strings.ToLower(w.SNonce), w.Descriptor, w.KeyInfo, w.KeyLength,
+		strings.ToLower(w.IV), strings.ToLower(w.KeyData), sid, ts)
 	return err
 }
 

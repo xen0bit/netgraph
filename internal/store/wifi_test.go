@@ -164,3 +164,52 @@ func TestWiFiKeyStoreRoundTrip(t *testing.T) {
 		t.Fatalf("latest-wins round-trip failed: %+v", r)
 	}
 }
+
+// Group-key records keep the latest per (AP, key ID); an older one does not
+// overwrite, and malformed ones are dropped.
+func TestWiFiGroupKeys(t *testing.T) {
+	ctx := context.Background()
+	at := testutil.Base
+	st, err := Open(filepath.Join(t.TempDir(), "ng.db"), Config{Now: func() time.Time { return at.Add(time.Hour) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	gtk := func(id int, data string) *wire.WiFiGTK {
+		return &wire.WiFiGTK{BSSID: "AA:BB:CC:00:00:01", STA: "3c:22:fb:01:02:03", SSID: "cafe", KeyID: id,
+			ANonce: strings.Repeat("11", 32), SNonce: strings.Repeat("22", 32), Descriptor: 2, KeyInfo: 0x13ca, KeyLength: 16,
+			IV: strings.Repeat("00", 16), KeyData: data}
+	}
+	bad := func(f func(*wire.WiFiGTK)) *wire.WiFiGTK { g := gtk(2, "abcd"); f(g); return g }
+	evs := []wire.Event{
+		{Seq: 1, Type: wire.TypeWiFiGTK, TS: at, WiFiGTK: gtk(1, "aaaa")},
+		{Seq: 2, Type: wire.TypeWiFiGTK, TS: at.Add(time.Minute), WiFiGTK: gtk(1, "bbbb")},
+		{Seq: 3, Type: wire.TypeWiFiGTK, TS: at.Add(-time.Minute), WiFiGTK: gtk(1, "cccc")}, // older: ignored
+		{Seq: 4, Type: wire.TypeWiFiGTK, TS: at, WiFiGTK: gtk(2, "dddd")},
+		{Seq: 5, Type: wire.TypeWiFiGTK, TS: at, WiFiGTK: bad(func(g *wire.WiFiGTK) { g.KeyID = 4 })},
+		{Seq: 6, Type: wire.TypeWiFiGTK, TS: at, WiFiGTK: bad(func(g *wire.WiFiGTK) { g.KeyData = "zz" })},
+		{Seq: 7, Type: wire.TypeWiFiGTK, TS: at, WiFiGTK: bad(func(g *wire.WiFiGTK) { g.KeyData = strings.Repeat("00", 513) })},
+		{Seq: 8, Type: wire.TypeWiFiGTK, TS: at, WiFiGTK: bad(func(g *wire.WiFiGTK) { g.IV = "00" })},
+		{Seq: 9, Type: wire.TypeWiFiGTK, TS: at, WiFiGTK: bad(func(g *wire.WiFiGTK) { g.BSSID = "ff:ff:ff:ff:ff:ff" })},
+	}
+	if _, err := st.Ingest(ctx, "mon", "boot", evs); err != nil {
+		t.Fatal(err)
+	}
+	recs, err := st.WiFiGroupKeys(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 2 {
+		t.Fatalf("want 2 records, got %+v", recs)
+	}
+	byID := map[int]wire.WiFiGTK{}
+	for _, r := range recs {
+		byID[r.KeyID] = r
+	}
+	if r := byID[1]; r.KeyData != "bbbb" || r.BSSID != "aa:bb:cc:00:00:01" || !r.TS.Equal(at.Add(time.Minute)) {
+		t.Errorf("key 1 = %+v", r)
+	}
+	if byID[2].KeyData != "dddd" {
+		t.Errorf("key 2 = %+v", byID[2])
+	}
+}

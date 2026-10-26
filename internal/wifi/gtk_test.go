@@ -3,9 +3,12 @@ package wifi
 import (
 	"bytes"
 	"encoding/hex"
+	"encoding/json"
 	"net"
 	"testing"
 	"time"
+
+	"github.com/xen0bit/netgraph/internal/wire"
 )
 
 // RFC 3394 section 4.1: 128-bit key data with a 128-bit KEK.
@@ -134,4 +137,99 @@ func FuzzGroupKeyData(f *testing.F) {
 		}
 		_, _ = aesUnwrap(kek, b)
 	})
+}
+
+// A group key one sensor learns is shipped still wrapped, and another sensor
+// that holds only the PMK unwraps it and decrypts the AP's broadcasts. An
+// older record never replaces a newer key, and the wrong PMK installs
+// nothing.
+func TestGroupKeySync(t *testing.T) {
+	ap := net.HardwareAddr{0xaa, 0xbb, 0xcc, 0x00, 0x00, 0x01}
+	sta := net.HardwareAddr{0x3c, 0x22, 0xfb, 0x01, 0x02, 0x03}
+	t0 := time.Date(2026, 10, 26, 12, 0, 0, 0, time.UTC)
+	newKeys := func(pass string) *Keyring {
+		k := NewKeyring()
+		if err := k.AddPassphrase("test-net", pass); err != nil {
+			t.Fatal(err)
+		}
+		return k
+	}
+	// Sensor A follows the 4-way handshake.
+	ka := newKeys("correct horse battery")
+	ka.setNetwork(ap.String(), "test-net", Security{Kind: WPA2, Pairwise: []string{"CCMP"}, Group: "CCMP"})
+	var events []wire.Event
+	pa := NewProcessor(Config{Keys: ka, Emit: func(e wire.Event) { events = append(events, e) }})
+	anonce, snonce := bytes.Repeat([]byte{0x11}, 32), bytes.Repeat([]byte{0x22}, 32)
+	ptk, _ := DerivePTK(ka.pmkFor("test-net"), ap, sta, anonce, snonce, 384)
+	split := splitPTK(ptk, false)
+	gtk := bytes.Repeat([]byte{0x5a}, 16)
+	fromAP := &Frame{BSSID: ap, Src: ap, Dst: sta, TS: t0}
+	pa.eapol(t0, fromAP, ParseTestEAPOL(t, 0x008a, anonce, nil, nil))
+	pa.eapol(t0, &Frame{BSSID: ap, Src: sta, Dst: ap, TS: t0}, ParseTestEAPOL(t, 0x010a, snonce, nil, split.KCK))
+	pa.eapol(t0, fromAP, ParseTestEAPOL(t, 0x13ca, anonce, gtkKeyData(t, split.KEK, 1, gtk), split.KCK))
+
+	var shipped *wire.WiFiGTK
+	for _, e := range events {
+		if e.Type == wire.TypeWiFiGTK {
+			shipped = e.WiFiGTK
+		}
+	}
+	if shipped == nil || shipped.KeyID != 1 || shipped.STA != sta.String() {
+		t.Fatalf("no wifi_gtk event: %+v", events)
+	}
+	// What leaves is the wrapped key data, never the GTK itself.
+	b, _ := json.Marshal(shipped)
+	if bytes.Contains(b, []byte(hex.EncodeToString(gtk))) {
+		t.Fatal("the GTK left the sensor in the clear")
+	}
+	var onWire wire.WiFiGTK
+	if err := json.Unmarshal(b, &onWire); err != nil {
+		t.Fatal(err)
+	}
+	onWire.TS = t0 // the server stamps the record with the event's time
+	rec, ok := GroupKeyFromWire(onWire)
+	if !ok {
+		t.Fatalf("record did not decode: %+v", onWire)
+	}
+
+	// Sensor B has the PMK and nothing else.
+	kb := newKeys("correct horse battery")
+	if ok, err := kb.LoadGroupKey(rec); err != nil || !ok {
+		t.Fatalf("LoadGroupKey: %v %v", ok, err)
+	}
+	if g := kb.group(ap.String(), 1); g == nil || !bytes.Equal(g.tk, gtk) {
+		t.Fatalf("B's GTK = %+v", g)
+	}
+	var got [][]byte
+	pb := NewProcessor(Config{Keys: kb, Data: func(_ time.Time, eth []byte) { got = append(got, eth) }})
+	h := make([]byte, 24)
+	h[0], h[1] = 0x08, 0x42 // data, from DS, protected
+	copy(h[4:10], []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff})
+	copy(h[10:16], ap)
+	copy(h[16:22], []byte{0x00, 0x11, 0x22, 0x33, 0x44, 0x99})
+	body, _ := ccmpSeal(h, append([]byte{0xaa, 0xaa, 0x03, 0, 0, 0, 0x08, 0x00}, make([]byte, 28)...), gtk, 5)
+	body[3] |= 1 << 6
+	pb.Handle(t0, append(h, body...), false)
+	if len(got) != 1 {
+		t.Fatalf("B decoded %d broadcasts, want 1", len(got))
+	}
+
+	// A newer key in the slot is not replaced by an older record.
+	newer := bytes.Repeat([]byte{0x77}, 16)
+	kb.mu.Lock()
+	kb.groups[ap.String()].keys[1] = &groupKey{tk: newer, ts: t0.Add(time.Hour)}
+	kb.mu.Unlock()
+	if _, err := kb.LoadGroupKey(rec); err != nil || !bytes.Equal(kb.group(ap.String(), 1).tk, newer) {
+		t.Fatalf("an older record replaced a newer key: %v", err)
+	}
+	// The wrong passphrase derives the wrong KEK: the unwrap fails.
+	if ok, err := newKeys("not the passphrase").LoadGroupKey(rec); err == nil || ok {
+		t.Fatalf("wrong PMK: ok=%v err=%v", ok, err)
+	}
+	// Hostile records are refused before any derivation.
+	bad := rec
+	bad.KeyData = make([]byte, maxWrappedKeyData+8)
+	if _, err := kb.LoadGroupKey(bad); err == nil {
+		t.Fatal("accepted oversized key data")
+	}
 }

@@ -35,11 +35,13 @@ that are easy to break.
   keys on `GET /api/v1/wifi/keys` — with the ingest token, never under
   `-no-auth`. The sensor keeps them in memory and derives PTKs there. Keys
   flow one way: no key leaves the sensor (not the PMK, PTK, GTK or a
-  MIC), and `wifi` events never carry one. The one thing a sensor sends is a
-  `wifi_key` event's handshake **nonces** (ANonce/SNonce), broadcast in the
-  clear during the 4-way handshake, which the server stores
-  (`wifi_handshakes`) and serves back so a restarted or additional sensor
-  can re-derive the PTK. The key file is never copied into the database.
+  MIC), and `wifi` events never carry one. What a sensor does send, for a
+  restarted or additional sensor to re-derive keys from its own PMK: a
+  `wifi_key` event's handshake **nonces** (ANonce/SNonce, broadcast in the
+  clear), stored in `wifi_handshakes`; and a `wifi_gtk` event's group key
+  **as the AP sent it, still wrapped with the client's KEK**, plus that
+  handshake's nonces, stored in `wifi_group_keys`. Never ship an unwrapped
+  GTK. The key file is never copied into the database.
   WPA3/SAE and 802.1X are parsed but need a supplied PMK; never fake a
   handshake result.
 - **Decoders are pure functions over bytes from the network**, which is
