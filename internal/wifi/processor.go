@@ -169,9 +169,8 @@ func (p *Processor) data(ts time.Time, f *Frame) {
 	}
 	var etherType uint16
 	var payload []byte
-	method := "none"
 	if f.Protected {
-		plain, m, err := p.keys.Decrypt(f)
+		plain, _, err := p.keys.Decrypt(f)
 		if err != nil {
 			if p.cfg.IncludeData {
 				e := f.WireEvent()
@@ -180,7 +179,6 @@ func (p *Processor) data(ts time.Time, f *Frame) {
 			}
 			return
 		}
-		method = m
 		etherType, payload = snap(plain)
 	} else {
 		var err error
@@ -226,8 +224,9 @@ func (p *Processor) data(ts time.Time, f *Frame) {
 	}
 	if p.cfg.IncludeData {
 		e := f.WireEvent()
+		// A protected frame only gets here once it has been decrypted.
 		e.Protected = f.Protected
-		e.Decrypted = f.Protected && method != ""
+		e.Decrypted = f.Protected
 		e.Bytes = uint64(len(payload))
 		p.describeNetwork(e, f)
 		p.emit(ts, e)

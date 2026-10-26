@@ -73,8 +73,8 @@ func runDB(args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "deleted: %d flow records, %d lookups, %d answers, %d observations, %d facts, %d rollup rows, %d entities\n",
-			r.Flows, r.DNS, r.Answers, r.Observations, r.Facts, r.Rollups, r.Entities)
+		fmt.Fprintf(os.Stderr, "deleted: %d flow records, %d lookups, %d answers, %d observations, %d facts, %d rollup rows, %d entities, %d Wi-Fi handshakes\n",
+			r.Flows, r.DNS, r.Answers, r.Observations, r.Facts, r.Rollups, r.Entities, r.Handshakes)
 		return nil
 	case "vacuum":
 		st, err := store.Open(*db, cfg)

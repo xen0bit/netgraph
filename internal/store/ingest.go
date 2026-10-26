@@ -579,7 +579,9 @@ func (g *ingester) hasIP(ctx context.Context, mac string, ip netip.Addr, ts, unt
 }
 
 // deviceFor finds the device behind a local address: by the MAC that sent
-// it if known, else by the latest binding.
+// it if known, else by the latest binding. A sensor's own MAC on someone
+// else's address is the router forwarding, not evidence, so that falls back
+// to the binding too.
 func (g *ingester) deviceFor(ctx context.Context, ip netip.Addr, mac string, ts int64) (int64, string, error) {
 	if ip.IsUnspecified() && mac != "" && !isGroupMAC(mac) {
 		// 0.0.0.0: a host before DHCP has given it an address.
@@ -589,7 +591,7 @@ func (g *ingester) deviceFor(ctx context.Context, ip netip.Addr, mac string, ts 
 	if !ip.IsValid() || !g.s.nets.isLocal(ip) {
 		return 0, "", nil
 	}
-	if mac != "" && !isGroupMAC(mac) {
+	if mac != "" && !isGroupMAC(mac) && !g.s.nets.forwarded(normMACOr(mac), ip) {
 		if err := g.hasIP(ctx, mac, ip, ts, ts, "traffic"); err != nil {
 			return 0, "", err
 		}
@@ -599,6 +601,14 @@ func (g *ingester) deviceFor(ctx context.Context, ip netip.Addr, mac string, ts 
 		return b.device, "", nil
 	}
 	return 0, "", nil
+}
+
+// normMACOr is normMAC for a lookup: the canonical form, or s unchanged.
+func normMACOr(s string) string {
+	if m, ok := normMAC(s); ok {
+		return m
+	}
+	return s
 }
 
 func isGroupMAC(mac string) bool {

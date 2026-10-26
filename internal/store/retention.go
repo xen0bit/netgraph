@@ -7,7 +7,7 @@ import (
 
 // RetentionResult counts what one retention pass deleted.
 type RetentionResult struct {
-	Flows, DNS, Answers, Observations, Facts, Rollups, Entities int64
+	Flows, DNS, Answers, Observations, Facts, Rollups, Entities, Handshakes int64
 }
 
 // Retain deletes data past its retention: raw tables after RawRetention,
@@ -34,6 +34,11 @@ func (s *Store) Retain(ctx context.Context) (RetentionResult, error) {
 		// in one statement.
 		{&r.Rollups, `DELETE FROM traffic_hourly WHERE bucket < ?`, roll},
 		{&r.Rollups, `DELETE FROM dns_hourly WHERE bucket < ?`, roll},
+		// A handshake's key stays valid while the client stays associated,
+		// which can be months for a fixed device, so these follow the
+		// rollups. Without a limit, clients with rotating private MACs
+		// would grow the table (and every sensor's key sync) forever.
+		{&r.Handshakes, `DELETE FROM wifi_handshakes WHERE ts < ?`, roll},
 		{&r.Entities, `DELETE FROM entities WHERE rowid IN (SELECT id FROM entities e WHERE e.last_seen < ?
 			AND NOT EXISTS (SELECT 1 FROM facts WHERE src = e.id OR dst = e.id) LIMIT 5000)`, roll},
 	}

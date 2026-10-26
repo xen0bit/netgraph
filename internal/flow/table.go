@@ -155,12 +155,13 @@ const (
 	maxQUICPackets  = 6
 )
 
-// Add accounts one packet.
-func (t *Table) Add(p *Packet) {
+// Add accounts one packet. It reports whether the packet opened a new flow.
+func (t *Table) Add(p *Packet) (opened bool) {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	k := keyOf(p)
 	e, ok := t.flows[k]
+	opened = !ok
 	if !ok {
 		if len(t.flows) >= t.cfg.MaxFlows {
 			t.evictOldest(p.TS)
@@ -174,6 +175,7 @@ func (t *Table) Add(p *Packet) {
 			// A fresh SYN on a closed tuple is a new connection (port
 			// reuse); finish the old one first.
 			t.finish(k, e, e.last, "fin")
+			opened = true
 			e = t.newEntry(p)
 			t.flows[k] = e
 			e.elem = t.lru.PushFront(k)
@@ -216,6 +218,7 @@ func (t *Table) Add(p *Packet) {
 	if e.inspect && fromSrc && len(p.Payload) > 0 {
 		t.inspectPayload(e, p)
 	}
+	return opened
 }
 
 func (t *Table) newEntry(p *Packet) *entry {

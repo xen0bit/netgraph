@@ -34,6 +34,26 @@ func TestParseBeacon(t *testing.T) {
 	}
 }
 
+// A management frame with the Order bit set carries a 4-byte HT Control
+// field after the sequence number; the fixed fields and IEs start after it.
+func TestParseManagementHTControl(t *testing.T) {
+	ap := []byte{0xaa, 0xbb, 0xcc, 0x00, 0x00, 0x02}
+	b := make([]byte, 28)
+	binary.LittleEndian.PutUint16(b, 0x8050) // probe response, +HTC
+	copy(b[4:10], []byte{0x02, 0, 0, 0, 0, 1})
+	copy(b[10:16], ap)
+	copy(b[16:22], ap)
+	b = append(b, make([]byte, 12)...) // timestamp, interval, capability
+	b = append(b, ie(0, []byte("htc-net"))...)
+	f, err := Parse(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if f.HeaderLen != 28 || f.SSID != "htc-net" {
+		t.Fatalf("header %d, SSID %q", f.HeaderLen, f.SSID)
+	}
+}
+
 func TestParseHiddenOpenAndWEP(t *testing.T) {
 	for _, tc := range []struct {
 		name string

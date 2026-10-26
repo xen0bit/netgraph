@@ -172,26 +172,28 @@ func (p *Processor) handleEthernet(ts time.Time, data []byte, link int) {
 	if p.cfg.Ignore != nil && p.cfg.Ignore(src, dst) {
 		return
 	}
-	if p.rdns != nil {
-		// A host is named from the first moment it is seen, not when the
-		// resolver happens to answer.
-		if p.cfg.IsLocal(f.src) {
-			p.rdns.Observe(f.src, mac, ts)
-		}
-		if p.cfg.IsLocal(f.dst) && f.hasMAC {
-			p.rdns.Observe(f.dst, net.HardwareAddr(f.dstMAC[:]).String(), ts)
-		}
-	}
 	if f.proto == flow.ProtoICMPv6 && len(f.payload) > 0 && f.payload[0] >= 133 && f.payload[0] <= 136 {
 		if b := decode.NDP(f.payload, f.src); b != nil {
 			p.binding(ts, b)
 		}
 	}
 	if !f.frag && (f.proto != flow.ProtoTCP && f.proto != flow.ProtoUDP || f.l4 != nil) {
-		p.flows.Add(&flow.Packet{
+		opened := p.flows.Add(&flow.Packet{
 			TS: ts, Proto: f.proto, Src: src, Dst: dst, SrcMAC: f.srcMAC,
 			Len: f.ipLen, TCPFlags: f.tcpFlags, Seq: f.seq, Payload: f.payload,
 		})
+		if opened && p.rdns != nil {
+			// A host is named from its first connection, not when the
+			// resolver happens to answer. Only new flows ask: the lookup
+			// caches by address, and a per-packet check costs more than
+			// the rest of the packet path on a small router.
+			if p.cfg.IsLocal(f.src) {
+				p.rdns.Observe(f.src, mac, ts)
+			}
+			if p.cfg.IsLocal(f.dst) && f.hasMAC {
+				p.rdns.Observe(f.dst, net.HardwareAddr(f.dstMAC[:]).String(), ts)
+			}
+		}
 	}
 	if len(f.payload) == 0 {
 		return

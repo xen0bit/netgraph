@@ -126,6 +126,9 @@ func Parse(b []byte) (*Frame, error) {
 func (f *Frame) headerLen() int {
 	switch f.Type {
 	case TypeManagement:
+		if f.Order {
+			return 28 // +HTC: HT/VHT/HE control follows the sequence field
+		}
 		return 24
 	case TypeControl:
 		switch f.Subtype {

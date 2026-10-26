@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"net"
 	"net/netip"
+	"slices"
 	"sync"
 
 	"github.com/xen0bit/netgraph/internal/wire"
@@ -15,6 +17,10 @@ import (
 type localNets struct {
 	mu       sync.RWMutex
 	prefixes map[string][]netip.Prefix // by sensor
+	// own is each sensor's interface MACs and the addresses those
+	// interfaces hold. A router forwards other subnets' packets under its
+	// own MAC, so that MAC is evidence only for these addresses.
+	own map[string]map[string][]netip.Addr // sensor -> MAC -> addresses
 }
 
 var defaultLocal = []netip.Prefix{
@@ -27,11 +33,21 @@ var defaultLocal = []netip.Prefix{
 	netip.MustParsePrefix("fe80::/10"),
 }
 
-func newLocalNets() *localNets { return &localNets{prefixes: map[string][]netip.Prefix{}} }
+func newLocalNets() *localNets {
+	return &localNets{prefixes: map[string][]netip.Prefix{}, own: map[string]map[string][]netip.Addr{}}
+}
 
 func (n *localNets) addHello(sensor string, h *wire.Hello) {
 	var ps []netip.Prefix
+	own := map[string][]netip.Addr{}
 	for _, ifc := range h.Interfaces {
+		if hw, err := net.ParseMAC(ifc.MAC); err == nil {
+			addrs := own[hw.String()]
+			for _, p := range ifc.Prefixes {
+				addrs = append(addrs, p.Addr().Unmap())
+			}
+			own[hw.String()] = addrs
+		}
 		for _, p := range ifc.Prefixes {
 			if p.Addr().IsLoopback() || p.Addr().IsLinkLocalUnicast() {
 				continue
@@ -41,7 +57,31 @@ func (n *localNets) addHello(sensor string, h *wire.Hello) {
 	}
 	n.mu.Lock()
 	n.prefixes[sensor] = ps
+	n.own[sensor] = own
 	n.mu.Unlock()
+}
+
+// forwarded reports whether a packet from (or to) mac about address a was
+// forwarded by a sensor's router rather than sent by a: mac is one of a
+// sensor's interface MACs and a is not an address the router holds. Hosts
+// on a routed subnet (a VLAN, a VPN) reach the captured LAN under the
+// router's MAC, which must not make them the router.
+func (n *localNets) forwarded(mac string, a netip.Addr) bool {
+	a = a.Unmap()
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	router := false
+	for _, macs := range n.own {
+		addrs, ok := macs[mac]
+		if !ok {
+			continue
+		}
+		router = true
+		if slices.Contains(addrs, a) {
+			return false
+		}
+	}
+	return router
 }
 
 func (n *localNets) isLocal(a netip.Addr) bool {
