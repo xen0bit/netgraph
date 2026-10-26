@@ -8,10 +8,12 @@ Wants=network-online.target
 Type=exec
 EnvironmentFile=/etc/netgraph/server.conf
 # Token and key files stay root-only; systemd hands the dynamic user copies.
-# The read token and Wi-Fi keys are optional (the "-" prefix).
+# The directory credential copies every file in /etc/netgraph as etc_<name>,
+# so the optional read.token, wifi.keys and tls.crt/tls.key need no flag and
+# no unit line: netgraph serve uses each one present. (A missing file named
+# in its own LoadCredential= line would stop the unit from starting.)
 LoadCredential=token:/etc/netgraph/server.token
-LoadCredential=-read-token:/etc/netgraph/read.token
-LoadCredential=-wifi-keys:/etc/netgraph/wifi.keys
+LoadCredential=etc:/etc/netgraph
 ExecStart=/usr/bin/netgraph serve -db /var/lib/netgraph/netgraph.db -token-file ${CREDENTIALS_DIRECTORY}/token $NETGRAPH_SERVER_ARGS
 Restart=on-failure
 RestartSec=2s

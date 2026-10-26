@@ -228,7 +228,10 @@ func checkFlows(t *testing.T, c *apiclient.Client, f model.Filter) {
 	}
 	by := map[string]model.Flow{}
 	for _, x := range fl {
-		if x.Name != "" {
+		// An ICMP error to the same server (a port unreachable for a QUIC
+		// packet that arrives after curl closed its socket) carries the
+		// same name; it must not stand in for the connection itself.
+		if _, seen := by[x.Name]; x.Name != "" && (!seen || x.Proto != "icmp") {
 			by[x.Name] = x
 		}
 	}

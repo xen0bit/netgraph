@@ -28,11 +28,11 @@ func runServe(args []string) error {
 	db := fs.String("db", envOr("NETGRAPH_DB", "netgraph.db"), "database file; $NETGRAPH_DB")
 	listen := fs.String("listen", envOr("NETGRAPH_LISTEN", ":8443"), "listen address; $NETGRAPH_LISTEN")
 	tokenFile := fs.String("token-file", "", "file holding the sensors' ingest token (default $NETGRAPH_TOKEN)")
-	readTokenFile := fs.String("read-token-file", "", "file holding the token for queries and the web UI (default $NETGRAPH_READ_TOKEN; none: open)")
+	readTokenFile := fs.String("read-token-file", etcCredential("read.token"), "file holding the token for queries and the web UI (default $NETGRAPH_READ_TOKEN; under the systemd unit, /etc/netgraph/read.token; none: open)")
 	noAuth := fs.Bool("no-auth", false, "accept ingest without a token (trusted networks only)")
-	cert := fs.String("tls-cert", "", "TLS certificate (PEM)")
-	key := fs.String("tls-key", "", "TLS key (PEM)")
-	wifiKeyFile := fs.String("wifi-key-file", envOr("NETGRAPH_WIFI_KEY_FILE", ""), "WPA/WPA2 passphrases, PMKs and WEP keys served to sensors for Wi-Fi decryption; $NETGRAPH_WIFI_KEY_FILE")
+	cert := fs.String("tls-cert", etcCredential("tls.crt"), "TLS certificate (PEM); under the systemd unit, /etc/netgraph/tls.crt")
+	key := fs.String("tls-key", etcCredential("tls.key"), "TLS key (PEM); under the systemd unit, /etc/netgraph/tls.key")
+	wifiKeyFile := fs.String("wifi-key-file", envOr("NETGRAPH_WIFI_KEY_FILE", etcCredential("wifi.keys")), "WPA/WPA2 passphrases, PMKs and WEP keys served to sensors for Wi-Fi decryption; $NETGRAPH_WIFI_KEY_FILE; under the systemd unit, /etc/netgraph/wifi.keys")
 	alertURL := fs.String("alert-webhook", envOr("NETGRAPH_ALERT_WEBHOOK", ""), "POST a JSON alert here when a new device joins the network; $NETGRAPH_ALERT_WEBHOOK")
 	alertLearn := fs.String("alert-learn", "24h", "after the first sensor connects, learn the network this long before alerting on new devices")
 	webDir := fs.String("web-dir", "", "serve the web UI from this directory instead of the embedded copy")
@@ -46,6 +46,9 @@ func runServe(args []string) error {
 		return err
 	}
 	log := newLogger(*logLevel, *logFormat)
+	if (*cert == "") != (*key == "") {
+		return errors.New("-tls-cert and -tls-key go together")
+	}
 	ingestTok, err := readSecret(*tokenFile, "NETGRAPH_TOKEN")
 	if err != nil {
 		return err

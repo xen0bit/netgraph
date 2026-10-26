@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -95,6 +96,24 @@ func envOr(k, def string) string {
 		return v
 	}
 	return def
+}
+
+// etcCredential returns the path of /etc/netgraph/<file> as the packaged
+// unit hands it over (LoadCredential=etc:/etc/netgraph names each copy
+// etc_<file>), or "" when there is none. This is how the optional read
+// token, Wi-Fi keys and TLS pair reach the server: systemd does not expand
+// ${CREDENTIALS_DIRECTORY} inside values from an EnvironmentFile, so
+// server.conf cannot point flags at them.
+func etcCredential(file string) string {
+	dir := os.Getenv("CREDENTIALS_DIRECTORY")
+	if dir == "" {
+		return ""
+	}
+	p := filepath.Join(dir, "etc_"+file)
+	if _, err := os.Stat(p); err != nil {
+		return ""
+	}
+	return p
 }
 
 // readSecret reads a token from a file, or from env when file is "".
