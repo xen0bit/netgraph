@@ -26,6 +26,7 @@ type Backend interface {
 	Graph(ctx context.Context, f Filter, o GraphOptions) (*Graph, error)
 	Entity(ctx context.Context, id string, f Filter) (*EntityDetail, error)
 	Sensors(ctx context.Context) ([]Sensor, error)
+	WiFi(ctx context.Context, f Filter) ([]WiFiNetwork, error)
 }
 
 // Filter selects what a query covers. The window is half-open: [From, To).
@@ -184,6 +185,10 @@ const (
 	RelQueried     = "queried"     // device -> domain (graph only)
 	RelConnects    = "connects"    // device -> ip/domain (graph only)
 	RelNeighbor    = "neighbor"    // device -> lldp descriptor
+	RelBroadcasts  = "broadcasts"  // access point -> ssid
+	RelProbes      = "probes"      // device -> ssid
+	RelAssociates  = "associates"  // device -> access point
+	RelHandshake   = "handshake"   // device -> access point (4-way handshake)
 )
 
 // Entity kinds; an entity ID is "<kind>:<key>".
@@ -198,6 +203,7 @@ const (
 	KindUserAgent   = "useragent"
 	KindUPnP        = "upnp"
 	KindLLDP        = "lldp"
+	KindSSID        = "ssid"
 )
 
 // EntityID builds an entity ID.
@@ -349,6 +355,18 @@ type Sensor struct {
 	LastSeen   int64          `json:"last_seen"`
 	Interfaces []string       `json:"interfaces,omitempty"`
 	Stats      map[string]any `json:"stats,omitempty"`
+}
+
+// WiFiNetwork is one SSID an access point was seen broadcasting. It exists
+// only when a monitor-mode sensor with Wi-Fi support has reported it.
+type WiFiNetwork struct {
+	BSSID     string `json:"bssid"`
+	SSID      string `json:"ssid"`
+	Security  string `json:"security,omitempty"`
+	Channel   int    `json:"channel,omitempty"`
+	Clients   int    `json:"clients"`
+	FirstSeen int64  `json:"first_seen"`
+	LastSeen  int64  `json:"last_seen"`
 }
 
 // Values encodes f as URL query parameters.

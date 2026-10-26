@@ -61,6 +61,7 @@ func New(cfg Config) *Server {
 	}
 	s := &Server{cfg: cfg, mux: http.NewServeMux(), log: cfg.Logger}
 	s.mux.HandleFunc("POST /api/v1/ingest", s.ingest)
+	s.mux.HandleFunc("GET /api/v1/wifi/handshakes", s.wifiHandshakes)
 	s.mux.HandleFunc("GET /api/v1/version", s.version)
 	s.mux.HandleFunc("GET /healthz", s.version)
 	read := func(p string, h http.HandlerFunc) { s.mux.Handle("GET "+p, s.requireRead(h)) }
@@ -73,6 +74,7 @@ func New(cfg Config) *Server {
 	read("/api/v1/graph", s.graph)
 	read("/api/v1/entity", s.entity)
 	read("/api/v1/sensors", s.sensors)
+	read("/api/v1/wifi", s.wifi)
 	read("/api/v1/live", s.live)
 	s.mux.HandleFunc("GET /", s.web)
 	return s
@@ -223,6 +225,28 @@ func (s *Server) sensors(w http.ResponseWriter, r *http.Request) {
 	v, err := s.cfg.Store.Sensors(r.Context())
 	if err != nil {
 		s.fail(w, err)
+		return
+	}
+	writeJSON(w, v)
+}
+
+func (s *Server) wifi(w http.ResponseWriter, r *http.Request) {
+	answer(s, w, r, s.cfg.Store.WiFi)
+}
+
+// wifiHandshakes hands a sensor the stored handshake nonces so it can
+// re-derive pairwise keys after a restart, or learn keys another sensor
+// found. It is authorised with the ingest token (the sensor's own
+// credential): the response is public nonce material, useless without the
+// network passphrase, which stays on the sensor.
+func (s *Server) wifiHandshakes(w http.ResponseWriter, r *http.Request) {
+	if !tokenOK(r, s.cfg.IngestToken) {
+		httpError(w, http.StatusUnauthorized, errors.New("missing or wrong ingest token"))
+		return
+	}
+	v, err := s.cfg.Store.WiFiHandshakes(r.Context())
+	if err != nil {
+		httpError(w, http.StatusInternalServerError, errors.New("query failed"))
 		return
 	}
 	writeJSON(w, v)

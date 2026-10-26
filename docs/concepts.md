@@ -12,9 +12,10 @@ own:
 | `binding` | ARP, NDP | this MAC uses this address |
 | `dhcp` | DHCPv4, DHCPv6 | hostname, FQDN, vendor class, parameter-request list, client ID, leased addresses |
 | `mdns` | mDNS/DNS-SD | `.local` hosts with their addresses, service instances with ports and TXT records |
-| `name` | NBNS, LLMNR | NetBIOS and LLMNR names a host claims |
+| `name` | NBNS, LLMNR, reverse DNS | names a host claims or that its address resolves to |
 | `ssdp` | SSDP | UPnP server strings, USNs, device types, description URLs |
 | `lldp` | LLDP | a neighbour's system name, port and management address |
+| `wifi` | monitor-mode 802.11 | access points, SSIDs, clients, associations and 4-way handshakes |
 | `hello`, `stats` | the sensor | its interfaces (whose prefixes define "local") and counters |
 
 TLS ClientHellos are reassembled from the first segments of a connection.
@@ -29,8 +30,17 @@ TCP connection still reports empty intervals, which is what lets netgraph
 say it was open. A connection ends on FIN or RST, after an idle timeout,
 or when the sensor stops.
 
-Repeated announcements (mDNS, SSDP, LLDP, NetBIOS) are reported once per
-10 minutes per distinct content, and bindings once per 5 minutes.
+Repeated announcements (mDNS, SSDP, LLDP, NetBIOS, Wi-Fi beacons and probe
+requests) are reported once per 10 minutes per distinct content, and
+bindings once per 5 minutes.
+
+**Reverse DNS.** On live capture the sensor asks the system resolver for the
+PTR name of a local address when it is first observed (an ARP/NDP binding, a
+DHCP lease, mDNS address, DNS client or the local side of a flow). The
+answer is emitted with the observation's timestamp, not the resolver's, so
+a historical window shows the name the host had then. Answers are cached for
+an hour and missing names for ten minutes. Replays do not do active lookups:
+they must not depend on the resolver of the machine replaying them.
 
 ## What the server keeps
 
@@ -95,8 +105,10 @@ Host, else the DNS name.
 
 **What a device is called**, in order of preference: its DHCP hostname,
 DHCPv6 FQDN, mDNS name, NetBIOS name, LLMNR name, LLDP system name, the
-sensor's name for the router itself, and otherwise its vendor and the end
-of its MAC (`Google aa:bb:cc`, `private 6c:1d:4e` for randomised MACs).
+sensor's name for the router itself, its reverse DNS name, and otherwise its
+vendor and the end of its MAC (`Google aa:bb:cc`, `private 6c:1d:4e` for
+randomised MACs). Reverse DNS is a fallback: a name the host or network
+announced itself is always preferred.
 
 **mDNS** records are credited to the device that holds their address, not
 to whoever sent the packet: reflectors and sleep proxies answer for other
@@ -113,11 +125,58 @@ device ──connects──▶ address        (when no name is known)
 device ──connects──▶ device         (LAN to LAN)
 domain ──cname──▶ domain
 device ──hostname / announces / fingerprint / user_agent / upnp / neighbor / vendor──▶ ...   (with Identity)
+device ──broadcasts / probes / associates / handshake──▶ ssid or device   (Wi-Fi, with Identity)
 ```
 
 With **collapse** (default), a destination reached by name is one node
 listing its addresses, rather than a node per CDN address. **Top N** keeps
 each device's busiest destinations and marks the graph truncated.
+
+## Wi-Fi
+
+A sensor capturing a monitor-mode interface receives radiotap frames. It
+records access points (by BSSID, as devices with role `access_point`), the
+SSIDs they broadcast, probe requests, associations and 4-way handshakes.
+The graph can show `access point ──broadcasts──▶ SSID`,
+`device ──probes/associates──▶ SSID/access point`, and handshake edges with
+the message number and cipher.
+
+**Decryption** happens on the sensor, before events are shipped:
+
+- **Open** networks are passed through.
+- **WEP** uses the configured 40/104/128-bit shared keys.
+- **WPA/WPA2-PSK** derives the PMK from the SSID and passphrase (PBKDF2) or
+  accepts a raw PMK. It follows EAPOL messages 1–4, derives the PTK from the
+  nonces, verifies the MIC, and decrypts CCMP or TKIP data frames.
+- **WPA3/SAE, OWE and 802.1X** cannot be followed from the air alone. They
+  are parsed and reported as networks, and can be decrypted only when a PMK
+  is supplied (`pmk <ssid> <hex>` in the key file).
+
+Decrypted data frames are rebuilt as Ethernet and enter the normal flow,
+DNS, TLS and HTTP pipeline, so a Wi-Fi capture produces the same connection
+graph as a bridge capture. Only pairwise keys are followed; group/broadcast
+keys are not derived, so multicast Wi-Fi data stays encrypted. No key leaves
+the sensor — not the PMK, PTK, passphrase or MIC — and the keyring is never
+written to disk; `wifi` events carry only public facts (BSSID, SSID, client,
+channel, security, cipher, handshake message number and whether its MIC
+verified).
+
+**Handshake persistence and sync.** Pairwise keys live only in sensor
+memory, so a sensor restart would otherwise lose them until each client
+re-associated. To avoid that, a sensor that installs a key ships a
+`wifi_key` event carrying just the handshake's two **nonces** — values the
+AP and client broadcast in the clear, so not secret. The server keeps the
+latest per `(AP, client)` in `wifi_handshakes`, and a sensor fetches them on
+startup (and every few minutes) to re-derive the PTK from its own key-file
+PMK. The same mechanism lets several sensors share keys: one sensor catches
+a client's handshake, the rest decrypt that client too. The server never
+sees the passphrase and stores no raw frames, so the stored nonces decrypt
+nothing on their own. A sensor only ships a `wifi_key` for a network whose
+passphrase it holds, so the table only ever covers your own networks.
+
+Channel hopping is available with `-wifi-hop`. It uses the wireless
+extensions ioctl, so it works with mac80211 monitor interfaces and not with
+6 GHz-only devices; a fixed channel is always an option.
 
 ## Blind spots
 
@@ -135,3 +194,12 @@ each device's busiest destinations and marks the graph truncated.
 - **IPv4 fragments** after the first are not counted.
 - **DNS over TCP** is decoded only when a whole message fits in one
   segment, which covers ordinary lookups but not zone transfers.
+- **WPA3/SAE, OWE and 802.1X** Wi-Fi has no passively derivable PMK; without
+  an explicitly supplied PMK, their data frames stay encrypted.
+- **Wi-Fi group keys** (broadcast/multicast) are not derived, even when the
+  pairwise handshake was captured. GCMP ciphers (some WPA3 suites) are also
+  not implemented yet; CCMP and TKIP are.
+- **Wi-Fi aggregates and fragments** (A-MSDU, fragmented 802.11 frames) are
+  not reassembled yet; those data frames are counted but not decoded.
+- **Wi-Fi on other channels** is missed while the monitor interface is
+  hopping. A busy network also loses frames during the hop itself.

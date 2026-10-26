@@ -3,16 +3,97 @@ package sensor
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"net/netip"
+	"os"
+	"path/filepath"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/xen0bit/netgraph/internal/capture"
 	"github.com/xen0bit/netgraph/internal/flow"
+	"github.com/xen0bit/netgraph/internal/rdns"
 	"github.com/xen0bit/netgraph/internal/testutil"
+	"github.com/xen0bit/netgraph/internal/wifi"
 	"github.com/xen0bit/netgraph/internal/wire"
 )
+
+// A monitor-mode frame goes to the Wi-Fi decoder instead of the Ethernet
+// parser, and its observation leaves through the same emitter.
+func TestWiFiLinkDispatch(t *testing.T) {
+	var out collector
+	wp := wifi.NewProcessor(wifi.Config{Emit: func(ev wire.Event) { out.Emit(ev) }})
+	p := NewProcessor(Config{WiFi: wp}, &out)
+
+	ap := []byte{0xaa, 0xbb, 0xcc, 0x00, 0x00, 0x01}
+	b := make([]byte, 24)
+	binary.LittleEndian.PutUint16(b, 0x0080)
+	copy(b[4:10], []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff})
+	copy(b[10:16], ap)
+	copy(b[16:22], ap)
+	b = append(b, make([]byte, 12)...)
+	b = append(b, 0, 4, 'h', 'o', 'm', 'e')
+	p.Handle(testutil.Base, b, capture.LinkIEEE80211)
+	ev := out.of(wire.TypeWiFi)
+	if len(ev) != 1 || ev[0].WiFi == nil || ev[0].WiFi.SSID != "home" || ev[0].WiFi.BSSID != "aa:bb:cc:00:00:01" {
+		t.Fatalf("wifi events = %+v", ev)
+	}
+}
+
+type ptrResolver struct {
+	mu    sync.Mutex
+	names map[string][]string
+	calls int
+}
+
+func (r *ptrResolver) LookupAddr(_ context.Context, addr string) ([]string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls++
+	return r.names[addr], nil
+}
+
+// The sensor asks for a reverse name when it first sees a host, and emits the
+// answer stamped with that observation time.
+func TestReverseDNSAtObservation(t *testing.T) {
+	capt := testutil.Home(t)
+	ts, frames := capt.Frames()
+	var arp []byte
+	var at time.Time
+	for i, f := range frames {
+		if len(f) >= 14 && f[12] == 0x08 && f[13] == 0x06 {
+			arp, at = f, ts[i]
+			break
+		}
+	}
+	if arp == nil {
+		t.Fatal("scenario has no ARP frame")
+	}
+	res := &ptrResolver{names: map[string][]string{testutil.Phone.IP.String(): {"alice-iphone.lan."}}}
+	names := make(chan wire.Event, 4)
+	lookup := rdns.New(rdns.Config{Resolver: res, Workers: 1, Emit: func(n rdns.Name) {
+		names <- wire.Event{Type: wire.TypeName, TS: n.TS, Name: &wire.Name{MAC: n.MAC, IP: n.IP, Name: n.Name, Proto: "rdns"}}
+	}})
+	defer lookup.Close()
+
+	var out collector
+	p := NewProcessor(Config{RDNS: lookup, IsLocal: LocalAddr}, &out)
+	p.Handle(at, arp, capture.LinkEthernet)
+	select {
+	case ev := <-names:
+		if ev.Name == nil || ev.Name.Proto != "rdns" || ev.Name.Name != "alice-iphone.lan" ||
+			ev.Name.IP != testutil.Phone.IP || ev.Name.MAC != testutil.Phone.MAC.String() {
+			t.Fatalf("rdns event = %+v", ev.Name)
+		}
+		if !ev.TS.Equal(at) {
+			t.Errorf("rdns ts = %v, want observation %v", ev.TS, at)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("no rDNS event")
+	}
+}
 
 type collector struct{ events []wire.Event }
 
@@ -213,6 +294,66 @@ func FuzzHandle(f *testing.F) {
 		parseFrame(b, capture.LinkRaw, &fr)
 		p.Handle(time.Unix(0, 0), b, capture.LinkEthernet)
 	})
+}
+
+// A pcap with radiotap link type replays through the same Wi-Fi decoder,
+// which is how captures can be tested without a monitor interface.
+func TestWiFiPcapReplay(t *testing.T) {
+	ap := []byte{0xaa, 0xbb, 0xcc, 0x00, 0x00, 0x02}
+	b := make([]byte, 24)
+	binary.LittleEndian.PutUint16(b, 0x0080)
+	copy(b[4:10], []byte{0xff, 0xff, 0xff, 0xff, 0xff, 0xff})
+	copy(b[10:16], ap)
+	copy(b[16:22], ap)
+	b = append(b, make([]byte, 12)...)
+	b = append(b, 0, 5, 'l', 'a', 'b', 'w', 'i')
+	frame := wifiRadiotap(2412, -55, b)
+
+	var buf bytes.Buffer
+	hdr := make([]byte, 24)
+	binary.LittleEndian.PutUint32(hdr[0:], 0xa1b2c3d4)
+	binary.LittleEndian.PutUint16(hdr[4:], 2)
+	binary.LittleEndian.PutUint16(hdr[6:], 4)
+	binary.LittleEndian.PutUint32(hdr[16:], 65535)
+	binary.LittleEndian.PutUint32(hdr[20:], capture.LinkIEEE80211Radiotap)
+	buf.Write(hdr)
+	rec := make([]byte, 16)
+	binary.LittleEndian.PutUint32(rec[0:], uint32(testutil.Base.Unix()))
+	binary.LittleEndian.PutUint32(rec[8:], uint32(len(frame)))
+	binary.LittleEndian.PutUint32(rec[12:], uint32(len(frame)))
+	buf.Write(rec)
+	buf.Write(frame)
+	path := filepath.Join(t.TempDir(), "wifi.pcap")
+	if err := os.WriteFile(path, buf.Bytes(), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	src, err := capture.OpenFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if src.LinkType() != capture.LinkIEEE80211Radiotap {
+		t.Fatalf("link type = %d", src.LinkType())
+	}
+	var out collector
+	wp := wifi.NewProcessor(wifi.Config{Emit: func(ev wire.Event) { out.Emit(ev) }})
+	r := &Runner{Processor: NewProcessor(Config{WiFi: wp}, &out), Out: &out}
+	if err := r.RunFile(context.Background(), src); err != nil {
+		t.Fatal(err)
+	}
+	ev := out.of(wire.TypeWiFi)
+	if len(ev) != 1 || ev[0].WiFi.SSID != "labwi" || ev[0].WiFi.Channel != 1 {
+		t.Fatalf("wifi pcap events = %+v", ev)
+	}
+}
+
+func wifiRadiotap(freq, signal int, frame []byte) []byte {
+	rt := make([]byte, 15)
+	binary.LittleEndian.PutUint16(rt[2:], 15)
+	binary.LittleEndian.PutUint32(rt[4:], 1<<1|1<<3|1<<5)
+	binary.LittleEndian.PutUint16(rt[10:], uint16(freq))
+	rt[14] = byte(int8(signal))
+	return append(rt, frame...)
 }
 
 // testdata/curl-clienthello.pcap holds real ClientHellos from curl 8.14

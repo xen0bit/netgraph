@@ -87,6 +87,21 @@ main { position: relative; overflow: hidden; display: flex; min-height: 0; }
 .diagram .placeholder { position: absolute; inset: 0; display: grid; place-items: center; color: var(--fg-2); text-align: center; padding: 16px; }
 .progress { width: 220px; height: 4px; background: var(--bg-3); border-radius: 2px; overflow: hidden; margin: 10px auto 0; }
 .progress > div { height: 100%; background: var(--accent); width: 0; transition: width .2s; }
+.diagram-loading {
+  position: absolute; top: 12px; left: 50%; transform: translateX(-50%); z-index: 1;
+  display: flex; align-items: center; gap: 8px; padding: 6px 12px;
+  background: var(--bg-2); border: 1px solid var(--border); border-radius: 999px;
+  color: var(--fg-2); font-size: 12px; box-shadow: var(--shadow); pointer-events: none;
+}
+.spinner {
+  width: 12px; height: 12px; border-radius: 50%; flex: none;
+  border: 2px solid var(--border); border-top-color: var(--accent);
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@media (prefers-reduced-motion: reduce) {
+  .spinner { animation-duration: 2.4s; }
+}
 .note { color: var(--fg-2); font-size: 12px; padding: 4px 16px 8px; }
 
 table { border-collapse: collapse; width: 100%; font-size: 13px; }

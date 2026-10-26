@@ -59,7 +59,7 @@ func serve(t *testing.T, web fstest.MapFS) (*httptest.Server, *store.Store) {
 var window = model.Filter{From: testutil.Base, To: testutil.Base.Add(time.Hour)}
 
 func TestEndToEnd(t *testing.T) {
-	srv, _ := serve(t, nil)
+	srv, st := serve(t, nil)
 	c := apiclient.NewClient(srv.URL, "rd-tok")
 	ctx := context.Background()
 
@@ -91,6 +91,16 @@ func TestEndToEnd(t *testing.T) {
 	sensors, err := c.Sensors(ctx)
 	if err != nil || len(sensors) != 1 || sensors[0].Name != "router" || sensors[0].Version != "test" {
 		t.Fatalf("sensors: %v %+v", err, sensors)
+	}
+	if wifi, err := c.WiFi(ctx, window); err != nil || len(wifi) != 0 {
+		t.Fatalf("wifi without observations: %v %+v", err, wifi)
+	}
+	if _, err := st.Ingest(ctx, "router", "wifi-boot", []wire.Event{{Seq: 1, Type: wire.TypeWiFi, TS: testutil.Base.Add(10 * time.Minute),
+		WiFi: &wire.WiFi{Kind: "beacon", BSSID: "aa:bb:cc:00:00:01", SSID: "api-net", Channel: 6, Security: "wpa2"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if wifi, err := c.WiFi(ctx, window); err != nil || len(wifi) != 1 || wifi[0].SSID != "api-net" || wifi[0].Channel != 6 {
+		t.Fatalf("wifi: %v %+v", err, wifi)
 	}
 	ent, err := c.Entity(ctx, "domain:www.example.com", window)
 	if err != nil || len(ent.Flows) != 1 || len(ent.DNS) != 1 {

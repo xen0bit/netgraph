@@ -48,11 +48,34 @@ export class Diagram {
   }
 
   message(html) {
+    this.done();
     this.svg = null;
     this.el.innerHTML = `<div class="placeholder"><div>${html}</div></div>`;
   }
 
+  // loading keeps the current graph visible under a small status pill while
+  // the next one is fetched and laid out. It is not a modal: panning and
+  // zooming the old graph still work.
+  loading(text = "Loading graph…") {
+    this.el.setAttribute("aria-busy", "true");
+    let el = this.el.querySelector(".diagram-loading");
+    if (!el) {
+      el = document.createElement("div");
+      el.className = "diagram-loading";
+      el.setAttribute("role", "status");
+      el.innerHTML = `<span class="spinner" aria-hidden="true"></span><span class="loading-text"></span>`;
+      this.el.appendChild(el);
+    }
+    el.querySelector(".loading-text").textContent = text;
+  }
+
+  done() {
+    this.el.removeAttribute("aria-busy");
+    this.el.querySelector(".diagram-loading")?.remove();
+  }
+
   show(svgText, { keepView = false } = {}) {
+    this.done();
     const prev = { scale: this.scale, x: this.x, y: this.y };
     // The SVG comes from our own WASM renderer or server, never from
     // user-supplied markup: entity labels are escaped by d2.

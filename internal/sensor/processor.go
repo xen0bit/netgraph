@@ -17,8 +17,11 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/xen0bit/netgraph/internal/capture"
 	"github.com/xen0bit/netgraph/internal/decode"
 	"github.com/xen0bit/netgraph/internal/flow"
+	"github.com/xen0bit/netgraph/internal/rdns"
+	"github.com/xen0bit/netgraph/internal/wifi"
 	"github.com/xen0bit/netgraph/internal/wire"
 )
 
@@ -33,6 +36,15 @@ type Config struct {
 	// Ignore reports packets that must not be accounted, such as the
 	// sensor's own connection to the server.
 	Ignore func(src, dst netip.AddrPort) bool
+	// RDNS, when set, resolves reverse DNS names for local addresses as
+	// they are seen. Disabled by default so replays stay deterministic.
+	RDNS *rdns.Lookup
+	// IsLocal reports whether an address is on the LAN. Defaults to the
+	// private, link-local and CGNAT ranges.
+	IsLocal func(netip.Addr) bool
+	// WiFi decodes monitor-mode 802.11 frames and feeds decrypted data
+	// frames back into this processor as Ethernet.
+	WiFi *wifi.Processor
 }
 
 // Processor turns frames into events. It is safe for concurrent use by one
@@ -42,6 +54,8 @@ type Processor struct {
 	out   wire.Emitter
 	flows *flow.Table
 	log   *slog.Logger
+	rdns  *rdns.Lookup
+	wifi  *wifi.Processor
 
 	mu      sync.Mutex
 	pending map[dnsKey]pendingQuery
@@ -81,7 +95,17 @@ func NewProcessor(cfg Config, out wire.Emitter) *Processor {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	p := &Processor{cfg: cfg, out: out, log: cfg.Logger, pending: map[dnsKey]pendingQuery{}, seen: map[uint64]time.Time{}}
+	if cfg.IsLocal == nil {
+		cfg.IsLocal = LocalAddr
+	}
+	p := &Processor{cfg: cfg, out: out, log: cfg.Logger, rdns: cfg.RDNS, wifi: cfg.WiFi, pending: map[dnsKey]pendingQuery{}, seen: map[uint64]time.Time{}}
+	if p.wifi != nil {
+		p.wifi.SetData(func(ts time.Time, eth []byte) {
+			// A decrypted 802.11 data frame is an Ethernet frame: the
+			// same IP, DNS, TLS and flow code handles it.
+			p.handleEthernet(ts, eth, capture.LinkEthernet)
+		})
+	}
 	p.flows = flow.New(cfg.Flow, func(f *wire.Flow) {
 		out.Emit(wire.Event{Type: wire.TypeFlow, TS: f.End, Flow: f})
 	})
@@ -105,6 +129,20 @@ func (p *Processor) Handle(ts time.Time, data []byte, link int) {
 	}()
 	p.packets.Add(1)
 	p.bytes.Add(uint64(len(data)))
+	if capture.IsWiFi(link) {
+		if p.wifi == nil {
+			p.decodeErrors.Add(1)
+			return
+		}
+		p.wifi.Handle(ts, data, link == capture.LinkIEEE80211Radiotap)
+		return
+	}
+	p.handleEthernet(ts, data, link)
+}
+
+// handleEthernet processes an Ethernet-like frame. Wi-Fi capture calls it
+// with frames rebuilt after decryption.
+func (p *Processor) handleEthernet(ts time.Time, data []byte, link int) {
 	var f frame
 	if !parseFrame(data, link, &f) {
 		p.decodeErrors.Add(1)
@@ -133,6 +171,16 @@ func (p *Processor) Handle(ts time.Time, data []byte, link int) {
 	dst := netip.AddrPortFrom(f.dst, f.dport)
 	if p.cfg.Ignore != nil && p.cfg.Ignore(src, dst) {
 		return
+	}
+	if p.rdns != nil {
+		// A host is named from the first moment it is seen, not when the
+		// resolver happens to answer.
+		if p.cfg.IsLocal(f.src) {
+			p.rdns.Observe(f.src, mac, ts)
+		}
+		if p.cfg.IsLocal(f.dst) && f.hasMAC {
+			p.rdns.Observe(f.dst, net.HardwareAddr(f.dstMAC[:]).String(), ts)
+		}
 	}
 	if f.proto == flow.ProtoICMPv6 && len(f.payload) > 0 && f.payload[0] >= 133 && f.payload[0] <= 136 {
 		if b := decode.NDP(f.payload, f.src); b != nil {
@@ -170,6 +218,15 @@ func (p *Processor) udp(ts time.Time, f *frame, mac string) {
 		}
 		_ = err
 		if ev := decode.MDNS(m, f.src, mac); ev != nil {
+			if p.rdns != nil {
+				for _, h := range ev.Hosts {
+					for _, a := range h.Addrs {
+						if p.cfg.IsLocal(a) {
+							p.rdns.Observe(a, "", ts)
+						}
+					}
+				}
+			}
 			p.dedupe(ts, wire.Event{Type: wire.TypeMDNS, TS: ts, MDNS: ev}, "mdns", fmt.Sprint(ev))
 		}
 	case f.sport == 5355:
@@ -186,12 +243,14 @@ func (p *Processor) udp(ts time.Time, f *frame, mac string) {
 		}
 	case (f.sport == 67 || f.sport == 68) && (f.dport == 67 || f.dport == 68):
 		if ev, err := decode.DHCPv4(f.payload); err == nil {
+			p.observeDHCP(ts, ev)
 			p.dedupe(ts, wire.Event{Type: wire.TypeDHCP, TS: ts, DHCP: ev}, "dhcp4", fmt.Sprint(ev))
 		} else {
 			p.decodeErrors.Add(1)
 		}
 	case (f.sport == 546 || f.sport == 547) && (f.dport == 546 || f.dport == 547):
 		if ev, err := decode.DHCPv6(f.payload, mac); err == nil {
+			p.observeDHCP(ts, ev)
 			p.dedupe(ts, wire.Event{Type: wire.TypeDHCP, TS: ts, DHCP: ev}, "dhcp6", fmt.Sprint(ev))
 		}
 	case f.dport == 1900 || f.sport == 1900:
@@ -260,10 +319,29 @@ func (p *Processor) dnsMessage(ts time.Time, f *frame, mac string, b []byte, pro
 		ev.LatencyMS = float64(ts.Sub(pq.ts).Microseconds()) / 1000
 	}
 	p.mu.Unlock()
+	if p.rdns != nil && p.cfg.IsLocal(ev.Client) {
+		p.rdns.Observe(ev.Client, ev.ClientMAC, ts)
+	}
 	p.out.Emit(wire.Event{Type: wire.TypeDNS, TS: ts, DNS: ev})
 }
 
+// observeDHCP asks for reverse names of addresses a DHCP message reveals.
+// The client's MAC is the one that owns them.
+func (p *Processor) observeDHCP(ts time.Time, d *wire.DHCP) {
+	if p.rdns == nil || d.MAC == "" {
+		return
+	}
+	for _, ip := range append([]netip.Addr{d.YourIP, d.ClientIP}, d.Addresses...) {
+		if p.cfg.IsLocal(ip) {
+			p.rdns.Observe(ip, d.MAC, ts)
+		}
+	}
+}
+
 func (p *Processor) binding(ts time.Time, b *wire.Binding) {
+	if p.rdns != nil && p.cfg.IsLocal(b.IP) {
+		p.rdns.Observe(b.IP, b.MAC, ts)
+	}
 	p.dedupeFor(ts, p.cfg.BindingTTL, wire.Event{Type: wire.TypeBinding, TS: ts, Binding: b}, "binding", b.MAC, b.IP.String())
 }
 

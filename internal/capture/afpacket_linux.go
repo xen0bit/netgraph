@@ -6,6 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/gopacket/gopacket/afpacket"
@@ -49,11 +52,32 @@ func OpenLive(cfg LiveConfig) (Source, error) {
 		}
 	}
 	_ = h.InitSocketStats()
-	link := LinkEthernet
-	if len(iface.HardwareAddr) == 0 {
-		link = LinkRaw // tun/wireguard/ppp: frames are bare IP packets
+	return &liveSource{name: cfg.Interface, h: h, link: linkTypeFor(iface)}, nil
+}
+
+// linkTypeFor reads the kernel's ARPHRD type for the interface. Monitor
+// interfaces have no special hardware address, so the Ethernet guess alone
+// would decode their radiotap frames as Ethernet.
+func linkTypeFor(iface *net.Interface) int {
+	switch arphrd(iface.Name) {
+	case 801: // ARPHRD_IEEE80211
+		return LinkIEEE80211
+	case 803: // ARPHRD_IEEE80211_RADIOTAP
+		return LinkIEEE80211Radiotap
 	}
-	return &liveSource{name: cfg.Interface, h: h, link: link}, nil
+	if len(iface.HardwareAddr) == 0 {
+		return LinkRaw // tun/wireguard/ppp: frames are bare IP packets
+	}
+	return LinkEthernet
+}
+
+func arphrd(name string) int {
+	b, err := os.ReadFile("/sys/class/net/" + name + "/type")
+	if err != nil {
+		return 0
+	}
+	n, _ := strconv.Atoi(strings.TrimSpace(string(b)))
+	return n
 }
 
 type liveSource struct {

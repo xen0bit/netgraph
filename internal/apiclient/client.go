@@ -159,6 +159,11 @@ func (c *Client) Sensors(ctx context.Context) ([]model.Sensor, error) {
 	return v, c.getJSON(ctx, "/api/v1/sensors", nil, &v)
 }
 
+func (c *Client) WiFi(ctx context.Context, f model.Filter) ([]model.WiFiNetwork, error) {
+	var v []model.WiFiNetwork
+	return v, c.getJSON(ctx, "/api/v1/wifi", f.Values(), &v)
+}
+
 // Version returns the server's version.
 func (c *Client) Version(ctx context.Context) (string, error) {
 	var v struct{ Version string }

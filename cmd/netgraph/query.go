@@ -25,6 +25,7 @@ what:
   entity ID    everything about one entity: device:<mac>, ip:<addr>,
                domain:<name>, ...
   sensors      sensors that have sent data
+  wifi         Wi-Fi networks seen by monitor-mode sensors
 `
 
 func runQuery(args []string) error {
@@ -114,6 +115,12 @@ func runQuery(args []string) error {
 			return err
 		}
 		v, t = ss, sensorsTable(ss)
+	case "wifi":
+		ns, err := be.WiFi(ctx(), filter)
+		if err != nil {
+			return err
+		}
+		v, t = ns, wifiTable(ns)
 	case "entity":
 		d, err := be.Entity(ctx(), id, filter)
 		if err != nil {
@@ -228,6 +235,18 @@ func sensorsTable(ss []model.Sensor) *table {
 	t := &table{head: []string{"SENSOR", "VERSION", "INTERFACES", "FIRST SEEN", "LAST SEEN", "PACKETS", "DROPS"}}
 	for _, s := range ss {
 		t.add(s.Name, s.Version, strings.Join(s.Interfaces, ","), ts(s.FirstSeen), ts(s.LastSeen), fmt.Sprint(s.Stats["packets"]), fmt.Sprint(s.Stats["kernel_drops"]))
+	}
+	return t
+}
+
+func wifiTable(ns []model.WiFiNetwork) *table {
+	t := &table{head: []string{"SSID", "BSSID", "SECURITY", "CHANNEL", "CLIENTS", "FIRST SEEN", "LAST SEEN"}}
+	for _, n := range ns {
+		ch := ""
+		if n.Channel != 0 {
+			ch = strconv.Itoa(n.Channel)
+		}
+		t.add(clip(n.SSID, 32), n.BSSID, n.Security, ch, strconv.Itoa(n.Clients), ts(n.FirstSeen), ts(n.LastSeen))
 	}
 	return t
 }
