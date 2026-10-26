@@ -49,9 +49,9 @@ netgraph serve -db /var/lib/netgraph/netgraph.db -listen :8443
 | `-db` | `netgraph.db` (`$NETGRAPH_DB`) | database file; created and migrated on start |
 | `-listen` | `:8443` (`$NETGRAPH_LISTEN`) | |
 | `-token-file` | `$NETGRAPH_TOKEN` | ingest token; required unless `-no-auth` |
-| `-read-token-file` | `$NETGRAPH_READ_TOKEN` | query token; when empty, queries and the UI are open (a warning is logged) |
-| `-tls-cert`, `-tls-key` | | serve HTTPS |
-| `-wifi-key-file` | `$NETGRAPH_WIFI_KEY_FILE` | WPA/WPA2 passphrases, PMKs and WEP keys for Wi-Fi sensors ([Wi-Fi capture](#wi-fi-capture)); needs an ingest token |
+| `-read-token-file` | `$NETGRAPH_READ_TOKEN`; unit: `read.token` | query token; when empty, queries and the UI are open (a warning is logged) |
+| `-tls-cert`, `-tls-key` | unit: `tls.crt`, `tls.key` | serve HTTPS |
+| `-wifi-key-file` | `$NETGRAPH_WIFI_KEY_FILE`; unit: `wifi.keys` | WPA/WPA2 passphrases, PMKs and WEP keys for Wi-Fi sensors ([Wi-Fi capture](#wi-fi-capture)); needs an ingest token |
 | `-raw-retention` | `14d` | keep raw connections, lookups and observations |
 | `-rollup-retention` | `180d` | keep hourly rollups and facts |
 | `-exact-max` | `48h` | longer windows are answered from hourly rollups |
@@ -59,6 +59,9 @@ netgraph serve -db /var/lib/netgraph/netgraph.db -listen :8443
 | `-alert-webhook` | `$NETGRAPH_ALERT_WEBHOOK` | POST a JSON alert when a new device joins ([alerts](#new-device-alerts)) |
 | `-alert-learn` | `24h` | learn the network this long after the first sensor connects before alerting |
 | `-web-dir` | | serve the UI from a directory instead of the embedded copy |
+
+"unit:" defaults apply under the packaged systemd unit, which hands the
+server the files in `/etc/netgraph` ([Linux with systemd](#linux-with-systemd)).
 
 Retention runs hourly. Back up a live database with `netgraph db backup
 -db netgraph.db backup.db`.
@@ -252,11 +255,10 @@ EOF
 netgraph serve -token-file /etc/netgraph/server.token -wifi-key-file /etc/netgraph/wifi.keys ...
 ```
 
-With the systemd unit, drop the file at `/etc/netgraph/wifi.keys` and add
-`-wifi-key-file ${CREDENTIALS_DIRECTORY}/wifi-keys` to
-`/etc/netgraph/server.conf`. systemd copies credentials when the service
-starts, so after editing the file use `systemctl restart netgraph` rather
-than a reload.
+With the systemd unit, drop the file at `/etc/netgraph/wifi.keys`; the
+unit loads it as a credential and the server uses it without a flag.
+systemd copies credentials when the service starts, so after editing the
+file use `systemctl restart netgraph` rather than a reload.
 
 **What can be decrypted — WPA2-PSK yes, WPA3-SAE no.** For WPA2-PSK the
 pairwise master key is `PBKDF2(passphrase, SSID)`, a static value, so knowing
@@ -331,9 +333,13 @@ sudo systemctl enable --now netgraph-sensor
 The units run as a dynamic, unprivileged user (the sensor with only
 `CAP_NET_RAW`) and read tokens through systemd credentials, so the token
 files can stay root-only. The server package installs `netgraph.service`
-the same way: its token goes in `/etc/netgraph/server.token`, an optional
-read token in `/etc/netgraph/read.token`, and the database lives in
-`/var/lib/netgraph`.
+the same way: its token goes in `/etc/netgraph/server.token`, and the
+database lives in `/var/lib/netgraph`. It also loads these optional files,
+when present, and `netgraph serve` uses each without a flag: a read token in
+`/etc/netgraph/read.token`, Wi-Fi keys in `/etc/netgraph/wifi.keys`, and a
+certificate and key in `/etc/netgraph/tls.crt` and `/etc/netgraph/tls.key`.
+Do not point flags in `server.conf` at `${CREDENTIALS_DIRECTORY}`: systemd
+does not expand variables inside an `EnvironmentFile`.
 
 ## Docker
 

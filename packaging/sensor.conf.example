@@ -1,6 +1,8 @@
 # /etc/netgraph/sensor.conf — read by netgraph-sensor.service.
 # The ingest token goes in /etc/netgraph/sensor.token (root-only is fine).
-# Reverse DNS is on for live capture. For monitor-mode Wi-Fi, add -wifi-hop;
+# Reverse DNS is on for live capture. For monitor-mode Wi-Fi, add -wifi-hop
+# and give the unit CAP_NET_ADMIN to tune channels (systemctl edit
+# netgraph-sensor: CapabilityBoundingSet= and AmbientCapabilities=CAP_NET_ADMIN).
 # Wi-Fi keys are configured on the server (-wifi-key-file there) and fetched
 # into memory, never stored here.
 NETGRAPH_SENSOR_ARGS=-iface br-lan -server https://netgraph.lan:8443
