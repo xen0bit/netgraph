@@ -3,9 +3,11 @@ package wifi
 import (
 	"encoding/binary"
 	"encoding/hex"
+	"fmt"
 	"hash/crc32"
 	"hash/fnv"
 	"log/slog"
+	"net"
 	"strconv"
 	"sync"
 	"time"
@@ -157,18 +159,7 @@ func (p *Processor) suppress(ts time.Time, parts ...string) bool {
 }
 
 func (p *Processor) data(ts time.Time, f *Frame) {
-	if f.AMSDU() {
-		// A-MSDU payloads contain several Ethernet frames; a later
-		// version can split them. Do not misread the aggregate as one.
-		if p.cfg.IncludeData {
-			e := f.WireEvent()
-			e.Error = "A-MSDU not decoded"
-			p.emit(ts, e)
-		}
-		return
-	}
-	var etherType uint16
-	var payload []byte
+	llc := f.Body
 	if f.Protected {
 		plain, _, err := p.keys.Decrypt(f)
 		if err != nil {
@@ -179,46 +170,43 @@ func (p *Processor) data(ts time.Time, f *Frame) {
 			}
 			return
 		}
-		etherType, payload = snap(plain)
-	} else {
-		var err error
-		etherType, payload, err = f.LLC()
-		if err != nil {
-			if p.cfg.IncludeData {
-				e := f.WireEvent()
-				e.Error = err.Error()
-				p.emit(ts, e)
-			}
-			return
-		}
+		llc = plain
 	}
+	if !f.AMSDU() {
+		p.msdu(ts, f, f.Dst, f.Src, llc)
+		return
+	}
+	subs, err := splitAMSDU(llc)
+	if err != nil {
+		if p.cfg.IncludeData {
+			e := f.WireEvent()
+			e.Protected, e.Decrypted, e.Error = f.Protected, f.Protected, err.Error()
+			p.emit(ts, e)
+		}
+		return
+	}
+	for _, sf := range subs {
+		p.msdu(ts, f, sf.dst, sf.src, sf.llc)
+	}
+}
 
+// msdu handles one LLC payload: a whole data frame, or one subframe of an
+// A-MSDU, which carries its own addresses.
+func (p *Processor) msdu(ts time.Time, f *Frame, dst, src net.HardwareAddr, llc []byte) {
+	etherType, payload := snap(llc)
+	if etherType == 0 {
+		if p.cfg.IncludeData {
+			e := f.WireEvent()
+			e.Protected, e.Decrypted, e.Error = f.Protected, f.Protected, "802.11: no SNAP header"
+			p.emit(ts, e)
+		}
+		return
+	}
 	if etherType == 0x888e {
 		// EAPOL is never encrypted at the link layer: the 4-way
 		// handshake is how the pairwise key is established.
 		if msg, err := ParseEAPOL(payload); err == nil {
-			info := p.keys.ProcessEAPOL(f, msg)
-			e := f.WireEvent()
-			e.Kind = "handshake"
-			e.Protected = false
-			e.Decrypted = false
-			p.describeNetwork(e, f)
-			e.EAPOL = &wire.EAPOL{Message: info.Message, Version: info.Version, Cipher: info.Cipher, Valid: info.Valid, Installed: info.Installed}
-			if info.Err != nil {
-				e.Error = info.Err.Error()
-			}
-			p.emit(ts, e)
-			if info.Installed && len(info.ANonce) == 32 && len(info.SNonce) == 32 && p.cfg.Emit != nil {
-				// Ship the public nonces so the server can persist them and
-				// hand them to other or restarted sensors. No key, PMK or MIC
-				// leaves here; the nonces were broadcast in the clear.
-				p.cfg.Emit(wire.Event{Type: wire.TypeWiFiKey, TS: ts, WiFiKey: &wire.WiFiKey{
-					BSSID: info.AP, STA: info.STA, SSID: info.SSID,
-					ANonce:     hex.EncodeToString(info.ANonce),
-					SNonce:     hex.EncodeToString(info.SNonce),
-					KeyVersion: info.Version,
-				}})
-			}
+			p.eapol(ts, f, msg)
 		}
 		return
 	}
@@ -231,11 +219,78 @@ func (p *Processor) data(ts time.Time, f *Frame) {
 		p.describeNetwork(e, f)
 		p.emit(ts, e)
 	}
-	if p.cfg.Data != nil && etherType != 0 {
-		if eth := f.Ethernet(f.Dst, f.Src, etherType, payload); eth != nil {
+	if p.cfg.Data != nil {
+		if eth := f.Ethernet(dst, src, etherType, payload); eth != nil {
 			p.cfg.Data(ts, eth)
 		}
 	}
+}
+
+func (p *Processor) eapol(ts time.Time, f *Frame, msg *EAPOLKey) {
+	info := p.keys.ProcessEAPOL(f, msg)
+	e := f.WireEvent()
+	e.Kind = "handshake"
+	e.Protected = false
+	e.Decrypted = false
+	p.describeNetwork(e, f)
+	e.EAPOL = &wire.EAPOL{Message: info.Message, Version: info.Version, Cipher: info.Cipher, Valid: info.Valid, Installed: info.Installed}
+	if info.Err != nil {
+		e.Error = info.Err.Error()
+	}
+	p.emit(ts, e)
+	if info.Installed && len(info.ANonce) == 32 && len(info.SNonce) == 32 && p.cfg.Emit != nil {
+		// Ship the public nonces so the server can persist them and
+		// hand them to other or restarted sensors. No key, PMK or MIC
+		// leaves here; the nonces were broadcast in the clear.
+		p.cfg.Emit(wire.Event{Type: wire.TypeWiFiKey, TS: ts, WiFiKey: &wire.WiFiKey{
+			BSSID: info.AP, STA: info.STA, SSID: info.SSID,
+			ANonce:     hex.EncodeToString(info.ANonce),
+			SNonce:     hex.EncodeToString(info.SNonce),
+			KeyVersion: info.Version,
+		}})
+	}
+}
+
+// amsduSubframe is one MSDU of an aggregate.
+type amsduSubframe struct {
+	dst, src net.HardwareAddr
+	llc      []byte
+}
+
+// maxAMSDUSubframes bounds the subframes taken from one aggregate. The
+// largest A-MSDU (11454 bytes) of minimal subframes is well under it.
+const maxAMSDUSubframes = 256
+
+// splitAMSDU splits an A-MSDU payload into its subframes: DA, SA, a
+// big-endian length, the LLC payload, then padding to four bytes (except
+// after the last). The subframes alias b.
+func splitAMSDU(b []byte) ([]amsduSubframe, error) {
+	// An A-MSDU whose first DA is an LLC/SNAP header is a plain frame
+	// with the (unauthenticated) A-MSDU bit flipped: the FragAttacks
+	// injection (CVE-2020-24588). Linux drops these; so does netgraph.
+	if len(b) >= 6 && b[0] == 0xaa && b[1] == 0xaa && b[2] == 0x03 && b[3] == 0 && b[4] == 0 && b[5] == 0 {
+		return nil, fmt.Errorf("802.11: A-MSDU starts with an LLC header")
+	}
+	var out []amsduSubframe
+	for len(b) > 0 {
+		if len(out) == maxAMSDUSubframes {
+			return nil, fmt.Errorf("802.11: A-MSDU has too many subframes")
+		}
+		if len(b) < 14 {
+			return nil, fmt.Errorf("802.11: truncated A-MSDU subframe")
+		}
+		n := int(binary.BigEndian.Uint16(b[12:]))
+		if 14+n > len(b) {
+			return nil, fmt.Errorf("802.11: A-MSDU subframe length %d", n)
+		}
+		out = append(out, amsduSubframe{dst: b[0:6], src: b[6:12], llc: b[14 : 14+n]})
+		next := (14 + n + 3) &^ 3
+		if next >= len(b) {
+			break
+		}
+		b = b[next:]
+	}
+	return out, nil
 }
 
 // snap strips an LLC/SNAP header, returning the EtherType and network
