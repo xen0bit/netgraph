@@ -65,7 +65,10 @@ func pbkdf2SHA1(password, salt []byte, iter, keyLen int) []byte {
 	return out[:keyLen]
 }
 
-// PRF is the 802.11i pseudorandom function (HMAC-SHA1).
+// PRF is the 802.11i pseudorandom function (HMAC-SHA1). Each block is
+// HMAC-SHA1(key, label || 0x00 || data || counter) where the single-octet
+// counter starts at 0, as in wpa_supplicant's sha1_prf. (Starting it at 1
+// still round-trips against itself but never matches a real AP.)
 func PRF(key []byte, label string, data []byte, n int) []byte {
 	out := make([]byte, 0, n)
 	for i := 0; len(out) < n; i++ {
@@ -73,7 +76,7 @@ func PRF(key []byte, label string, data []byte, n int) []byte {
 		mac.Write([]byte(label))
 		mac.Write([]byte{0})
 		mac.Write(data)
-		mac.Write([]byte{byte(i + 1)})
+		mac.Write([]byte{byte(i)})
 		out = append(out, mac.Sum(nil)...)
 	}
 	return out[:n]
@@ -178,11 +181,15 @@ func (k *EAPOLKey) VerifyMIC(kck []byte) (bool, error) {
 		return false, fmt.Errorf("eapol: short key frame")
 	}
 	raw := append([]byte(nil), k.Raw...)
-	// MIC is at body offset 77, and the EAPOL header is four bytes.
+	// The MIC is at body offset 77; with the 4-byte 802.1X header that is
+	// offset 81 in the frame. It is computed over the whole EAPOL-Key frame
+	// — the 802.1X header included — with the MIC field zeroed, exactly as
+	// hostapd/wpa_supplicant do. (Computing it over the descriptor alone
+	// passes a self-consistent test but fails against every real AP.)
 	for i := 81; i < 97; i++ {
 		raw[i] = 0
 	}
-	body := raw[4:]
+	body := raw
 	var mac []byte
 	switch k.Version() {
 	case 1:
