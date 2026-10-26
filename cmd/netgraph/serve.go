@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -87,9 +88,10 @@ func runServe(args []string) error {
 	if *webDir != "" {
 		cfg.Web = os.DirFS(*webDir)
 	}
+	apiSrv := api.New(cfg)
 	srv := &http.Server{
 		Addr:              *listen,
-		Handler:           api.New(cfg),
+		Handler:           apiSrv,
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 		ErrorLog:          nil,
@@ -97,6 +99,9 @@ func runServe(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go st.RunRetention(ctx, time.Hour)
+	if *wifiKeyFile != "" {
+		go reloadWiFiKeys(ctx, *wifiKeyFile, apiSrv, log)
+	}
 
 	ln, err := net.Listen("tcp", *listen)
 	if err != nil {
@@ -138,4 +143,27 @@ func runServe(args []string) error {
 	sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return srv.Shutdown(sctx)
+}
+
+// reloadWiFiKeys re-reads the Wi-Fi key file on SIGHUP, so adding or
+// revoking a network's key needs no restart. A file that fails to parse is
+// logged and the keys already loaded stay in use.
+func reloadWiFiKeys(ctx context.Context, path string, srv *api.Server, log *slog.Logger) {
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-hup:
+			sec, err := wifi.LoadKeyFile(path)
+			if err != nil {
+				log.Error("reload wifi keys; keeping the previous keys", "file", path, "err", err)
+				continue
+			}
+			srv.SetWiFi(sec)
+			log.Info("reloaded wifi keys", "networks", len(sec.PMKs))
+		}
+	}
 }

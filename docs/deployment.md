@@ -177,8 +177,11 @@ key file with `-wifi-key-file` (never flags, so keys do not appear in `ps`
 or a shell history). The server turns each passphrase into its PMK and
 serves the PMKs and WEP keys — not the passphrases — to sensors that present
 the ingest token. A sensor fetches them into memory before it starts
-capturing and again every minute, so a key added to or removed from the file
-reaches every sensor within a minute of restarting the server. Because
+capturing and again every minute. After editing the file, send the server
+`SIGHUP` (`kill -HUP`, or `docker kill -s HUP <container>`) to reload it
+without a restart; a file that fails to parse is logged and the previous
+keys stay in use. The change reaches every sensor within a minute, and a
+removed network's keys are dropped from the sensors' memory. Because
 the PMKs travel to the sensors, serve over HTTPS (`-tls-cert`) or a TLS
 proxy unless the sensor link is trusted; the server warns otherwise. One
 line per *distinct SSID* (the WPA2 key is derived from the passphrase and
@@ -202,7 +205,9 @@ netgraph serve -token-file /etc/netgraph/server.token -wifi-key-file /etc/netgra
 
 With the systemd unit, drop the file at `/etc/netgraph/wifi.keys` and add
 `-wifi-key-file ${CREDENTIALS_DIRECTORY}/wifi-keys` to
-`/etc/netgraph/server.conf`.
+`/etc/netgraph/server.conf`. systemd copies credentials when the service
+starts, so after editing the file use `systemctl restart netgraph` rather
+than a reload.
 
 **What can be decrypted — WPA2-PSK yes, WPA3-SAE no.** For WPA2-PSK the
 pairwise master key is `PBKDF2(passphrase, SSID)`, a static value, so knowing

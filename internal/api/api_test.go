@@ -290,3 +290,27 @@ func TestWiFiKeys(t *testing.T) {
 		t.Errorf("unauthenticated server served keys: %+v", got)
 	}
 }
+
+// SetWiFi swaps the served keys, as a SIGHUP reload of the key file does.
+func TestSetWiFi(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "ng.db"), store.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	api := New(Config{Store: st, IngestToken: "in-tok"})
+	srv := httptest.NewServer(api)
+	defer srv.Close()
+	sh := wire.NewShipper(wire.ShipperConfig{URL: srv.URL, Token: "in-tok", Sensor: "mon"})
+	for _, file := range []string{"wpa2 one aaaaaaaaaa\n", "wpa2 two bbbbbbbbbb\nwpa2 three cccccccccc\n"} {
+		sec, err := wifi.ParseKeyFile(strings.NewReader(file))
+		if err != nil {
+			t.Fatal(err)
+		}
+		api.SetWiFi(sec)
+		got, err := sh.FetchWiFiKeys(context.Background())
+		if err != nil || len(got.PMKs) != len(sec.PMKs) {
+			t.Fatalf("after SetWiFi: %+v %v", got, err)
+		}
+	}
+}

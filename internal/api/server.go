@@ -22,6 +22,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/xen0bit/netgraph/internal/buildinfo"
@@ -53,10 +54,15 @@ type Config struct {
 
 // Server serves the API.
 type Server struct {
-	cfg Config
-	mux *http.ServeMux
-	log *slog.Logger
+	cfg  Config
+	mux  *http.ServeMux
+	log  *slog.Logger
+	keys atomic.Pointer[wifi.Secrets]
 }
+
+// SetWiFi replaces the Wi-Fi keys served to sensors, such as after the key
+// file is reloaded. Sensors pick them up on their next sync.
+func (s *Server) SetWiFi(sec *wifi.Secrets) { s.keys.Store(sec) }
 
 // New returns a Server.
 func New(cfg Config) *Server {
@@ -67,6 +73,7 @@ func New(cfg Config) *Server {
 		cfg.MaxBatch = 32 << 20
 	}
 	s := &Server{cfg: cfg, mux: http.NewServeMux(), log: cfg.Logger}
+	s.keys.Store(cfg.WiFi)
 	s.mux.HandleFunc("POST /api/v1/ingest", s.ingest)
 	s.mux.HandleFunc("GET /api/v1/wifi/keys", s.wifiKeys)
 	s.mux.HandleFunc("GET /api/v1/version", s.version)
@@ -257,7 +264,7 @@ func (s *Server) wifiKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := wire.WiFiKeys{PMKs: []wire.WiFiPMK{}, WEP: []wire.WiFiWEP{}, Handshakes: hs}
-	if sec := s.cfg.WiFi; sec != nil && s.cfg.IngestToken != "" {
+	if sec := s.keys.Load(); sec != nil && s.cfg.IngestToken != "" {
 		for ssid, pmk := range sec.PMKs {
 			out.PMKs = append(out.PMKs, wire.WiFiPMK{SSID: ssid, PMK: hex.EncodeToString(pmk)})
 		}

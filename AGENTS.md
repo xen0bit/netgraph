@@ -34,8 +34,8 @@ that are easy to break.
   passphrases, derives PMKs (`internal/wifi`), and serves only PMKs and WEP
   keys on `GET /api/v1/wifi/keys` — with the ingest token, never under
   `-no-auth`. The sensor keeps them in memory and derives PTKs there. Keys
-  flow one way: no key leaves the sensor (not the PMK, PTK, GTK or a MIC), and
-  `wifi` events never carry one. The one thing a sensor sends is a
+  flow one way: no key leaves the sensor (not the PMK, PTK, GTK or a
+  MIC), and `wifi` events never carry one. The one thing a sensor sends is a
   `wifi_key` event's handshake **nonces** (ANonce/SNonce), broadcast in the
   clear during the 4-way handshake, which the server stores
   (`wifi_handshakes`) and serves back so a restarted or additional sensor
