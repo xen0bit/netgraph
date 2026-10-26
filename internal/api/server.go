@@ -90,6 +90,7 @@ func New(cfg Config) *Server {
 	read("/api/v1/sensors", s.sensors)
 	read("/api/v1/wifi", s.wifi)
 	read("/api/v1/live", s.live)
+	s.mux.Handle("PUT /api/v1/devices/{mac}/label", s.requireRead(http.HandlerFunc(s.setLabel)))
 	s.mux.HandleFunc("GET /", s.web)
 	return s
 }
@@ -218,6 +219,10 @@ func (s *Server) fail(w http.ResponseWriter, err error) {
 		httpError(w, http.StatusNotFound, err)
 		return
 	}
+	if errors.Is(err, store.ErrInvalid) {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
 	if errors.Is(err, context.Canceled) {
 		return
 	}
@@ -276,6 +281,29 @@ func (s *Server) wifiKeys(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, out)
+}
+
+// setLabel names a device by hand ({"label": ""} clears the name). It is
+// authorised like the UI that calls it, with the read token. A JSON body is
+// required, so a cross-origin page cannot send it without a CORS preflight,
+// which this server never grants.
+func (s *Server) setLabel(w http.ResponseWriter, r *http.Request) {
+	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		httpError(w, http.StatusUnsupportedMediaType, errors.New("expected application/json"))
+		return
+	}
+	var body struct {
+		Label *string `json:"label"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil || body.Label == nil {
+		httpError(w, http.StatusBadRequest, errors.New(`expected {"label": "..."}`))
+		return
+	}
+	if err := s.cfg.Store.SetDeviceLabel(r.Context(), r.PathValue("mac"), *body.Label); err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) timeseries(w http.ResponseWriter, r *http.Request) {

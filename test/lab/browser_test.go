@@ -116,6 +116,36 @@ func checkWebUI(t *testing.T, devtools, ui, token, shotDir string, expect []stri
 		t.Errorf("detail panel: %.300s", panel)
 	}
 
+	// Rename the device from its panel, then restore its automatic name.
+	var renamed, restored string
+	waitTitle := func(cond string) chromedp.Action {
+		return chromedp.Poll(fmt.Sprintf(`(() => { const h = document.querySelector("#panel h2"); return h && h.textContent %s; })()`, cond), nil,
+			chromedp.WithPollingTimeout(20*time.Second))
+	}
+	err = chromedp.Run(ctx,
+		chromedp.WaitVisible(`#panel form.rename input`, chromedp.ByQuery),
+		chromedp.SetValue(`#panel form.rename input`, "Lab <b>renamed</b>", chromedp.ByQuery),
+		// A click, not chromedp.Submit: form.submit() skips the page's
+		// submit handler.
+		chromedp.Click(`#panel form.rename button[type=submit]`, chromedp.ByQuery),
+		waitTitle(`=== "Lab <b>renamed</b>"`),
+		chromedp.Text(`#panel h2`, &renamed, chromedp.ByQuery),
+		shot("renamed"),
+		chromedp.WaitVisible(`#panel form.rename [data-clear]`, chromedp.ByQuery),
+		chromedp.Click(`#panel form.rename [data-clear]`, chromedp.ByQuery),
+		waitTitle(`!== "Lab <b>renamed</b>"`),
+		chromedp.Text(`#panel h2`, &restored, chromedp.ByQuery),
+	)
+	if err != nil {
+		var out string
+		_ = chromedp.Run(ctx, chromedp.Text(`#panel form.rename output`, &out, chromedp.ByQuery), shot("rename-failed"))
+		t.Fatalf("rename: %v (form says %q)", err, out)
+	}
+	// The label is shown as text, never as markup.
+	if renamed != "Lab <b>renamed</b>" || restored == "" {
+		t.Errorf("renamed %q, restored %q", renamed, restored)
+	}
+
 	for i, tab := range []string{"devices", "flows", "dns", "facts", "sensors"} {
 		var text string
 		err := chromedp.Run(ctx,

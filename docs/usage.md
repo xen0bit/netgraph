@@ -82,6 +82,7 @@ TIME                 DEVICE           TYPE  NAME               RCODE     MS    A
 | `query sensors` | sensors and their counters (packets, kernel drops, events dropped) |
 | `query wifi` | Wi-Fi networks, security, channel and associated clients |
 | `graph -o FILE` | the window's graph: `.svg`, `.d2`, `.txt`, `.json`, or `-` for text on stdout |
+| `label MAC NAME...`, `label -clear MAC` | name a device by hand; it overrides DHCP, mDNS and every other source until cleared. With `-server` it goes through the API; without, it writes the database file (stop the server first) |
 | `import FILE.pcap...` | ingest captures directly (re-importing a file is a no-op) |
 | `db migrate`/`backup`/`retain`/`vacuum` | maintenance |
 
@@ -147,12 +148,15 @@ page asks for it once and keeps it in the browser.
   (dagre). The **elk** layout is drawn by the server. While the next
   window is fetched and laid out, the current graph stays visible under a
   small spinner rather than blanking.
-- **Tables:** devices, connections, DNS, facts, Wi-Fi networks and sensors. Click a row
-  for details. The Wi-Fi table lists only networks reported by a
+- **Tables:** devices, connections, DNS, facts, Wi-Fi networks and
+  sensors. Click a row for details. The Wi-Fi table lists only networks reported by a
   monitor-mode sensor; it stays empty on an Ethernet-only deployment.
 - **Details:** an entity's relationships in the window, its connections,
   and a timeline merging DHCP, mDNS, ARP/NDP, lookups and connections
-  opening and closing.
+  opening and closing. A device's panel has a **Rename** box: your name
+  replaces the automatic one everywhere (the devices table still shows the
+  automatic name under it), and **Use “…”** puts the automatic name back.
+  Renaming needs the read token, like the rest of the UI.
 
 The window and filter live in the URL, so a link reproduces a view.
 

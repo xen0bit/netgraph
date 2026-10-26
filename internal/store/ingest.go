@@ -366,13 +366,28 @@ func (g *ingester) entity(ctx context.Context, kind, key string, ts int64, init 
 func (g *ingester) row(kind, key string) *entRow { return g.entities[entKey{kind, key}] }
 
 // setLabel sets an entity's label if pri beats the current label's source.
+// While a user label (SetDeviceLabel) is set, the automatic label is kept
+// in auto_label instead, ready for when the user label is cleared.
 func (g *ingester) setLabel(kind, key, label string, pri int) {
 	e := g.row(kind, key)
-	if e == nil || label == "" || pri < e.labelPri || (pri == e.labelPri && label == e.label) {
+	if e == nil || label == "" {
 		return
 	}
-	e.label, e.labelPri, e.dirty = label, pri, true
+	user := e.attrs["user_label"] != ""
+	current := e.label
+	if user {
+		current = e.attrs["auto_label"]
+	}
+	if pri < e.labelPri || (pri == e.labelPri && label == current) {
+		return
+	}
+	e.labelPri, e.dirty = pri, true
 	e.attrs["label_pri"] = strconv.Itoa(pri)
+	if user {
+		e.attrs["auto_label"] = label
+		return
+	}
+	e.label = label
 }
 
 // relabel sets a non-device entity's label to its latest form.

@@ -22,7 +22,7 @@ Times in responses are unix milliseconds.
 | Endpoint | Returns |
 |---|---|
 | `GET /api/v1/summary` | `{devices, flows, peak_connections, dns_queries, domains, remote_ips, bytes_out, bytes_in, precision, ...}` |
-| `GET /api/v1/devices` | `[{id, mac, label, vendor, vendor_short, randomized, role, ips, hostnames, services, fingerprints, user_agents, flows, dns_queries, bytes_out, bytes_in, remotes, active_from, active_to, first_seen, last_seen}]` |
+| `GET /api/v1/devices` | `[{id, mac, label, user_label, auto_label, vendor, vendor_short, randomized, role, ips, hostnames, services, fingerprints, user_agents, flows, dns_queries, bytes_out, bytes_in, remotes, active_from, active_to, first_seen, last_seen}]` |
 | `GET /api/v1/flows` | `[{key, proto, client_ip, client_port, device, device_name, remote_ip, remote_port, direction, app, name, sni, http_host, qname, alpn, ja4, user_agent, first_seen, last_seen, state, closed, end_reason, bytes_out, bytes_in, pkts_out, pkts_in}]`, busiest first |
 | `GET /api/v1/dns` | `[{ts, client_ip, device, device_name, server, qname, qtype, rcode, latency_ms, answers: [{name, type, data, ttl, expires}]}]`, newest first |
 | `GET /api/v1/facts` | `[{rel, src, src_label, dst, dst_label, first_seen, last_seen, count, source, attrs}]` |
@@ -33,6 +33,7 @@ Times in responses are unix milliseconds.
 | `GET /api/v1/sensors` | `[{name, version, interfaces, first_seen, last_seen, stats}]` |
 | `GET /api/v1/wifi` | `[{bssid, ssid, security, channel, clients, first_seen, last_seen}]`, from monitor-mode sensors |
 | `GET /api/v1/live` | server-sent events: `event: ingest` with `[{type, ts, detail}]` per batch |
+| `PUT /api/v1/devices/{mac}/label` | names a device by hand: body `{"label": "Living room TV"}` (JSON required; at most 64 printable characters), `{"label": ""}` restores the automatic name. `204`, or `400`/`404`. Read token |
 | `GET /api/v1/version`, `/healthz` | `{version, commit}`; no token needed |
 
 Graph options: `collapse=0|1` (default 1), `dns=0|1` (1), `identity=0|1`

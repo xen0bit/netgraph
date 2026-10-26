@@ -112,6 +112,23 @@ async function api(path, extra = {}, raw = false) {
   }
 }
 
+// send writes JSON (a JSON body makes a cross-site request need a CORS
+// preflight, which the server never grants).
+async function send(method, path, body) {
+  for (;;) {
+    const headers = { "Content-Type": "application/json" };
+    if (token) headers.Authorization = `Bearer ${token}`;
+    const resp = await fetch(`/api/v1/${path}`, { method, headers, body: JSON.stringify(body) });
+    if (resp.status === 401) { await askToken(); continue; }
+    if (!resp.ok) {
+      let msg = resp.statusText;
+      try { msg = (await resp.json()).error || msg; } catch { /* not JSON */ }
+      throw new Error(msg);
+    }
+    return;
+  }
+}
+
 function askToken() {
   const dlg = $("#token-dialog");
   return new Promise((resolve) => {
@@ -276,7 +293,7 @@ const tables = {
     cols: ["Device", "Vendor", "Addresses", "Hostnames · services", "Conns", "Lookups", "Up", "Down", "Active"],
     num: [4, 5, 6, 7],
     row: (d) => [
-      `${esc(d.label)}<div class="sub mono">${esc(d.mac)}</div>`,
+      `${esc(d.label)}${d.user_label && d.auto_label ? `<div class="sub">${esc(d.auto_label)}</div>` : ""}<div class="sub mono">${esc(d.mac)}</div>`,
       esc(d.randomized ? "private MAC" : d.vendor_short || d.vendor || "") + (d.role ? " " + badge(d.role) : ""),
       `<span class="mono">${(d.ips || []).map(esc).join("<br>")}</span>`,
       [...(d.hostnames || []), ...(d.services || [])].map((x) => badge(x)).join(""),
@@ -475,7 +492,17 @@ async function openEntity(id) {
     $("#panel-body").innerHTML = `<h2>${esc(id)}</h2><p class="muted">${esc(e.message)}</p>`;
     return;
   }
-  const attrs = Object.entries(d.attrs || {}).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("");
+  const userLabel = d.attrs?.user_label || "";
+  const autoLabel = d.attrs?.auto_label || "";
+  const attrs = Object.entries(d.attrs || {}).filter(([k]) => k !== "user_label" && k !== "auto_label")
+    .map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("");
+  const rename = d.kind === "device" ? `
+    <form class="rename" autocomplete="off">
+      <input name="label" maxlength="64" aria-label="Device name" value="${esc(userLabel)}" placeholder="${esc(userLabel ? autoLabel : d.label || "Name this device")}">
+      <button type="submit">Rename</button>
+      ${userLabel ? `<button type="button" data-clear>Use “${esc(autoLabel || d.key)}”</button>` : ""}
+      <output class="muted"></output>
+    </form>` : "";
   const dev = d.device;
   const devInfo = dev ? `
     <dt>addresses</dt><dd class="mono">${(dev.ips || []).map(esc).join(", ")}</dd>
@@ -492,12 +519,28 @@ async function openEntity(id) {
   const timeline = (d.timeline || []).slice(-300).map((e) => `<li><time>${clock(e.ts)}</time>${badge(e.type)} ${esc(e.detail)}</li>`).join("");
   $("#panel-body").innerHTML = `
     <h2>${esc(d.label || d.key)}</h2>
-    <div class="muted mono">${esc(d.id)}</div>
+    <div class="muted mono">${esc(d.id)}</div>${rename}
     <dl><dt>first seen</dt><dd>${stamp(d.first_seen)}</dd><dt>last seen</dt><dd>${stamp(d.last_seen)}</dd>${devInfo}${attrs}</dl>
     ${facts ? `<h3>Relationships in this window</h3><ul>${facts}</ul>` : ""}
     ${flows ? `<h3>Connections</h3><ul>${flows}</ul>` : ""}
     ${timeline ? `<h3>Timeline</h3><ul>${timeline}</ul>` : ""}
     <p><a data-filter="${esc(filterFor(d))}">Filter the window to this ${esc(d.kind)}</a></p>`;
+  const form = $("#panel-body form.rename");
+  if (form) {
+    const save = async (label) => {
+      form.querySelector("output").textContent = "Saving…";
+      try {
+        await send("PUT", `devices/${encodeURIComponent(d.key)}/label`, { label });
+      } catch (err) {
+        form.querySelector("output").textContent = err.message;
+        return;
+      }
+      openEntity(id);
+      refresh();
+    };
+    form.onsubmit = (e) => { e.preventDefault(); save(form.label.value.trim()); };
+    form.querySelector("[data-clear]")?.addEventListener("click", () => save(""));
+  }
   $("#panel-body").onclick = (e) => {
     const a = e.target.closest("a");
     if (!a) return;

@@ -314,3 +314,39 @@ func TestSetWiFi(t *testing.T) {
 		}
 	}
 }
+
+// A device is renamed through the API with the read token; a form post (what
+// a cross-site page could send without a preflight) is refused.
+func TestSetLabelAPI(t *testing.T) {
+	srv, _ := serve(t, nil)
+	ctx := context.Background()
+	c := apiclient.NewClient(srv.URL, "rd-tok")
+	mac := testutil.Phone.MAC.String()
+	if err := apiclient.NewClient(srv.URL, "in-tok").SetDeviceLabel(ctx, mac, "x"); err == nil || !strings.Contains(err.Error(), "401") {
+		t.Errorf("ingest token renamed a device: %v", err)
+	}
+	if err := c.SetDeviceLabel(ctx, mac, "Alice's phone"); err != nil {
+		t.Fatal(err)
+	}
+	devs, err := c.Devices(ctx, model.Filter{From: window.From, To: window.To, Device: mac})
+	if err != nil || len(devs) != 1 || devs[0].Label != "Alice's phone" || !devs[0].UserLabel {
+		t.Fatalf("devices = %+v %v", devs, err)
+	}
+	if err := c.SetDeviceLabel(ctx, "02:00:00:00:99:99", "x"); err == nil || !strings.Contains(err.Error(), "404") {
+		t.Errorf("unknown device: %v", err)
+	}
+	if err := c.SetDeviceLabel(ctx, mac, strings.Repeat("x", 100)); err == nil || !strings.Contains(err.Error(), "400") {
+		t.Errorf("long label: %v", err)
+	}
+	req, _ := http.NewRequest(http.MethodPut, srv.URL+"/api/v1/devices/"+mac+"/label", strings.NewReader("label=pwned"))
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Authorization", "Bearer rd-tok")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnsupportedMediaType {
+		t.Errorf("form body: %s", resp.Status)
+	}
+}

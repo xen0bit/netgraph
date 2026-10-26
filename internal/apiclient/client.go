@@ -4,6 +4,7 @@
 package apiclient
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -41,13 +42,34 @@ func (e *Error) Error() string { return fmt.Sprintf("server: %d %s", e.Status, e
 
 // Get fetches path with query parameters and returns the raw body.
 func (c *Client) Get(ctx context.Context, path string, q url.Values) ([]byte, error) {
+	return c.do(ctx, http.MethodGet, path, q, nil)
+}
+
+// SetDeviceLabel names a device by hand; an empty label clears the name.
+func (c *Client) SetDeviceLabel(ctx context.Context, mac, label string) error {
+	body, err := json.Marshal(map[string]string{"label": label})
+	if err != nil {
+		return err
+	}
+	_, err = c.do(ctx, http.MethodPut, "/api/v1/devices/"+url.PathEscape(mac)+"/label", nil, body)
+	return err
+}
+
+func (c *Client) do(ctx context.Context, method, path string, q url.Values, payload []byte) ([]byte, error) {
 	u := c.Base + path
 	if len(q) > 0 {
 		u += "?" + q.Encode()
 	}
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	var rd io.Reader
+	if payload != nil {
+		rd = bytes.NewReader(payload)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, u, rd)
 	if err != nil {
 		return nil, err
+	}
+	if payload != nil {
+		req.Header.Set("Content-Type", "application/json")
 	}
 	if c.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+c.Token)

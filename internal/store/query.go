@@ -641,6 +641,9 @@ func (s *Store) Devices(ctx context.Context, f model.Filter) ([]model.Device, er
 		_ = json.Unmarshal([]byte(attrs), &a)
 		e.ID = model.EntityID(model.KindDevice, e.MAC)
 		e.Label = deviceLabel(e.MAC, e.Label, a)
+		if a["user_label"] != "" {
+			e.UserLabel, e.AutoLabel = true, deviceLabel(e.MAC, a["auto_label"], a)
+		}
 		e.Vendor, e.Role = a["vendor"], a["role"]
 		if e.Vendor == oui.Randomized {
 			e.Vendor, e.Randomized = "", true
@@ -711,6 +714,7 @@ func (s *Store) Devices(ctx context.Context, f model.Filter) ([]model.Device, er
 			continue
 		}
 		d.ID, d.MAC, d.Label, d.Vendor, d.VendorShort, d.Randomized, d.Role = e.ID, e.MAC, e.Label, e.Vendor, e.VendorShort, e.Randomized, e.Role
+		d.UserLabel, d.AutoLabel = e.UserLabel, e.AutoLabel
 		d.FirstSeen, d.LastSeen = e.FirstSeen, e.LastSeen
 		if f.IP != "" && !matchAny(d.IPs, f.IP) {
 			continue
