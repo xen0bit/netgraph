@@ -119,6 +119,7 @@ func (m Model) tabBar() string {
 		}
 		flag("collapse", m.gopts.Collapse)
 		flag("dns", m.gopts.DNS)
+		flag("sites", m.gopts.Sites)
 		flag("identity", m.gopts.Identity)
 		o = append(o, fmt.Sprintf("top %d", m.gopts.TopN))
 		if m.outline {
@@ -176,7 +177,7 @@ func (m Model) footer() string {
 	if m.detail != nil {
 		keys = "↑↓ scroll  esc back"
 	} else if m.tab == tabGraph {
-		keys = "c collapse  d dns  i identity  < > top  o outline  s save  ←→↑↓ pan  ? help"
+		keys = "c collapse  d dns  w sites  i identity  < > top  o outline  s save  ←→↑↓ pan  ? help"
 	}
 	return ansi.Truncate(left+"  "+m.st.dim.Render(keys), m.width, "…")
 }
@@ -510,6 +511,7 @@ const helpText = `  netgraph — keys
     l      live: follow now (5s)      Graph
     r      refresh                      c  collapse addresses into names
                                         d  lookups and answers
+                                        w  group names into sites
   Filter                                i  identity (hostnames, services, ...)
     /      edit: device:alice-*         < >  fewer / more destinations per device
            domain:*.example.com         o  outline / diagram

@@ -34,11 +34,15 @@ Times in responses are unix milliseconds.
 | `GET /api/v1/wifi` | `[{bssid, ssid, security, channel, clients, first_seen, last_seen}]`, from monitor-mode sensors |
 | `GET /api/v1/live` | server-sent events: `event: ingest` with `[{type, ts, detail}]` per batch |
 | `PUT /api/v1/devices/{mac}/label` | names a device by hand: body `{"label": "Living room TV"}` (JSON required; at most 64 printable characters), `{"label": ""}` restores the automatic name. `204`, or `400`/`404`. Read token |
+| `GET /api/v1/anomalies` | the window's [anomalies](concepts.md#anomalies), most severe first: `{from, to, since, learning, anomalies: [{kind, severity, ts, device, device_name, entity, summary, evidence}]}`. Read token |
 | `GET /metrics` | Prometheus text: ingest counters, each sensor's last reported stats (packets, kernel drops, queued and dropped events, ...), entities by kind, database size, alert outcomes. Read token |
 | `GET /api/v1/version`, `/healthz` | `{version, commit}`; no token needed |
 
-Graph options: `collapse=0|1` (default 1), `dns=0|1` (1), `identity=0|1`
-(0), `top=N` (15; `-1` for all).
+Graph options: `collapse=0|1` (default 1), `dns=0|1` (1), `sites=0|1` (1),
+`anomalies=0|1` (1; outline what medium and high anomalies are about),
+`identity=0|1` (0), `top=N` (15; `-1` for all). `GET /api/v1/entity` also
+answers for a graph's `site:<registrable domain>` nodes: the connections,
+lookups and facts of every name under it.
 
 ```sh
 curl -s -H "Authorization: Bearer $NETGRAPH_READ_TOKEN" \

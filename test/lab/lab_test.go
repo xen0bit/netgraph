@@ -293,15 +293,16 @@ func checkGraph(t *testing.T, c *apiclient.Client, f model.Filter) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	var connects, queried bool
+	// One edge: the connection, with the lookups that led to it counted.
+	// lab.test is no public suffix, so the name is a site of its own.
+	var connects bool
 	for _, e := range g.Edges {
-		if e.From == "device:"+laptopMAC && e.To == "domain:hold.lab.test" {
-			connects = connects || e.Rel == model.RelConnects
-			queried = queried || e.Rel == model.RelQueried
+		if e.From == "device:"+laptopMAC && e.To == "site:hold.lab.test" {
+			connects = connects || (e.Rel == model.RelConnects && e.Attrs["lookups"] != "")
 		}
 	}
-	if !connects || !queried {
-		t.Errorf("graph lacks laptop -> hold.lab.test edges: %+v", g.Edges)
+	if !connects {
+		t.Errorf("graph lacks laptop -> hold.lab.test with its lookups: %+v", g.Edges)
 	}
 	txt, err := c.GraphFormat(ctx, f, model.DefaultGraphOptions, "txt", "")
 	if err != nil || !bytes.Contains(txt, []byte("lab-laptop")) {

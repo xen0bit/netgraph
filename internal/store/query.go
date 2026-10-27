@@ -1,11 +1,13 @@
 package store
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"database/sql/driver"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"net/netip"
 	"slices"
 	"sort"
@@ -948,10 +950,11 @@ func (s *Store) Graph(ctx context.Context, f model.Filter, o model.GraphOptions)
 		// Pick each device's busiest destinations in SQL first, then fetch
 		// only their connections: the graph shows at most TopN per device,
 		// and a long window holds far more.
-		cond, args, names, err := s.topDestinations(ctx, f, from, to, o)
+		cond, args, names, rest, err := s.topDestinations(ctx, f, from, to, o)
 		if err != nil {
 			return nil, err
 		}
+		in.Rest = rest
 		if in.Flows, err = s.flowsWhere(ctx, ff, cond, args); err != nil {
 			return nil, err
 		}
@@ -1017,7 +1020,15 @@ func (s *Store) Graph(ctx context.Context, f model.Filter, o model.GraphOptions)
 			in.Facts = append(in.Facts, facts...)
 		}
 	}
-	return graph.Build(in, o), nil
+	g := graph.Build(in, o)
+	if o.Anomalies {
+		rep, err := s.Anomalies(ctx, f)
+		if err != nil {
+			return nil, err
+		}
+		graph.MarkAnomalies(g, rep.Anomalies)
+	}
+	return g, nil
 }
 
 // destExpr is where a connection points in a graph: the name it was reached
@@ -1032,48 +1043,130 @@ func destExpr(collapse bool) string {
 }
 
 // topDestinations returns a condition selecting the connections to each
-// device's TopN destinations by traffic in the window, and the DNS names
-// among those destinations.
-func (s *Store) topDestinations(ctx context.Context, f model.Filter, from, to int64, o model.GraphOptions) (string, []any, map[string]bool, error) {
+// device's TopN destinations by traffic in the window, the DNS names among
+// those destinations, and per source what the rest add up to. With Sites a
+// destination is a registrable domain, as the graph draws it.
+func (s *Store) topDestinations(ctx context.Context, f model.Filter, from, to int64, o model.GraphOptions) (string, []any, map[string]bool, map[string]graph.Rest, error) {
 	w := &where{}
 	connsWindow(w, from, to)
 	if err := s.flowWhere(ctx, f, w, []string{"sni", "http_host", "qname"}); err != nil {
-		return "", nil, nil, err
+		return "", nil, nil, nil, err
 	}
 	dest := destExpr(o.Collapse)
 	rows, err := s.r.QueryContext(ctx, `SELECT CASE WHEN c.client_device != 0 THEN 'd' || c.client_device ELSE 'c' || c.client_ip END AS src, `+dest+` AS dest,
-		sum(c.bytes_out + c.bytes_in) AS total FROM connections c WHERE `+w.sql()+` GROUP BY src, dest ORDER BY src, total DESC`, w.args...)
+		sum(`+connBytes("bytes_out", from, to)+`), sum(`+connBytes("bytes_in", from, to)+`), count(*)
+		FROM connections c WHERE `+w.sql()+` GROUP BY src, dest`, w.args...)
 	if err != nil {
-		return "", nil, nil, err
+		return "", nil, nil, nil, err
 	}
 	defer rows.Close()
-	var keys []any
-	names := map[string]bool{}
-	count := map[string]int{}
+	type group struct {
+		key   string
+		dests []string
+		out   float64
+		in    float64
+		conns int
+	}
+	groups := map[string]map[string]*group{} // src -> drawn destination -> its connections' destinations
 	for rows.Next() {
 		var src, d string
-		var total int64
-		if err := rows.Scan(&src, &d, &total); err != nil {
-			return "", nil, nil, err
+		var out, in float64
+		var n int
+		if err := rows.Scan(&src, &d, &out, &in, &n); err != nil {
+			return "", nil, nil, nil, err
 		}
-		if count[src] >= o.TopN {
-			continue
+		key := d
+		if name, ok := strings.CutPrefix(d, "domain:"); ok && o.Sites {
+			key = model.EntityID(model.KindSite, graph.Site(name))
 		}
-		count[src]++
-		keys = append(keys, src+"|"+d)
-		if n, ok := strings.CutPrefix(d, "domain:"); ok {
-			names[n] = true
+		if groups[src] == nil {
+			groups[src] = map[string]*group{}
 		}
+		g := groups[src][key]
+		if g == nil {
+			g = &group{key: key}
+			groups[src][key] = g
+		}
+		g.dests = append(g.dests, d)
+		g.out += out
+		g.in += in
+		g.conns += n
 	}
 	if err := rows.Err(); err != nil {
-		return "", nil, nil, err
+		return "", nil, nil, nil, err
+	}
+	var keys []any
+	names := map[string]bool{}
+	rest := map[string]graph.Rest{}
+	for _, src := range slices.Sorted(maps.Keys(groups)) {
+		gs := slices.Collect(maps.Values(groups[src]))
+		slices.SortFunc(gs, func(a, b *group) int {
+			if c := cmp.Compare(b.out+b.in, a.out+a.in); c != 0 {
+				return c
+			}
+			return cmp.Compare(a.key, b.key)
+		})
+		for i, g := range gs {
+			if i >= o.TopN {
+				r := rest[src]
+				r.Destinations++
+				r.Connections += g.conns
+				r.BytesOut += uint64(g.out)
+				r.BytesIn += uint64(g.in)
+				rest[src] = r
+				continue
+			}
+			for _, d := range g.dests {
+				keys = append(keys, src+"|"+d)
+				if n, ok := strings.CutPrefix(d, "domain:"); ok {
+					names[n] = true
+				}
+			}
+		}
+	}
+	bySource, err := s.restSources(ctx, rest)
+	if err != nil {
+		return "", nil, nil, nil, err
 	}
 	if len(keys) == 0 {
-		return "0", nil, names, nil
+		return "0", nil, names, bySource, nil
 	}
 	marks := strings.TrimSuffix(strings.Repeat("?,", len(keys)), ",")
 	cond := `(CASE WHEN c.client_device != 0 THEN 'd' || c.client_device ELSE 'c' || c.client_ip END) || '|' || ` + dest + ` IN (` + marks + `)`
-	return cond, keys, names, nil
+	return cond, keys, names, bySource, nil
+}
+
+// restSources rekeys topDestinations' per-source totals from its SQL keys
+// ("d<entity id>", "c<client ip>") to the graph's source IDs.
+func (s *Store) restSources(ctx context.Context, rest map[string]graph.Rest) (map[string]graph.Rest, error) {
+	out := map[string]graph.Rest{}
+	var ids []int64
+	for k, r := range rest {
+		if ip, ok := strings.CutPrefix(k, "c"); ok {
+			out[model.EntityID(model.KindIP, ip)] = r
+		} else if id, err := strconv.ParseInt(strings.TrimPrefix(k, "d"), 10, 64); err == nil {
+			ids = append(ids, id)
+		}
+	}
+	for chunk := range slices.Chunk(ids, 500) {
+		rows, err := s.r.QueryContext(ctx, `SELECT id, kind, key FROM entities WHERE id IN (`+idList(chunk)+`)`)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var id int64
+			var kind, key string
+			if err := rows.Scan(&id, &kind, &key); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			out[model.EntityID(kind, key)] = rest["d"+strconv.FormatInt(id, 10)]
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 // dnsNames returns the window's lookups, only of the given names when

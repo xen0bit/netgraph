@@ -95,6 +95,7 @@ func New(cfg Config) *Server {
 	read("/api/v1/entity", s.entity)
 	read("/api/v1/sensors", s.sensors)
 	read("/api/v1/wifi", s.wifi)
+	read("/api/v1/anomalies", s.anomalies)
 	read("/api/v1/live", s.live)
 	read("/metrics", s.metrics)
 	s.mux.Handle("PUT /api/v1/devices/{mac}/label", s.requireRead(http.HandlerFunc(s.setLabel)))
@@ -261,6 +262,10 @@ func (s *Server) sensors(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) wifi(w http.ResponseWriter, r *http.Request) {
 	answer(s, w, r, s.cfg.Store.WiFi)
+}
+
+func (s *Server) anomalies(w http.ResponseWriter, r *http.Request) {
+	answer(s, w, r, s.cfg.Store.Anomalies)
 }
 
 // wifiKeys hands a sensor what it needs to decrypt Wi-Fi: the PMKs and WEP

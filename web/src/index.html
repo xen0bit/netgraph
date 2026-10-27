@@ -46,6 +46,7 @@
     <button role="tab" data-tab="facts">Facts</button>
     <button role="tab" data-tab="wifi">Wi-Fi</button>
     <button role="tab" data-tab="sensors">Sensors</button>
+    <button role="tab" data-tab="anomalies">Anomalies</button>
   </nav>
 
   <main>
@@ -53,6 +54,8 @@
       <div class="graph-tools">
         <label><input type="checkbox" id="g-collapse" checked> Collapse addresses into names</label>
         <label><input type="checkbox" id="g-dns" checked> Lookups</label>
+        <label title="One node per registrable domain: time.com for www.time.com, auth.time.com, …"><input type="checkbox" id="g-sites" checked> Sites</label>
+        <label title="Outline what medium and high anomalies are about"><input type="checkbox" id="g-anomalies" checked> Anomalies</label>
         <label><input type="checkbox" id="g-identity"> Identity</label>
         <label>Top <input type="number" id="g-top" min="-1" max="500" value="15"></label>
         <label>Layout <select id="g-layout"><option value="dagre">dagre (in browser)</option><option value="elk">elk (server)</option></select></label>
@@ -70,6 +73,7 @@
     <section id="view-facts" class="view" hidden><table id="t-facts"></table></section>
     <section id="view-wifi" class="view" hidden><table id="t-wifi"></table></section>
     <section id="view-sensors" class="view" hidden><table id="t-sensors"></table></section>
+    <section id="view-anomalies" class="view" hidden><p id="anomaly-note" class="muted"></p><table id="t-anomalies"></table></section>
     <aside id="panel" class="panel" hidden aria-label="Details">
       <button class="icon close" id="panel-close" title="Close (Esc)">✕</button>
       <div id="panel-body"></div>

@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"math"
 	"net/netip"
 	"path/filepath"
@@ -247,26 +248,43 @@ func TestGraph(t *testing.T) {
 	if nodes[phone].Label != "alice-iphone" {
 		t.Fatalf("no phone node in %+v", g.Nodes)
 	}
-	www := nodes["domain:www.example.com"]
-	if www.Attrs["addresses"] != "93.184.216.34" {
-		t.Errorf("www = %+v", www)
+	// Sites (the default) draws example.com once, with the names under it.
+	site := nodes["site:example.com"]
+	if site.Attrs["addresses"] != "93.184.216.34" || site.Attrs["names"] != "www.example.com" {
+		t.Errorf("site = %+v", site)
 	}
+	// One edge per relationship: the lookup is counted on the connection.
 	var connects, queried bool
 	for _, e := range g.Edges {
-		if e.From == phone && e.To == "domain:www.example.com" {
+		if e.From == phone && e.To == "site:example.com" {
 			switch e.Rel {
 			case model.RelConnects:
-				connects = e.Opened == 1 && e.Peak == 1 && slices.Equal(e.Ports, []string{"443/tcp"})
+				connects = e.Opened == 1 && e.Peak == 1 && slices.Equal(e.Ports, []string{"443/tcp"}) && e.Attrs["lookups"] == "1"
 			case model.RelQueried:
-				queried = e.Count == 1
+				queried = true
 			}
 		}
 	}
-	if !connects || !queried {
+	if !connects || queried {
 		t.Errorf("connects=%v queried=%v edges=%+v", connects, queried, g.Edges)
 	}
-	if _, ok := nodes["domain:quic.example.org"]; !ok {
-		t.Errorf("quic domain missing")
+	if n, ok := nodes["site:example.org"]; !ok || n.Attrs["names"] != "quic.example.org" {
+		t.Errorf("quic site missing: %+v", n)
+	}
+
+	// Without Sites, names are their own nodes.
+	o := model.DefaultGraphOptions
+	o.Sites = false
+	g1, err := st.Graph(context.Background(), win(0, 15*time.Second), o)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var www bool
+	for _, n := range g1.Nodes {
+		www = www || (n.ID == "domain:www.example.com" && n.Attrs["addresses"] == "93.184.216.34")
+	}
+	if !www {
+		t.Errorf("no www.example.com node: %+v", g1.Nodes)
 	}
 
 	// Identity and uncollapsed.
@@ -278,10 +296,37 @@ func TestGraph(t *testing.T) {
 	for _, n := range g2.Nodes {
 		kinds[n.Kind] = true
 	}
-	for _, k := range []string{model.KindDevice, model.KindIP, model.KindDomain, model.KindHostname, model.KindService, model.KindFingerprint, model.KindVendor} {
+	for _, k := range []string{model.KindDevice, model.KindIP, model.KindDomain, model.KindService} {
 		if !kinds[k] {
 			t.Errorf("identity graph lacks %s nodes", k)
 		}
+	}
+	// Each device's own hostname, fingerprint and vendor are on its node;
+	// none is shared here, so none is drawn.
+	for _, k := range []string{model.KindHostname, model.KindFingerprint, model.KindVendor} {
+		if kinds[k] {
+			t.Errorf("identity graph draws unshared %s nodes", k)
+		}
+	}
+}
+
+func TestSiteEntity(t *testing.T) {
+	st, _, _ := homeStore(t)
+	ctx := context.Background()
+	d, err := st.Entity(ctx, "site:example.com", win(0, time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Label != "example.com" || d.Attrs["names"] != "lost.example.com,www.example.com" || len(d.Flows) != 1 || len(d.DNS) != 2 || len(d.Timeline) == 0 {
+		t.Fatalf("site = %+v", d)
+	}
+	for _, fl := range d.Flows {
+		if fl.Name != "www.example.com" {
+			t.Errorf("flow of another site: %+v", fl)
+		}
+	}
+	if _, err := st.Entity(ctx, "site:nothing.example", win(0, time.Hour)); !errors.Is(err, ErrNotFound) {
+		t.Errorf("unknown site: %v", err)
 	}
 }
 

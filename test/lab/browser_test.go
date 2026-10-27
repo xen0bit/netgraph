@@ -162,6 +162,18 @@ func checkWebUI(t *testing.T, devtools, ui, token, shotDir string, expect []stri
 			t.Errorf("%s tab is empty", tab)
 		}
 	}
+	// The lab has no history: the anomalies tab draws its table and says
+	// it is learning.
+	var learning string
+	err = chromedp.Run(ctx,
+		chromedp.Click(`.tabs button[data-tab="anomalies"]`, chromedp.ByQuery),
+		chromedp.WaitVisible(`#t-anomalies thead`, chromedp.ByQuery),
+		chromedp.Text(`#anomaly-note`, &learning, chromedp.ByQuery),
+		shot("anomalies"),
+	)
+	if err != nil || !strings.Contains(learning, "Learning") {
+		t.Errorf("anomalies tab: %v %q", err, learning)
+	}
 	if len(consoleErrors) > 0 {
 		t.Errorf("page threw: %v", consoleErrors)
 	}
