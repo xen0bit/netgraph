@@ -130,7 +130,10 @@ func Build(in Input, o model.GraphOptions) *model.Graph {
 	for src, r := range in.Rest {
 		rest[src] = r
 	}
-	for src, m := range perDev {
+	// In key order: the order nodes are added is the order the layout
+	// places them.
+	for _, src := range slices.Sorted(maps.Keys(perDev)) {
+		m := perDev[src]
 		ds := make([]*dest, 0, len(m))
 		for _, d := range m {
 			ds = append(ds, d)

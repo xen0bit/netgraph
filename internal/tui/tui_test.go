@@ -169,7 +169,13 @@ func TestFilterAndDetail(t *testing.T) {
 func TestGraphAndWindow(t *testing.T) {
 	d := newDriver(t)
 	d.keys("6")
-	d.want("collapse", "top 15", "Google aa:bb:cc", "plain.example.net")
+	d.want("collapse", "top 15", "Google aa:bb:cc")
+	// The drawing is wider than the screen: pan to the site's names.
+	// Panning stops at the right edge, so more presses than needed are fine.
+	for range 40 {
+		d.keys("right")
+	}
+	d.want("plain.example.net")
 	d.keys("o")
 	// The lookup is counted on the connection it led to.
 	d.want("connects www.example.com", "dns x1")
