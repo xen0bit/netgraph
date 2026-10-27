@@ -3,6 +3,7 @@ package graph
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/xen0bit/netgraph/internal/model"
@@ -29,7 +30,14 @@ func TestSite(t *testing.T) {
 const laptop = "device:aa:bb:cc:00:00:01"
 
 func flow(dev, name, ip string, bytes uint64) model.Flow {
-	return model.Flow{Device: dev, Name: name, RemoteIP: ip, RemotePort: 443, Proto: "tcp", Direction: "out", BytesIn: bytes, FirstSeen: 1000, LastSeen: 2000}
+	return model.Flow{Device: dev, Name: name, RemoteIP: ip, RemotePort: 443, ServerIP: ip, ServerPort: 443, Proto: "tcp", Direction: "out", BytesIn: bytes, FirstSeen: 1000, LastSeen: 2000}
+}
+
+// visit is a connection from a client outside to a server here: the device
+// sent sent and received got.
+func visit(dev, client string, port int, sent, got uint64) model.Flow {
+	return model.Flow{Device: dev, RemoteIP: client, RemotePort: 50000, ClientIP: client, ClientPort: 50000, ServerIP: "192.168.1.10", ServerPort: port,
+		Proto: "tcp", Direction: model.DirIn, BytesOut: sent, BytesIn: got, FirstSeen: 1000, LastSeen: 2000}
 }
 
 func edgesOf(g *model.Graph, from, to string) map[string]model.Edge {
@@ -220,5 +228,69 @@ func TestBuildIsDeterministic(t *testing.T) {
 		if got := order(); !slices.Equal(got, first) {
 			t.Fatalf("node order changed:\n%v\n%v", first, got)
 		}
+	}
+}
+
+func TestBuildInbound(t *testing.T) {
+	nas := "device:aa:bb:cc:00:00:10"
+	in := Input{
+		Devices: []model.Device{{ID: nas, MAC: "aa:bb:cc:00:00:10", Label: "nas"}},
+		Flows: []model.Flow{
+			visit(nas, "198.51.100.7", 443, 9000, 100),
+			visit(nas, "198.51.100.7", 443, 1000, 50),
+			visit(nas, "203.0.113.9", 22, 10, 20),
+			flow(nas, "updates.example.com", "93.184.216.34", 500),
+		},
+		RestIn: map[string]Rest{nas: {Destinations: 4, Connections: 5, BytesOut: 70, BytesIn: 30}},
+	}
+	g := Build(in, model.GraphOptions{Collapse: true, Sites: true, TopN: 1})
+	// The busiest client points at the device, its port the device's own
+	// and its up what the client sent.
+	e, ok := edgesOf(g, "ip:198.51.100.7", nas)[model.RelConnects]
+	if !ok || e.Count != 2 || !slices.Equal(e.Ports, []string{"443/tcp"}) || e.BytesOut != 150 || e.BytesIn != 10000 {
+		t.Fatalf("client edge = %+v (%v)", e, ok)
+	}
+	if _, ok := edgesOf(g, nas, "ip:198.51.100.7")[model.RelConnects]; ok {
+		t.Error("device drawn connecting to its client")
+	}
+	// Top N kept the destination; the other client joined the rest.
+	if _, ok := edgesOf(g, nas, "site:example.com")[model.RelConnects]; !ok {
+		t.Error("destination cut by the clients' Top N")
+	}
+	rest, ok := nodeOf(g, "other:clients:"+nas)
+	if !ok || rest.Label != "5 more clients" || rest.Attrs["device"] != nas {
+		t.Fatalf("rest node = %+v (%v)", rest, ok)
+	}
+	if e := edgesOf(g, rest.ID, nas)[model.RelConnects]; e.Count != 6 || e.BytesOut != 50 || e.BytesIn != 80 {
+		t.Errorf("rest edge = %+v", e)
+	}
+	n, _ := nodeOf(g, nas)
+	if n.Attrs["serves"] != "22/tcp,443/tcp" {
+		t.Errorf("serves = %q", n.Attrs["serves"])
+	}
+	if !g.Truncated {
+		t.Error("not marked truncated")
+	}
+}
+
+func TestRenderGroupsClients(t *testing.T) {
+	nas := "device:aa:bb:cc:00:00:10"
+	in := Input{Devices: []model.Device{{ID: nas, MAC: "aa:bb:cc:00:00:10", Label: "nas"}}}
+	for i := range GroupMin {
+		in.Flows = append(in.Flows, visit(nas, fmt.Sprintf("198.51.100.%d", i+1), 443, 100, 10))
+	}
+	g := Build(in, model.GraphOptions{Collapse: true, TopN: 15})
+	d2 := RenderD2(g, RenderOptions{})
+	for _, want := range []string{
+		`"clients:` + nas + `": {label: "nas · 8 clients"`,
+		`"clients:` + nas + `" -> "` + nas + `": "8 clients up 80B down 800B x8"`,
+		"serves 443/tcp",
+	} {
+		if !strings.Contains(d2, want) {
+			t.Errorf("d2 lacks %q:\n%s", want, d2)
+		}
+	}
+	if strings.Contains(d2, `"dests:`) {
+		t.Errorf("clients drawn as destinations:\n%s", d2)
 	}
 }

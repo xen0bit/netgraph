@@ -72,8 +72,10 @@ func TestSidecarExample(t *testing.T) {
 		if err != nil {
 			return false
 		}
+		// The Host header (127.0.0.1:18080) is an address, which names
+		// nothing: decoding shows in the app and the user agent.
 		for _, f := range fl {
-			if f.App == "http" && strings.HasPrefix(f.HTTPHost, "127.0.0.1:18080") && f.UserAgent != "" {
+			if f.App == "http" && f.ServerPort == 80 && f.HTTPHost == "" && strings.HasPrefix(f.UserAgent, "Go-http-client") {
 				return true
 			}
 		}

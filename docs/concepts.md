@@ -95,6 +95,15 @@ in a private, link-local or CGNAT range, or in a prefix of a sensor's
 capture interface (so a LAN with public IPv6 works). A host sending from
 `0.0.0.0` before DHCP gives it an address is still attributed by its MAC.
 
+**Which way.** A connection's direction says which end is here: `out` (a
+device here opened it to something outside), `in` (something outside
+opened it to a device here: a server, a forwarded or published port),
+`local` (both ends) or `external` (neither, traffic passing through). Its
+client is the end that opened it and its server the end that accepted it;
+"port" always means the server's port. Bytes are counted from the device's
+side whichever end opened the connection: a web server's responses are
+what it sent.
+
 **Which name.** A connection to an address is matched to the DNS lookup
 that produced it, from answers that were valid when it opened (TTL plus a
 10-minute grace, since clients cache past TTL). Many names share
@@ -116,13 +125,18 @@ hosts. NetBIOS workgroup and browser-role names are not hostnames.
 
 ## The graph
 
-Nodes are entities; edges aggregate the window:
+Nodes are entities; edges aggregate the window. A `connects` edge always
+points from the client to the server, the end that opened the connection
+to the end that accepted it, and its label reads `443/tcp up 1.2MB down
+68MB x12`: the server's port, what the client sent (up) and received
+(down), and the number of connections.
 
 ```
 device ──queried──▶ domain ──resolves_to (ttl)──▶ address
 device ──connects (ports, bytes, carried/opened/closed, peak)──▶ domain
 device ──connects──▶ address        (when no name is known)
 device ──connects──▶ device         (LAN to LAN)
+address ──connects──▶ device        (a client outside reaching a server here)
 domain ──cname──▶ domain
 device ──hostname / announces / fingerprint / user_agent / upnp / neighbor / vendor──▶ ...   (with Identity)
 device ──broadcasts / probes / associates / handshake──▶ ssid or device   (Wi-Fi, with Identity)
@@ -136,6 +150,18 @@ one `cloudfront.net` for its distributions. A site of one name reads as
 that name. **Top N** keeps each device's busiest destinations (sites, with
 sites on) and draws the rest as one "N more destinations" node, with their
 traffic, and marks the graph truncated.
+
+**Connections from outside.** A server here (port forwarding, a published
+container port, a reverse proxy) accepts connections from the internet.
+Each client is drawn by its address with an edge into the device, labelled
+with the device's port and the name the client asked for (`for
+www.example.com`): the name is the server's own, so it is not drawn as a
+destination. Top N keeps a device's busiest clients apart from its
+destinations, so a web server's visitors do not crowd out where it
+connects itself; the rest are one "N more clients" node. The device's node
+lists the ports it served (`serves 443/tcp, 80/tcp`). A client's TLS
+fingerprint and user agent describe the client: they are facts about its
+address, not the device's identity.
 
 Each relationship is drawn once, so a busy window stays readable:
 
@@ -154,7 +180,8 @@ Each relationship is drawn once, so a busy window stays readable:
 - A device with eight or more destinations that only it reaches, and that
   nothing else in the graph touches, draws them as a grid, busiest first,
   with one edge carrying their totals; each keeps its ports and connection
-  count on its label.
+  count on its label. Eight or more such clients are a grid too, with its
+  edge into the device.
 
 ## Anomalies
 
@@ -183,8 +210,8 @@ since everything is new to a network just met. They look back 7 days.
 | Kind | Fires when | Severity |
 |---|---|---|
 | `new_device` | a device uses an address on the LAN for the first time (the same event as a [new-device alert](deployment.md#new-device-alerts); not the router, not devices only heard over the air) | medium; low for a private (randomised) MAC, which phones rotate |
-| `new_destination` | a device with a day of history reaches a site, or an unnamed address, it had not in the last 7 days. A device that reached at most 30 destinations that week is predictable (a plug, a camera) and anything new from it counts; from a busier one only a new destination it uploaded 1 MB or more to | medium from a predictable device, high if also new to the whole network with 10 MB up; low from a busy one, medium if new to the network with 50 MB up. More than 10 for one device are summed up in one |
-| `upload_spike` | a device sends more per hour than in any hour of its last week, at least 4 times its median hour and at least 20 MB an hour. It needs 24 active hours of history | medium; high at 5 times its busiest hour and 200 MB an hour |
+| `new_destination` | a device with a day of history connects to a site, or an unnamed address, it had not in the last 7 days. A device that reached at most 30 destinations that week is predictable (a plug, a camera) and anything new from it counts; from a busier one only a new destination it uploaded 1 MB or more to | medium from a predictable device, high if also new to the whole network with 10 MB up; low from a busy one, medium if new to the network with 50 MB up. More than 10 for one device are summed up in one |
+| `upload_spike` | a device sends more per hour, on connections it opened, than in any hour of its last week, at least 4 times its median hour and at least 20 MB an hour. It needs 24 active hours of history | medium; high at 5 times its busiest hour and 200 MB an hour |
 | `rogue_ap` | a new access point broadcasts a network that the LAN's own devices (ones that used an address on it) associate with | medium |
 
 A window shorter than an hour is compared with hours as it is: its total

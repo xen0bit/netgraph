@@ -269,7 +269,7 @@ func (a *anomalies) newDestinations(ctx context.Context) error {
 		network[k] = true
 	}
 	rows, err = a.s.r.QueryContext(ctx, `SELECT client_device, name, remote_ip FROM traffic_hourly
-		WHERE bucket >= ? AND bucket + 3600000 <= ? AND multicast = 0 GROUP BY 1, 2, 3`, base, a.from)
+		WHERE bucket >= ? AND bucket + 3600000 <= ? AND multicast = 0 AND direction != 'in' GROUP BY 1, 2, 3`, base, a.from)
 	if err != nil {
 		return err
 	}
@@ -286,7 +286,7 @@ func (a *anomalies) newDestinations(ctx context.Context) error {
 		return err
 	}
 	rows, err = a.s.r.QueryContext(ctx, `SELECT c.client_device, `+connName+`, c.remote_ip FROM connections c
-		WHERE c.first_seen < ? AND c.last_seen >= ? AND c.multicast = 0 GROUP BY 1, 2, 3`, a.from, a.from-2*time.Hour.Milliseconds())
+		WHERE c.first_seen < ? AND c.last_seen >= ? AND c.multicast = 0 AND c.direction != 'in' GROUP BY 1, 2, 3`, a.from, a.from-2*time.Hour.Milliseconds())
 	if err != nil {
 		return err
 	}
@@ -373,10 +373,11 @@ func (a *anomalies) newDestinations(ctx context.Context) error {
 }
 
 // uploadSpikes: a device sent more in the window, per hour, than in any
-// hour of its last week and several times its usual hour.
+// hour of its last week and several times its usual hour. Only connections
+// the device opened count: a server answering its clients is not uploading.
 func (a *anomalies) uploadSpikes(ctx context.Context) error {
 	rows, err := a.s.r.QueryContext(ctx, `SELECT c.client_device, sum(`+connBytes("bytes_out", a.from, a.to)+`), min(c.first_seen)
-		FROM connections c WHERE c.last_seen >= ? AND c.first_seen < ? AND c.client_device != 0 AND c.multicast = 0 GROUP BY 1`, a.from, a.to)
+		FROM connections c WHERE c.last_seen >= ? AND c.first_seen < ? AND c.client_device != 0 AND c.multicast = 0 AND c.direction != 'in' GROUP BY 1`, a.from, a.to)
 	if err != nil {
 		return err
 	}
@@ -396,7 +397,7 @@ func (a *anomalies) uploadSpikes(ctx context.Context) error {
 	}
 	hours := map[int64][]float64{}
 	rows, err = a.s.r.QueryContext(ctx, `SELECT client_device, sum(bytes_out) FROM traffic_hourly
-		WHERE bucket >= ? AND bucket + 3600000 <= ? AND multicast = 0 AND client_device != 0 GROUP BY client_device, bucket HAVING sum(bytes_out) > 0`,
+		WHERE bucket >= ? AND bucket + 3600000 <= ? AND multicast = 0 AND client_device != 0 AND direction != 'in' GROUP BY client_device, bucket HAVING sum(bytes_out) > 0`,
 		a.from-anomalyBaseline.Milliseconds(), a.from)
 	if err != nil {
 		return err

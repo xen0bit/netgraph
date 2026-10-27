@@ -28,8 +28,9 @@ type Input struct {
 	DNS          []model.DNSQuery
 	Facts        []model.Fact
 	// Rest is, per source, what the store's own Top N left out of Flows:
-	// the graph shows it as one "N more destinations" node.
-	Rest map[string]Rest
+	// the graph shows it as one "N more destinations" node. RestIn is the
+	// same for the clients that connected in to a device.
+	Rest, RestIn map[string]Rest
 }
 
 // Rest summarises destinations a graph does not draw one by one.
@@ -55,11 +56,14 @@ type builder struct {
 
 // Build assembles a graph.
 //
-// The shape, with DNS and Collapse on (the default):
+// Every connects edge points from the client to the server: the end that
+// opened the connection to the end that accepted it. The shape, with DNS
+// and Collapse on (the default):
 //
 //	device ──queried──▶ domain ──resolves_to──▶ address
 //	device ──connects─────────▶ domain           (when the address was reached by that name)
 //	device ──connects─────────▶ address          (when it was not)
+//	address ──connects────────▶ device           (a connection from outside, to a server here)
 //
 // With Collapse off, connections always point at addresses and names hang
 // off them through resolves_to/serves. With Sites, a name node stands for
@@ -72,7 +76,7 @@ type builder struct {
 // looked a name up and connected to it has one connects edge (with the
 // lookup count), a CNAME chain is folded into the name it started from
 // ("via" the CDN) unless its target is drawn anyway, and what Top N left
-// out is one "N more destinations" node per device.
+// out is one "N more destinations" (or "N more clients") node per device.
 func Build(in Input, o model.GraphOptions) *model.Graph {
 	if o.TopN == 0 {
 		o.TopN = 15
@@ -98,24 +102,44 @@ func Build(in Input, o model.GraphOptions) *model.Graph {
 		return ""
 	}
 
-	// Connections, grouped per device and destination; then keep each
-	// device's busiest TopN destinations.
+	// Connections, grouped per device and peer, one side at a time: the
+	// destinations it connected to, and the clients that connected to it.
+	// Then keep each device's busiest TopN of each.
 	type dest struct {
 		key   string
 		bytes uint64
 		flows []model.Flow
 	}
-	perDev := map[string]map[string]*dest{}
+	perDev := [2]map[string]map[string]*dest{{}, {}} // [outbound, inbound]
+	serves := map[string][2]map[string]bool{}        // device -> its ports, and the names asked of it
+	served := func(dev, port, name string) {
+		sv, ok := serves[dev]
+		if !ok {
+			sv = [2]map[string]bool{{}, {}}
+			serves[dev] = sv
+		}
+		sv[0][port] = true
+		if name != "" {
+			sv[1][name] = true
+		}
+	}
 	for _, fl := range in.Flows {
 		src := fl.Device
 		if src == "" {
-			src = model.EntityID(model.KindIP, fl.ClientIP)
+			src = model.EntityID(model.KindIP, fl.LocalIP())
 		}
 		to := b.destination(fl)
-		m := perDev[src]
+		// What each device serves, whether Top N draws its clients or not.
+		if fl.Inbound() {
+			served(src, fl.Service(), fl.Name)
+		} else if strings.HasPrefix(to, model.KindDevice+":") {
+			served(to, fl.Service(), "")
+		}
+		side := perDev[sideOf(fl)]
+		m := side[src]
 		if m == nil {
 			m = map[string]*dest{}
-			perDev[src] = m
+			side[src] = m
 		}
 		d := m[to]
 		if d == nil {
@@ -126,60 +150,82 @@ func Build(in Input, o model.GraphOptions) *model.Graph {
 		d.flows = append(d.flows, fl)
 	}
 	keptDest := map[string]bool{}
-	rest := map[string]Rest{}
-	for src, r := range in.Rest {
-		rest[src] = r
+	rest := [2]map[string]Rest{maps.Clone(in.Rest), maps.Clone(in.RestIn)}
+	for i := range rest {
+		if rest[i] == nil {
+			rest[i] = map[string]Rest{}
+		}
 	}
 	// In key order: the order nodes are added is the order the layout
 	// places them.
-	for _, src := range slices.Sorted(maps.Keys(perDev)) {
-		m := perDev[src]
-		ds := make([]*dest, 0, len(m))
-		for _, d := range m {
-			ds = append(ds, d)
-		}
-		sort.Slice(ds, func(i, j int) bool {
-			if ds[i].bytes != ds[j].bytes {
-				return ds[i].bytes > ds[j].bytes
+	for side, devs := range perDev {
+		for _, src := range slices.Sorted(maps.Keys(devs)) {
+			m := devs[src]
+			ds := make([]*dest, 0, len(m))
+			for _, d := range m {
+				ds = append(ds, d)
 			}
-			return ds[i].key < ds[j].key
-		})
-		if o.TopN > 0 && len(ds) > o.TopN {
-			r := rest[src]
-			for _, d := range ds[o.TopN:] {
-				r.Destinations++
-				for _, fl := range d.flows {
-					r.Connections++
-					r.BytesOut += fl.BytesOut
-					r.BytesIn += fl.BytesIn
+			sort.Slice(ds, func(i, j int) bool {
+				if ds[i].bytes != ds[j].bytes {
+					return ds[i].bytes > ds[j].bytes
 				}
+				return ds[i].key < ds[j].key
+			})
+			if o.TopN > 0 && len(ds) > o.TopN {
+				r := rest[side][src]
+				for _, d := range ds[o.TopN:] {
+					r.Destinations++
+					for _, fl := range d.flows {
+						r.Connections += b.conns(fl)
+						r.BytesOut += fl.BytesOut
+						r.BytesIn += fl.BytesIn
+					}
+				}
+				rest[side][src] = r
+				ds = ds[:o.TopN]
 			}
-			rest[src] = r
-			ds = ds[:o.TopN]
-		}
-		b.sourceNode(src, devices)
-		for _, d := range ds {
-			keptDest[d.key] = true
-			for _, fl := range d.flows {
-				b.connect(src, d.key, fl)
+			b.sourceNode(src, devices)
+			for _, d := range ds {
+				if side == outbound {
+					keptDest[d.key] = true
+				}
+				for _, fl := range d.flows {
+					b.connect(src, d.key, fl)
+				}
 			}
 		}
 	}
 
-	for _, src := range slices.Sorted(maps.Keys(rest)) {
-		r := rest[src]
-		if r.Destinations == 0 {
-			continue
+	for side, rs := range rest {
+		for _, src := range slices.Sorted(maps.Keys(rs)) {
+			r := rs[src]
+			if r.Destinations == 0 {
+				continue
+			}
+			g.Truncated = true
+			b.sourceNode(src, devices)
+			b.nodes[src].BytesOut += r.BytesOut
+			b.nodes[src].BytesIn += r.BytesIn
+			if side == outbound {
+				id := model.EntityID(model.KindOther, src)
+				n := b.node(id, model.KindOther, fmt.Sprintf("%d more destinations", r.Destinations), "")
+				n.BytesOut, n.BytesIn = r.BytesOut, r.BytesIn
+				n.Attrs = map[string]string{"destinations": strconv.Itoa(r.Destinations), "device": src}
+				e := b.edge(src, id, model.RelConnects)
+				e.Count = r.Connections
+				e.BytesOut, e.BytesIn = r.BytesOut, r.BytesIn
+				continue
+			}
+			// Drawn like the clients themselves: an edge into the device,
+			// its bytes counted along the edge (what the clients sent).
+			id := model.EntityID(model.KindOther, ClientsPrefix+src)
+			n := b.node(id, model.KindOther, fmt.Sprintf("%d more clients", r.Destinations), "")
+			n.BytesOut, n.BytesIn = r.BytesIn, r.BytesOut
+			n.Attrs = map[string]string{"clients": strconv.Itoa(r.Destinations), "device": src}
+			e := b.edge(id, src, model.RelConnects)
+			e.Count = r.Connections
+			e.BytesOut, e.BytesIn = r.BytesIn, r.BytesOut
 		}
-		g.Truncated = true
-		b.sourceNode(src, devices)
-		id := model.EntityID(model.KindOther, src)
-		n := b.node(id, model.KindOther, fmt.Sprintf("%d more destinations", r.Destinations), "")
-		n.BytesOut, n.BytesIn = r.BytesOut, r.BytesIn
-		n.Attrs = map[string]string{"destinations": strconv.Itoa(r.Destinations), "device": src}
-		e := b.edge(src, id, model.RelConnects)
-		e.Count = r.Connections
-		e.BytesOut, e.BytesIn = r.BytesOut, r.BytesIn
 	}
 
 	if o.Identity {
@@ -280,7 +326,7 @@ func Build(in Input, o model.GraphOptions) *model.Graph {
 		}
 	}
 	if o.Identity {
-		for _, id := range slices.Sorted(maps.Keys(perDev)) {
+		for _, id := range slices.Sorted(maps.Keys(perDev[outbound])) {
 			if d := devices[id]; d != nil && d.Vendor != "" {
 				leaves = append(leaves, model.Fact{Src: id, Rel: model.RelVendor, Dst: model.EntityID(model.KindVendor, d.Vendor), DstLabel: d.Vendor, Count: 1})
 			}
@@ -320,6 +366,15 @@ func Build(in Input, o model.GraphOptions) *model.Graph {
 	}
 	for _, id := range b.order {
 		n := b.nodes[id]
+		if sv, ok := serves[id]; ok && n.Kind == model.KindDevice {
+			if n.Attrs == nil {
+				n.Attrs = map[string]string{}
+			}
+			n.Attrs["serves"] = strings.Join(slices.SortedFunc(maps.Keys(sv[0]), comparePort), ",")
+			if len(sv[1]) > 0 {
+				n.Attrs["served_names"] = strings.Join(slices.Sorted(maps.Keys(sv[1])), ",")
+			}
+		}
 		if names := b.names[id]; len(names) > 0 {
 			list := slices.Sorted(maps.Keys(names))
 			if n.Attrs == nil {
@@ -343,6 +398,15 @@ func Build(in Input, o model.GraphOptions) *model.Graph {
 	return g
 }
 
+// comparePort orders "443/tcp" services by port number, then protocol.
+func comparePort(a, b string) int {
+	pa, ta, _ := strings.Cut(a, "/")
+	pb, tb, _ := strings.Cut(b, "/")
+	x, _ := strconv.Atoi(pa)
+	y, _ := strconv.Atoi(pb)
+	return cmp.Or(cmp.Compare(x, y), cmp.Compare(ta, tb), cmp.Compare(a, b))
+}
+
 func compareAddr(a, b string) int {
 	x, e1 := netip.ParseAddr(a)
 	y, e2 := netip.ParseAddr(b)
@@ -352,9 +416,31 @@ func compareAddr(a, b string) int {
 	return x.Compare(y)
 }
 
-// destination is where a flow points in the graph.
+// Sides of a device's connections, which Top N keeps apart.
+const (
+	outbound = iota // the device connected out
+	inbound         // a client outside connected in to it
+)
+
+func sideOf(fl model.Flow) int {
+	if fl.Inbound() {
+		return inbound
+	}
+	return outbound
+}
+
+// ClientsPrefix starts the key of what stands for a device's inbound
+// clients: its "N more clients" node ("other:clients:" + the device's ID)
+// and the grid of them ("clients:" + the device's ID).
+const ClientsPrefix = "clients:"
+
+// destination is the far end of a flow in the graph: where it points, or
+// for an inbound connection the client it came from.
 func (b *builder) destination(fl model.Flow) string {
-	if fl.Direction == "local" {
+	if fl.Inbound() {
+		return model.EntityID(model.KindIP, fl.RemoteIP)
+	}
+	if fl.Direction == model.DirLocal {
 		// Device to device on the LAN: point at the other device when one
 		// device holds that address.
 		if d := b.owner(fl.RemoteIP); d != "" && d != fl.Device {
@@ -557,6 +643,9 @@ func (b *builder) span(e *model.Edge, first, last int64) {
 	e.LastSeen = max(e.LastSeen, last)
 }
 
+// connect draws one connection between a device (src) and its peer (dst):
+// an edge from the client to the server, whose bytes are counted along it
+// (BytesOut is what the client sent).
 func (b *builder) connect(src, dst string, fl model.Flow) {
 	kind, key, _ := model.SplitEntityID(dst)
 	var n *model.Node
@@ -566,8 +655,23 @@ func (b *builder) connect(src, dst string, fl model.Flow) {
 	} else {
 		n = b.node(dst, kind, key, "")
 	}
-	n.BytesOut += fl.BytesOut
-	n.BytesIn += fl.BytesIn
+	from, to := src, dst
+	sent, got := fl.BytesOut, fl.BytesIn // by the client
+	if fl.Inbound() {
+		from, to = dst, src
+		sent, got = fl.BytesIn, fl.BytesOut
+	}
+	// A device node totals what it sent and received; any other node, the
+	// traffic along its edges.
+	b.nodes[src].BytesOut += fl.BytesOut
+	b.nodes[src].BytesIn += fl.BytesIn
+	if kind == model.KindDevice {
+		n.BytesOut += fl.BytesIn
+		n.BytesIn += fl.BytesOut
+	} else {
+		n.BytesOut += sent
+		n.BytesIn += got
+	}
 	switch kind {
 	case model.KindSite:
 		b.nameNode(fl.Name)
@@ -580,10 +684,10 @@ func (b *builder) connect(src, dst string, fl model.Flow) {
 			n.Local = true
 		}
 	}
-	e := b.edge(src, dst, model.RelConnects)
-	e.Count++
-	e.BytesOut += fl.BytesOut
-	e.BytesIn += fl.BytesIn
+	e := b.edge(from, to, model.RelConnects)
+	e.Count += b.conns(fl)
+	e.BytesOut += sent
+	e.BytesIn += got
 	switch fl.State {
 	case model.StateCarried:
 		e.Carried++
@@ -593,28 +697,44 @@ func (b *builder) connect(src, dst string, fl model.Flow) {
 	if fl.Closed {
 		e.Closed++
 	}
-	port := fmt.Sprintf("%d/%s", fl.RemotePort, fl.Proto)
-	if fl.RemotePort == 0 {
-		port = fl.Proto
-	}
-	if !slices.Contains(e.Ports, port) {
+	if port := fl.Service(); !slices.Contains(e.Ports, port) {
 		e.Ports = append(e.Ports, port)
 	}
 	if fl.App != "" {
-		if e.Attrs == nil {
-			e.Attrs = map[string]string{}
-		}
-		if !strings.Contains(","+e.Attrs["apps"]+",", ","+fl.App+",") {
-			e.Attrs["apps"] = strings.Trim(e.Attrs["apps"]+","+fl.App, ",")
-		}
+		addList(e, "apps", fl.App)
+	}
+	if fl.Inbound() && fl.Name != "" {
+		addList(e, "names", fl.Name)
 	}
 	lo, hi := max(fl.FirstSeen, b.in.FromMS), min(fl.LastSeen, b.in.ToMS)
 	if b.in.ToMS == 0 {
 		lo, hi = fl.FirstSeen, fl.LastSeen
 	}
-	k := src + "\x00" + dst + "\x00" + model.RelConnects
+	k := from + "\x00" + to + "\x00" + model.RelConnects
 	b.spans[k] = append(b.spans[k], [2]int64{lo, hi})
 	b.span(e, fl.FirstSeen, fl.LastSeen)
+}
+
+// conns is how many connections a flow stands for: one, or for a row of
+// hourly rollups the count it carries in PktsOut.
+func (b *builder) conns(fl model.Flow) int {
+	if b.in.Precision == model.PrecisionHour {
+		return int(max(fl.PktsOut, 1))
+	}
+	return 1
+}
+
+// addList adds v to the comma-separated list in an edge's attribute k,
+// once.
+func addList(e *model.Edge, k, v string) {
+	if e.Attrs == nil {
+		e.Attrs = map[string]string{}
+	}
+	cur := e.Attrs[k]
+	if strings.Contains(","+cur+",", ","+v+",") {
+		return
+	}
+	e.Attrs[k] = strings.TrimPrefix(cur+","+v, ",")
 }
 
 // answersKept reports whether one of a lookup's answers is an address the

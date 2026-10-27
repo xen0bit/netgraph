@@ -143,6 +143,7 @@ type trafficKey struct {
 	port, proto int
 	name, app   string
 	multicast   bool
+	dir         string
 }
 
 type trafficAgg struct {
@@ -761,9 +762,21 @@ func (g *ingester) flowRecord(ctx context.Context, sid int64, sensor, boot strin
 	case srcLocal:
 		dir = "out"
 	case dstLocal:
+		// Someone outside opened a connection to a device here (port
+		// forwarding, a published port, a server). The device is still the
+		// row's "client" side and its counters are kept from its point of
+		// view, so a device's bytes_out is always what it sent.
 		dir = "in"
 		client, cport, cmac = f.Dst, f.DstPort, f.DstMAC
 		remote, rport = f.Src, f.SrcPort
+	}
+	inbound := dir == "in"
+	// A copy: the record is normalised below.
+	rec := *f
+	f = &rec
+	if inbound {
+		f.BytesOut, f.BytesIn = f.BytesIn, f.BytesOut
+		f.PktsOut, f.PktsIn = f.PktsIn, f.PktsOut
 	}
 	multicast := isGroupAddr(remote) || nets.isBroadcast(remote)
 	start, end, first := ms(f.Start), ms(f.End), ms(f.FirstSeen)
@@ -782,9 +795,11 @@ func (g *ingester) flowRecord(ctx context.Context, sid int64, sensor, boot strin
 		return err
 	}
 
+	f.SNI, f.HTTPHost = hostName(f.SNI), hostName(f.HTTPHost)
 	qname, seen := g.flowName[key]
 	if !seen {
-		if !g.s.nets.isLocal(remote) && !multicast {
+		// An inbound connection's remote end was never looked up by us.
+		if !g.s.nets.isLocal(remote) && !multicast && !inbound {
 			qname = g.lookupName(remote.String(), client.String(), first, f.SNI, f.HTTPHost)
 		}
 		g.flowName[key] = qname
@@ -829,13 +844,23 @@ func (g *ingester) flowRecord(ctx context.Context, sid int64, sensor, boot strin
 		return err
 	}
 
-	// What the flow reveals about its endpoints.
-	if !multicast && !g.s.nets.isLocal(remote) {
+	// What the flow reveals about its endpoints. The SNI and Host name the
+	// server, which is the remote end unless the connection came in; the
+	// fingerprint and user agent describe the initiator, which is the
+	// device unless it came in.
+	server := remote
+	if inbound {
+		server = client
+	}
+	if !multicast && (inbound || !g.s.nets.isLocal(remote)) {
 		for src, host := range map[string]string{"sni": f.SNI, "http": f.HTTPHost} {
 			if host == "" {
 				continue
 			}
-			ipID := g.row(model.KindIP, remote.String()).id
+			ipID, err := g.ipEntity(ctx, server, end)
+			if err != nil {
+				return err
+			}
 			dom, err := g.entity(ctx, model.KindDomain, host, end, nil)
 			if err != nil {
 				return err
@@ -845,13 +870,19 @@ func (g *ingester) flowRecord(ctx context.Context, sid int64, sensor, boot strin
 			}
 		}
 	}
-	if dev != 0 {
+	initiator := dev
+	if inbound {
+		if initiator, err = g.ipEntity(ctx, remote, end); err != nil {
+			return err
+		}
+	}
+	if initiator != 0 {
 		if f.JA4 != "" {
 			fp, err := g.entity(ctx, model.KindFingerprint, "ja4:"+f.JA4, end, func(e *entRow) { e.label = "JA4 " + f.JA4 })
 			if err != nil {
 				return err
 			}
-			if err := g.fact(ctx, model.RelFingerprint, dev, fp, end, end, "tls", nil); err != nil {
+			if err := g.fact(ctx, model.RelFingerprint, initiator, fp, end, end, "tls", nil); err != nil {
 				return err
 			}
 		}
@@ -860,18 +891,46 @@ func (g *ingester) flowRecord(ctx context.Context, sid int64, sensor, boot strin
 			if err != nil {
 				return err
 			}
-			if err := g.fact(ctx, model.RelUserAgent, dev, ua, end, end, "http", nil); err != nil {
+			if err := g.fact(ctx, model.RelUserAgent, initiator, ua, end, end, "http", nil); err != nil {
 				return err
 			}
 		}
 	}
 
-	g.addTraffic(trafficKey{device: dev, client: client.String(), remote: remote.String(), port: int(rport), proto: int(f.Proto), name: name, app: f.App, multicast: multicast},
+	// Rollups key a connection by its service: the server's port, which
+	// for an inbound connection is the device's own.
+	sport := rport
+	if inbound {
+		sport = cport
+	}
+	g.addTraffic(trafficKey{device: dev, client: client.String(), remote: remote.String(), port: int(sport), proto: int(f.Proto), name: name, app: f.App, multicast: multicast, dir: dir},
 		start, end, first, int64(f.BytesOut), int64(f.BytesIn))
 	if start == first || f.Final {
-		g.live = append(g.live, LiveEvent{Type: "flow", TS: end, Device: dev, Detail: fmt.Sprintf("%s → %s %s", client, firstNonEmpty(name, remote.String()), portProto(int(rport), f.Proto))})
+		detail := fmt.Sprintf("%s → %s %s", client, firstNonEmpty(name, remote.String()), portProto(int(rport), f.Proto))
+		if inbound {
+			detail = fmt.Sprintf("%s → %s %s", remote, firstNonEmpty(name, client.String()), portProto(int(cport), f.Proto))
+		}
+		g.live = append(g.live, LiveEvent{Type: "flow", TS: end, Device: dev, Detail: detail})
 	}
 	return nil
+}
+
+// hostName is a server name from an SNI or HTTP Host header as the server
+// would match it: lower case, without a port or trailing dot. An address
+// literal (scanners send "Host: 192.0.2.1:80") names nothing.
+func hostName(h string) string {
+	if h == "" {
+		return ""
+	}
+	h = strings.ToLower(strings.TrimSpace(h))
+	if host, port, err := net.SplitHostPort(h); err == nil && port != "" {
+		h = host
+	}
+	h = strings.TrimSuffix(strings.Trim(h, "[]"), ".")
+	if _, err := netip.ParseAddr(h); err == nil {
+		return ""
+	}
+	return h
 }
 
 // lookupName finds the DNS name a client resolved remote from before
@@ -1501,12 +1560,12 @@ func (g *ingester) addTraffic(k trafficKey, start, end, first, bout, bin int64) 
 
 func (g *ingester) flushRollupsTx(ctx context.Context) error {
 	for k, a := range g.traffic {
-		if _, err := g.tx.ExecContext(ctx, `INSERT INTO traffic_hourly (bucket, client_device, client_ip, remote_ip, remote_port, proto, name, app, multicast, flows, bytes_out, bytes_in)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT (bucket, client_device, client_ip, remote_ip, remote_port, proto, name) DO UPDATE SET
+		if _, err := g.tx.ExecContext(ctx, `INSERT INTO traffic_hourly (bucket, client_device, client_ip, remote_ip, remote_port, proto, name, direction, app, multicast, flows, bytes_out, bytes_in)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT (bucket, client_device, client_ip, remote_ip, remote_port, proto, name, direction) DO UPDATE SET
 			flows = flows + excluded.flows, bytes_out = bytes_out + excluded.bytes_out, bytes_in = bytes_in + excluded.bytes_in,
 			app = CASE WHEN excluded.app != '' THEN excluded.app ELSE app END`,
-			k.bucket, k.device, k.client, k.remote, k.port, k.proto, k.name, k.app, boolInt(k.multicast), a.flows, a.bout, a.bin); err != nil {
+			k.bucket, k.device, k.client, k.remote, k.port, k.proto, k.name, k.dir, k.app, boolInt(k.multicast), a.flows, a.bout, a.bin); err != nil {
 			return err
 		}
 	}
