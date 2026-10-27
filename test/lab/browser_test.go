@@ -93,6 +93,7 @@ func checkWebUI(t *testing.T, devtools, ui, token, shotDir string, expect []stri
 			t.Errorf("graph lacks %q", want)
 		}
 	}
+	checkKeepsView(t, gctx)
 
 	// Click the first device node and check the detail panel.
 	var panel string
@@ -163,6 +164,58 @@ func checkWebUI(t *testing.T, devtools, ui, token, shotDir string, expect []stri
 	}
 	if len(consoleErrors) > 0 {
 		t.Errorf("page threw: %v", consoleErrors)
+	}
+}
+
+// checkKeepsView pans the graph and checks that redrawing the same view
+// keeps the pan: coming back from another tab redraws it, and switching
+// Live off must not redraw at all. #graph-note is rewritten on every draw,
+// so counting its mutations tells when a redraw has landed.
+func checkKeepsView(t *testing.T, ctx context.Context) {
+	t.Helper()
+	const transform = `document.querySelector("#diagram svg").style.transform`
+	const pan = `(() => { const el = document.querySelector("#diagram"); const r = el.getBoundingClientRect();
+		const at = (type, d) => el.dispatchEvent(new PointerEvent(type, {bubbles: true, button: 0, pointerId: 1, clientX: r.left + 200 + d, clientY: r.top + 200 + d}));
+		at("pointerdown", 0); at("pointermove", 60); at("pointerup", 60); })()`
+	var draws int
+	drawn := func(after *int) chromedp.Action {
+		return chromedp.ActionFunc(func(ctx context.Context) error {
+			return chromedp.Poll(fmt.Sprintf(`window.__draws > %d`, *after), nil, chromedp.WithPollingTimeout(30*time.Second)).Do(ctx)
+		})
+	}
+	var panned, afterTab, livePanned, afterLive string
+	var drawsBeforeOff, drawsAfterOff int
+	err := chromedp.Run(ctx,
+		chromedp.Evaluate(`window.__draws = 0; new MutationObserver(() => window.__draws++).observe(document.querySelector("#graph-note"), {childList: true}); 0`, nil),
+		chromedp.Evaluate(pan, nil),
+		chromedp.Evaluate(transform, &panned),
+		chromedp.Click(`.tabs button[data-tab="devices"]`, chromedp.ByQuery),
+		chromedp.WaitVisible(`#t-devices tbody`, chromedp.ByQuery),
+		chromedp.Evaluate(`window.__draws`, &draws),
+		chromedp.Click(`.tabs button[data-tab="graph"]`, chromedp.ByQuery),
+		drawn(&draws),
+		chromedp.Evaluate(transform, &afterTab),
+
+		chromedp.Evaluate(`window.__draws`, &draws),
+		chromedp.Click(`#live`, chromedp.ByQuery),
+		drawn(&draws),
+		chromedp.Evaluate(pan, nil),
+		chromedp.Evaluate(transform, &livePanned),
+		chromedp.Evaluate(`window.__draws`, &drawsBeforeOff),
+		chromedp.Click(`#live`, chromedp.ByQuery),
+		// Longer than Live's 2s debounce of ingest events.
+		chromedp.Sleep(3*time.Second),
+		chromedp.Evaluate(`window.__draws`, &drawsAfterOff),
+		chromedp.Evaluate(transform, &afterLive),
+	)
+	if err != nil {
+		t.Fatalf("keeping the view: %v", err)
+	}
+	if panned == "" || afterTab != panned {
+		t.Errorf("redrawing the same graph refitted it: panned to %q, then %q", panned, afterTab)
+	}
+	if drawsAfterOff != drawsBeforeOff || afterLive != livePanned {
+		t.Errorf("switching Live off redrew the graph (%d draws) or moved it: %q, then %q", drawsAfterOff-drawsBeforeOff, livePanned, afterLive)
 	}
 }
 

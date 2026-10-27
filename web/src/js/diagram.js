@@ -19,7 +19,7 @@ export class Diagram {
     el.addEventListener("pointermove", (e) => {
       if (!drag) return;
       const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
-      if (Math.abs(dx) + Math.abs(dy) > 3) { drag.moved = true; el.classList.add("dragging"); }
+      if (Math.abs(dx) + Math.abs(dy) > 3) { drag.moved = true; this.autoFit = false; el.classList.add("dragging"); }
       this.x = drag.ox + dx; this.y = drag.oy + dy; this.apply();
     });
     el.addEventListener("pointerup", (e) => {
@@ -37,10 +37,10 @@ export class Diagram {
       if (e.key === "+" || e.key === "=") this.zoomAt(r.width / 2, r.height / 2, 1.2);
       else if (e.key === "-") this.zoomAt(r.width / 2, r.height / 2, 1 / 1.2);
       else if (e.key === "0") this.fit();
-      else if (e.key === "ArrowLeft") { this.x += 40; this.apply(); }
-      else if (e.key === "ArrowRight") { this.x -= 40; this.apply(); }
-      else if (e.key === "ArrowUp") { this.y += 40; this.apply(); }
-      else if (e.key === "ArrowDown") { this.y -= 40; this.apply(); }
+      else if (e.key === "ArrowLeft") this.pan(40, 0);
+      else if (e.key === "ArrowRight") this.pan(-40, 0);
+      else if (e.key === "ArrowUp") this.pan(0, 40);
+      else if (e.key === "ArrowDown") this.pan(0, -40);
       else return;
       e.preventDefault();
     });
@@ -50,6 +50,7 @@ export class Diagram {
   message(html) {
     this.done();
     this.svg = null;
+    this.svgText = null;
     this.el.innerHTML = `<div class="placeholder"><div>${html}</div></div>`;
   }
 
@@ -74,8 +75,13 @@ export class Diagram {
     this.el.querySelector(".diagram-loading")?.remove();
   }
 
+  // show draws svgText. With keepView, a view the person has panned or
+  // zoomed is kept rather than refitted: a refresh of the same graph must
+  // not throw away where they were looking. The same SVG again is a no-op.
   show(svgText, { keepView = false } = {}) {
     this.done();
+    if (this.svg && svgText === this.svgText && keepView) return;
+    this.svgText = svgText;
     const prev = { scale: this.scale, x: this.x, y: this.y };
     // The SVG comes from our own WASM renderer or server, never from
     // user-supplied markup: entity labels are escaped by d2.
@@ -87,7 +93,13 @@ export class Diagram {
     this.h = vb && vb.height ? vb.height : this.svg.getBBox().height;
     this.svg.setAttribute("width", this.w);
     this.svg.setAttribute("height", this.h);
-    if (keepView) { Object.assign(this, prev); this.apply(); } else this.fit();
+    if (keepView && !this.autoFit) { Object.assign(this, prev); this.apply(); } else this.fit();
+  }
+
+  pan(dx, dy) {
+    this.autoFit = false;
+    this.x += dx; this.y += dy;
+    this.apply();
   }
 
   fit() {

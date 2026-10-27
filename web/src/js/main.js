@@ -394,6 +394,7 @@ function graphOpts() {
   return { collapse: state.gopts.collapse ? "1" : "0", dns: state.gopts.dns ? "1" : "0", identity: state.gopts.identity ? "1" : "0", top: String(state.gopts.top) };
 }
 
+let lastView = null;
 async function renderGraph(seq) {
   const note = $("#graph-note");
   if (engineState === "loading") {
@@ -403,6 +404,9 @@ async function renderGraph(seq) {
   if (seq !== refreshSeq) return;
   diagram.loading("Loading graph…");
   const query = params(graphOpts()).toString();
+  // What is being graphed, apart from Live moving the window forward: a
+  // redraw of the same view keeps the person's pan and zoom.
+  const view = JSON.stringify([graphOpts(), state.filter, state.layout, state.live ? state.span : [state.to, state.span]]);
   const serverDraw = async () => {
     const [g, svg] = await Promise.all([api("graph", graphOpts()), api("graph", { ...graphOpts(), format: "svg", theme: theme(), layout: state.layout }, true)]);
     return { graph: g, svg, by: `drawn by the server (${state.layout})` };
@@ -433,8 +437,9 @@ async function renderGraph(seq) {
   if (!out.graph.nodes?.length) {
     diagram.message("No activity in this window.");
   } else {
-    diagram.show(out.svg);
+    diagram.show(out.svg, { keepView: view === lastView });
   }
+  lastView = view;
   const g = out.graph;
   note.textContent = `${g.nodes?.length || 0} nodes · ${g.edges?.length || 0} edges` +
     (g.truncated ? ` · showing each device's top ${state.gopts.top} destinations` : "") +
@@ -560,20 +565,26 @@ function filterFor(d) {
 
 let source = null;
 let liveTimer = null;
+let pending = null;
 function setLive(on) {
   state.live = on;
   source?.close();
   source = null;
   clearInterval(liveTimer);
-  if (on) {
-    let pending = null;
-    source = new EventSource(`/api/v1/live?token=${encodeURIComponent(token)}`);
-    source.addEventListener("ingest", () => {
-      // Batches arrive every couple of seconds; refresh at most that often.
-      if (!pending) pending = setTimeout(() => { pending = null; refresh(); }, 2000);
-    });
-    liveTimer = setInterval(refresh, 30_000);
+  clearTimeout(pending);
+  pending = null;
+  if (!on) {
+    // The window stays where Live left it: nothing to fetch again.
+    saveHash();
+    renderWindow();
+    return;
   }
+  source = new EventSource(`/api/v1/live?token=${encodeURIComponent(token)}`);
+  source.addEventListener("ingest", () => {
+    // Batches arrive every couple of seconds; refresh at most that often.
+    if (!pending) pending = setTimeout(() => { pending = null; refresh(); }, 2000);
+  });
+  liveTimer = setInterval(refresh, 30_000);
   refresh();
 }
 
@@ -650,7 +661,9 @@ function init() {
     const wasLive = state.live;
     loadHash();
     $("#filter").value = state.filter;
-    if (state.live !== wasLive) setLive(state.live); else selectTab(state.tab);
+    const changed = state.live !== wasLive;
+    if (changed) setLive(state.live);
+    if (!changed || !state.live) selectTab(state.tab);
   });
   selectTab(state.tab);
   if (state.live) setLive(true);
