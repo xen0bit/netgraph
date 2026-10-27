@@ -357,6 +357,34 @@ cover the three shapes:
 The sensor needs only `cap_add: [NET_RAW]`; the examples drop everything
 else and run read-only.
 
+### What a sidecar sees
+
+A sidecar beside a server with published ports (a reverse proxy, say)
+mostly sees connections *to* it: they are `in` connections, drawn as each
+client's address pointing at the container (filter `dir:in`). Docker
+forwards a published IPv4 port with NAT and keeps the client's address.
+Some connections lose it on the way in:
+
+- **IPv6 clients**, when the compose network has no IPv6: Docker's
+  userland proxy (`docker-proxy`) accepts them on the host and opens a new
+  IPv4 connection to the container from the bridge's gateway. The same
+  goes for the host connecting to its own published port. All of these
+  show as LAN connections from one device, the gateway (`172.18.0.1` or
+  similar, often named after the host by reverse DNS), carrying every such
+  client's TLS fingerprint and user agent. To see the real clients, give
+  the network IPv6 (`enable_ipv6: true` and an IPv6 subnet on the network;
+  Docker 27 and later NAT IPv6 with `ip6tables` and keep the client's
+  address), or run the proxy and the sensor with `network_mode: host`.
+- **Docker's DNS** answers on `127.0.0.11` inside the namespace, on `lo`,
+  so a sidecar on `eth0` sees no lookups. The container's own outbound
+  connections are still named by their TLS SNI or HTTP Host.
+- **Loopback**: traffic between processes in the namespace (a proxy and
+  a backend sharing it, the sensor shipping to a server there) never
+  reaches `eth0`.
+
+The capture interface's own MAC is the sensor's device, tagged `router`
+and named after the sensor (`-name`).
+
 ## Several sensors
 
 Any number of sensors can ship to one server, each with its own `-name`

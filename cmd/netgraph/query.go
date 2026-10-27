@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -156,12 +157,13 @@ func writeSummary(w io.Writer, s *model.Summary) error {
 	t.add("precision", s.Precision)
 	t.add("devices", strconv.Itoa(s.Devices))
 	t.add("connections", strconv.Itoa(s.Flows))
+	t.add("  inbound", strconv.Itoa(s.Inbound))
 	t.add("peak concurrent", strconv.Itoa(s.PeakConns))
 	t.add("dns queries", strconv.Itoa(s.DNSQueries))
 	t.add("names", strconv.Itoa(s.Domains))
 	t.add("remote addresses", strconv.Itoa(s.RemoteIPs))
-	t.add("bytes up", model.FormatBytes(s.BytesOut))
-	t.add("bytes down", model.FormatBytes(s.BytesIn))
+	t.add("bytes sent", model.FormatBytes(s.BytesOut))
+	t.add("bytes received", model.FormatBytes(s.BytesIn))
 	if s.RawFrom != 0 {
 		t.add("exact data since", ts(s.RawFrom))
 	}
@@ -172,7 +174,7 @@ func writeSummary(w io.Writer, s *model.Summary) error {
 }
 
 func devicesTable(ds []model.Device) *table {
-	t := &table{head: []string{"DEVICE", "MAC", "VENDOR", "ADDRESSES", "HOSTNAMES", "SERVICES", "CONNS", "DNS", "UP", "DOWN", "ACTIVE"}}
+	t := &table{head: []string{"DEVICE", "MAC", "VENDOR", "ADDRESSES", "HOSTNAMES", "SERVES · SERVICES", "CONNS", "DNS", "SENT", "RECV", "ACTIVE"}}
 	for _, d := range ds {
 		vendor := d.VendorShort
 		if d.Randomized {
@@ -181,7 +183,7 @@ func devicesTable(ds []model.Device) *table {
 		if d.Role != "" {
 			vendor = strings.TrimSpace(vendor + " [" + d.Role + "]")
 		}
-		t.add(clip(d.Label, 28), d.MAC, clip(vendor, 24), join(d.IPs, 2), clip(join(d.Hostnames, 2), 32), clip(join(d.Services, 2), 32),
+		t.add(clip(d.Label, 28), d.MAC, clip(vendor, 24), join(d.IPs, 2), clip(join(d.Hostnames, 2), 32), clip(join(slices.Concat(d.Serves, d.Services), 3), 32),
 			strconv.Itoa(d.Flows), strconv.Itoa(d.DNSQueries), model.FormatBytes(d.BytesOut), model.FormatBytes(d.BytesIn),
 			ts(d.ActiveFrom)+" → "+ts(d.ActiveTo)[11:])
 	}
@@ -189,17 +191,14 @@ func devicesTable(ds []model.Device) *table {
 }
 
 func flowsTable(fl []model.Flow) *table {
-	t := &table{head: []string{"OPENED", "DEVICE", "REMOTE", "NAME", "APP", "STATE", "UP", "DOWN", "LAST"}}
+	t := &table{head: []string{"OPENED", "DIR", "CLIENT", "SERVER", "NAME", "APP", "STATE", "SENT", "RECV", "LAST"}}
 	for _, f := range fl {
 		state := f.State
 		if f.Closed {
 			state += ",closed:" + f.EndReason
 		}
-		remote := fmt.Sprintf("%s:%d/%s", f.RemoteIP, f.RemotePort, f.Proto)
-		if strings.Contains(f.RemoteIP, ":") {
-			remote = fmt.Sprintf("[%s]:%d/%s", f.RemoteIP, f.RemotePort, f.Proto)
-		}
-		t.add(ts(f.FirstSeen), clip(firstNonEmpty(f.DeviceName, f.ClientIP), 24), remote, clip(f.Name, 36), f.App, state,
+		client, server := f.Ends()
+		t.add(ts(f.FirstSeen), f.Direction, clip(client, 28), clip(server, 32), clip(f.Name, 36), f.App, state,
 			model.FormatBytes(f.BytesOut), model.FormatBytes(f.BytesIn), ts(f.LastSeen)[11:])
 	}
 	return t
