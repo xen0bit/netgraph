@@ -1,6 +1,8 @@
 package graph
 
 import (
+	"fmt"
+	"slices"
 	"testing"
 
 	"github.com/xen0bit/netgraph/internal/model"
@@ -193,6 +195,30 @@ func TestBuildIdentityDrawsSharedLeaves(t *testing.T) {
 	} {
 		if _, ok := nodeOf(g, id); ok != want {
 			t.Errorf("%s drawn = %v, want %v", id, ok, want)
+		}
+	}
+}
+
+// The layout places nodes in the order the graph lists them, so the same
+// input must always give the same order (it once followed map iteration).
+func TestBuildIsDeterministic(t *testing.T) {
+	var in Input
+	for i := range 8 {
+		dev := fmt.Sprintf("device:aa:bb:cc:00:00:%02d", i)
+		in.Devices = append(in.Devices, model.Device{ID: dev, Label: dev})
+		in.Flows = append(in.Flows, flow(dev, fmt.Sprintf("host%d.example.com", i), fmt.Sprintf("1.1.1.%d", i), 100))
+	}
+	order := func() []string {
+		var ids []string
+		for _, n := range Build(in, model.DefaultGraphOptions).Nodes {
+			ids = append(ids, n.ID)
+		}
+		return ids
+	}
+	first := order()
+	for range 20 {
+		if got := order(); !slices.Equal(got, first) {
+			t.Fatalf("node order changed:\n%v\n%v", first, got)
 		}
 	}
 }
