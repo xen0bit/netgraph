@@ -81,7 +81,7 @@ function parseFilter(s) {
     const i = tok.indexOf(":");
     const k = i > 0 ? tok.slice(0, i) : "";
     const v = tok.slice(i + 1);
-    if (["device", "ip", "domain", "port", "proto", "app", "multicast"].includes(k)) out[k] = v;
+    if (["device", "ip", "domain", "port", "proto", "app", "dir", "multicast"].includes(k)) out[k] = v;
     else if (/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(tok)) out.device = tok;
     else if (tok.split(":").length > 2) out.ip = tok;
     else out.domain = tok;
@@ -228,9 +228,9 @@ function renderSummary(s, rep) {
     as.length ? `<a class="badge sev-${top}" data-tab="anomalies" title="Most severe: ${esc(top)}">${as.length} ${as.length === 1 ? "anomaly" : "anomalies"}</a>`
       : rep?.learning ? `<span class="hour" title="Checks that compare with history start a day after the first sensor reported">learning the network</span>` : "",
     `<span><b>${s.devices}</b> devices</span>`,
-    `<span><b>${s.flows}</b> connections (peak <b>${s.peak_connections}</b>)</span>`,
+    `<span title="Connections in the window; inbound ones were opened from outside to a device here"><b>${s.flows}</b> connections${s.inbound ? ` (<b>${s.inbound}</b> inbound)` : ""}, peak <b>${s.peak_connections}</b> open</span>`,
     `<span><b>${s.dns_queries}</b> lookups of <b>${s.domains}</b> names</span>`,
-    `<span>↑ <b>${bytes(s.bytes_out)}</b> ↓ <b>${bytes(s.bytes_in)}</b></span>`,
+    `<span title="Bytes sent and received by the devices here">sent <b>${bytes(s.bytes_out)}</b> · received <b>${bytes(s.bytes_in)}</b></span>`,
     s.precision === "hour" ? `<span class="hour" title="Older than raw retention: answered from hourly rollups">hourly precision</span>` : "",
   ].join("");
 }
@@ -299,34 +299,72 @@ function brush() {
 
 const badge = (t, cls = "") => `<span class="badge ${cls}">${esc(t)}</span>`;
 
+// A connection's direction, from the local network's point of view.
+const dirs = {
+  out: ["out", "A device here connected out"],
+  in: ["in", "Opened from outside to a device here"],
+  local: ["lan", "Both ends are here"],
+  external: ["transit", "Neither end is here"],
+};
+const dirBadge = (d) => `<span class="badge dir-${esc(d)}" title="${esc(dirs[d]?.[1] || d)}">${esc(dirs[d]?.[0] || d)}</span>`;
+
+// hostPort is an address and port as they are written: [v6]:port.
+const hostPort = (ip, port) => (String(ip).includes(":") ? `[${ip}]` : ip) + (port ? `:${port}` : "");
+
+// ends is a connection's client and server as HTML: the device by name, the
+// other end by address, the server with its port (as model.Flow.Ends).
+function ends(f) {
+  const dev = `<b>${esc(f.device_name || (f.direction === "in" ? f.server_ip : f.client_ip))}</b>`;
+  if (f.direction === "in") {
+    return [`<span class="mono">${esc(hostPort(f.client_ip, f.client_port))}</span>`, `${dev}<span class="mono">:${f.server_port}/${esc(f.proto)}</span>`];
+  }
+  if (f.peer_name) return [dev, `<b>${esc(f.peer_name)}</b><span class="mono">:${f.server_port}/${esc(f.proto)}</span>`];
+  return [dev, `<span class="mono">${esc(hostPort(f.server_ip, f.server_port))}/${esc(f.proto)}</span>`];
+}
+
+// peerID is the entity a connection's row opens: what the device talked to,
+// or the client that reached it.
+const peerID = (f) => f.peer_device || (f.direction !== "in" && f.name ? `domain:${f.name}` : `ip:${f.remote_ip}`);
+
 const tables = {
   devices: {
-    cols: ["Device", "Vendor", "Addresses", "Hostnames · services", "Conns", "Lookups", "Up", "Down", "Active"],
+    cols: ["Device", "Vendor", "Addresses", "Hostnames · services", "Conns", "Lookups", "Sent", "Received", "Active"],
+    titles: { 4: "Connections; how many of them came in from outside", 6: "Bytes the device sent", 7: "Bytes the device received" },
     num: [4, 5, 6, 7],
     row: (d) => [
       `${esc(d.label)}${d.user_label && d.auto_label ? `<div class="sub">${esc(d.auto_label)}</div>` : ""}<div class="sub mono">${esc(d.mac)}</div>`,
       esc(d.randomized ? "private MAC" : d.vendor_short || d.vendor || "") + (d.role ? " " + badge(d.role) : ""),
       `<span class="mono">${(d.ips || []).map(esc).join("<br>")}</span>`,
-      [...(d.hostnames || []), ...(d.services || [])].map((x) => badge(x)).join(""),
-      d.flows, d.dns_queries, bytes(d.bytes_out), bytes(d.bytes_in),
+      (d.serves?.length ? `<span class="badge dir-in" title="Ports clients connected to">serves ${esc(d.serves.join(", "))}</span>` : "") +
+        [...(d.hostnames || []), ...(d.services || [])].map((x) => badge(x)).join(""),
+      d.flows + (d.inbound ? `<div class="sub">${d.inbound} in</div>` : ""), d.dns_queries, bytes(d.bytes_out), bytes(d.bytes_in),
       `${clock(d.active_from)}–${clock(d.active_to)}`,
     ],
     id: (d) => d.id,
     sort: (d) => -(d.bytes_in + d.bytes_out),
   },
   flows: {
-    cols: ["Opened", "Device", "Remote", "Name", "App", "State", "Up", "Down", "Last"],
-    num: [6, 7],
-    row: (f) => [
-      clock(f.first_seen),
-      esc(f.device_name || f.client_ip),
-      `<span class="mono">${esc(f.remote_ip)}:${f.remote_port}/${esc(f.proto)}</span>`,
-      esc(f.name) + (f.sni && f.qname && f.sni !== f.qname ? `<div class="sub">dns: ${esc(f.qname)}</div>` : ""),
-      esc(f.app),
-      badge(f.state, f.state) + (f.closed ? badge(f.end_reason || "closed", "closed") : ""),
-      bytes(f.bytes_out), bytes(f.bytes_in), clock(f.last_seen),
-    ],
-    id: (f) => (f.name ? `domain:${f.name}` : `ip:${f.remote_ip}`),
+    cols: ["Opened", "Dir", "Client", "", "Server", "Name", "App", "State", "Sent", "Received", "Last"],
+    titles: {
+      1: "out: a device here connected out · in: opened from outside · lan: both ends here",
+      2: "The end that opened the connection", 4: "The end that accepted it, with its port",
+      5: "What the client asked for (TLS SNI, HTTP Host) or the DNS name it looked up",
+      8: "Bytes the device sent", 9: "Bytes the device received",
+    },
+    num: [8, 9],
+    row: (f) => {
+      const [client, server] = ends(f);
+      return [
+        clock(f.first_seen),
+        dirBadge(f.direction),
+        client, `<span class="muted">→</span>`, server,
+        esc(f.name) + (f.sni && f.qname && f.sni !== f.qname ? `<div class="sub">dns: ${esc(f.qname)}</div>` : ""),
+        esc(f.app),
+        badge(f.state, f.state) + (f.closed ? badge(f.end_reason || "closed", "closed") : ""),
+        bytes(f.bytes_out), bytes(f.bytes_in), clock(f.last_seen),
+      ];
+    },
+    id: peerID,
   },
   dns: {
     cols: ["Time", "Device", "Type", "Name", "Result", "ms", "Answers (TTL)"],
@@ -379,7 +417,7 @@ function renderTable(t) {
   const rows = [...(state.data[t] || [])];
   if (spec.sort) rows.sort((a, b) => spec.sort(a) - spec.sort(b));
   const el = $(`#t-${t}`);
-  const head = `<thead><tr>${spec.cols.map((c, i) => `<th class="${spec.num?.includes(i) ? "num" : ""}">${esc(c)}</th>`).join("")}</tr></thead>`;
+  const head = `<thead><tr>${spec.cols.map((c, i) => `<th class="${spec.num?.includes(i) ? "num" : ""}"${spec.titles?.[i] ? ` title="${esc(spec.titles[i])}"` : ""}>${esc(c)}</th>`).join("")}</tr></thead>`;
   if (!rows.length) {
     el.innerHTML = head + `<tbody><tr><td class="empty" colspan="${spec.cols.length}">Nothing in this window.</td></tr></tbody>`;
     return;
@@ -459,7 +497,7 @@ async function renderGraph(seq) {
   lastView = view;
   const g = out.graph;
   note.textContent = `${g.nodes?.length || 0} nodes · ${g.edges?.length || 0} edges` +
-    (g.truncated ? ` · showing each device's top ${state.gopts.top} destinations` : "") +
+    (g.truncated ? ` · showing each device's top ${state.gopts.top} destinations and clients` : "") +
     (g.precision === "hour" ? " · hourly precision" : "") +
     ` · ${out.by}`;
 }
@@ -508,6 +546,7 @@ async function openEntity(id) {
   panel.hidden = false;
   if (id.startsWith("other:")) return openRest(id);
   if (id.startsWith("dests:")) id = id.slice("dests:".length);
+  if (id.startsWith("clients:")) id = id.slice("clients:".length);
   $("#panel-body").innerHTML = `<p class="muted">Loading ${esc(id)}…</p>`;
   let d;
   try {
@@ -532,14 +571,22 @@ async function openEntity(id) {
     <dt>addresses</dt><dd class="mono">${(dev.ips || []).map(esc).join(", ")}</dd>
     <dt>hostnames</dt><dd>${(dev.hostnames || []).map(esc).join(", ")}</dd>
     <dt>services</dt><dd>${(dev.services || []).map(esc).join(", ")}</dd>
-    <dt>traffic</dt><dd>↑ ${bytes(dev.bytes_out)} ↓ ${bytes(dev.bytes_in)} · ${dev.flows} conns · ${dev.dns_queries} lookups</dd>` : "";
+    ${dev.serves?.length ? `<dt>serves</dt><dd class="mono">${esc(dev.serves.join(", "))}</dd>` : ""}
+    <dt>traffic</dt><dd>sent ${bytes(dev.bytes_out)} · received ${bytes(dev.bytes_in)} · ${dev.flows} conns${dev.inbound ? ` (${dev.inbound} from outside)` : ""} · ${dev.dns_queries} lookups</dd>` : "";
   const link = (eid, label) => `<a data-id="${esc(eid)}">${esc(label || eid)}</a>`;
   const facts = (d.facts || []).map((f) => {
     const out = f.src === d.id;
     return `<li><time>${clock(f.first_seen)}–${clock(f.last_seen)}</time>${badge(f.rel)} ${out ? "→" : "←"} ${out ? link(f.dst, f.dst_label) : link(f.src, f.src_label)} <span class="muted">×${f.count} ${esc(f.source)}</span></li>`;
   }).join("");
-  const flows = (d.flows || []).slice(0, 100).map((f) =>
-    `<li><time>${clock(f.first_seen)}</time>${esc(f.device_name || f.client_ip)} → ${link(f.name ? "domain:" + f.name : "ip:" + f.remote_ip, f.name || f.remote_ip)}:${f.remote_port}/${esc(f.proto)} ${badge(f.state, f.state)}${f.closed ? badge(f.end_reason, "closed") : ""} <span class="muted">↑${bytes(f.bytes_out)} ↓${bytes(f.bytes_in)}</span></li>`).join("");
+  // Each connection as client → server; the peer (what the device talked
+  // to, or the client that reached it) links to its details.
+  const flows = (d.flows || []).slice(0, 100).map((f) => {
+    const dev = esc(f.device_name || (f.direction === "in" ? f.server_ip : f.client_ip));
+    const line = f.direction === "in"
+      ? `${link(peerID(f), hostPort(f.client_ip, f.client_port))} → ${dev}:${f.server_port}/${esc(f.proto)}${f.name ? ` <span class="muted">for ${esc(f.name)}</span>` : ""}`
+      : `${dev} → ${link(peerID(f), f.name || f.server_ip)}:${f.server_port}/${esc(f.proto)}`;
+    return `<li><time>${clock(f.first_seen)}</time>${dirBadge(f.direction)} ${line} ${badge(f.state, f.state)}${f.closed ? badge(f.end_reason, "closed") : ""} <span class="muted">sent ${bytes(f.bytes_out)} · received ${bytes(f.bytes_in)}</span></li>`;
+  }).join("");
   const timeline = (d.timeline || []).slice(-300).map((e) => `<li><time>${clock(e.ts)}</time>${badge(e.type)} ${esc(e.detail)}</li>`).join("");
   const flagged = state.graph?.nodes?.find((n) => n.id === id)?.attrs?.anomalies;
   const anomalyBox = flagged ? `<div class="anomaly-box"><b>Anomalies</b><ul>${flagged.split("\n").map((l) => `<li>${esc(l)}</li>`).join("")}</ul></div>` : "";
@@ -582,20 +629,25 @@ function filterFor(d) {
   return "";
 }
 
-// openRest explains a graph's "N more destinations" node: what Top N left
-// out for one device, and the two ways to see it.
+// openRest explains a graph's "N more destinations" (or "N more clients")
+// node: what Top N left out for one device, and the ways to see it.
 function openRest(id) {
   const n = state.graph?.nodes?.find((x) => x.id === id);
-  const dev = n?.attrs?.device || id.slice("other:".length);
+  const clients = id.startsWith("other:clients:");
+  const dev = n?.attrs?.device || id.slice(clients ? "other:clients:".length : "other:".length);
   const name = state.graph?.nodes?.find((x) => x.id === dev)?.label || dev;
+  const what = clients ? "clients" : "destinations";
+  const devFilter = dev.startsWith("device:") ? dev : "ip:" + dev.slice(3);
+  // Edges point client → server, so "up" is what the clients sent.
+  const traffic = clients
+    ? `they sent ${bytes(n?.bytes_out || 0)} and received ${bytes(n?.bytes_in || 0)}`
+    : `the device sent ${bytes(n?.bytes_out || 0)} and received ${bytes(n?.bytes_in || 0)}`;
   $("#panel-body").innerHTML = `
-    <h2>${esc(n?.label || "More destinations")}</h2>
-    <div class="muted">of ${esc(name)}</div>
-    <p>Top ${esc(state.gopts.top)} draws each device's busiest destinations; these ${esc(n?.attrs?.destinations || "")} add up to
-      ↑ ${bytes(n?.bytes_out || 0)} ↓ ${bytes(n?.bytes_in || 0)}.</p>
+    <h2>${esc(n?.label || "More " + what)}</h2>
+    <div class="muted">${clients ? "connecting to" : "of"} ${esc(name)}</div>
+    <p>Top ${esc(state.gopts.top)} draws each device's busiest ${what}; these ${esc(n?.attrs?.[what] || "")} are left out: ${traffic}.</p>
     <p><a data-id="${esc(dev)}">Details of ${esc(name)}</a></p>
-    <p><a data-filter="${esc(dev.startsWith("device:") ? dev : "ip:" + dev.slice(3))}">Filter the window to this device</a> to draw its destinations alone,
-      or raise Top N.</p>`;
+    <p><a data-filter="${esc(devFilter + (clients ? " dir:in" : " dir:out"))}">Filter the window to these ${what}</a>, or raise Top N.</p>`;
   $("#panel-body").onclick = (e) => {
     const a = e.target.closest("a");
     if (!a) return;

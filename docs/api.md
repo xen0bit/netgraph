@@ -13,7 +13,8 @@ Times in responses are unix milliseconds.
 | `device` | MAC, label or hostname glob |
 | `ip` | address or CIDR |
 | `domain` | DNS name / SNI / HTTP host glob |
-| `port`, `proto`, `app` | remote port, `tcp`/`udp`/number, application |
+| `port`, `proto`, `app` | the server's port (the service, whichever end is the device), `tcp`/`udp`/number, application |
+| `dir` | `out` (a device here connected out), `in` (opened from outside to a device here), `local` or `external` |
 | `multicast` | `1` to include multicast and broadcast |
 | `limit` | maximum rows |
 
@@ -21,9 +22,9 @@ Times in responses are unix milliseconds.
 
 | Endpoint | Returns |
 |---|---|
-| `GET /api/v1/summary` | `{devices, flows, peak_connections, dns_queries, domains, remote_ips, bytes_out, bytes_in, precision, ...}` |
-| `GET /api/v1/devices` | `[{id, mac, label, user_label, auto_label, vendor, vendor_short, randomized, role, ips, hostnames, services, fingerprints, user_agents, flows, dns_queries, bytes_out, bytes_in, remotes, active_from, active_to, first_seen, last_seen}]` |
-| `GET /api/v1/flows` | `[{key, proto, client_ip, client_port, device, device_name, remote_ip, remote_port, direction, app, name, sni, http_host, qname, alpn, ja4, user_agent, first_seen, last_seen, state, closed, end_reason, bytes_out, bytes_in, pkts_out, pkts_in}]`, busiest first |
+| `GET /api/v1/summary` | `{devices, flows, inbound, peak_connections, dns_queries, domains, remote_ips, bytes_out, bytes_in, precision, ...}`; bytes are what devices here sent and received |
+| `GET /api/v1/devices` | `[{id, mac, label, user_label, auto_label, vendor, vendor_short, randomized, role, ips, hostnames, services, serves, fingerprints, user_agents, flows, inbound, dns_queries, bytes_out, bytes_in, remotes, active_from, active_to, first_seen, last_seen}]`; `serves` lists the ports clients connected to (`443/tcp`), `inbound` how many connections came in from outside |
+| `GET /api/v1/flows` | `[{key, proto, client_ip, client_port, server_ip, server_port, device, device_name, device_mac, remote_ip, remote_port, peer_device, peer_name, direction, app, name, sni, http_host, qname, alpn, ja4, user_agent, first_seen, last_seen, state, closed, end_reason, bytes_out, bytes_in, pkts_out, pkts_in}]`, busiest first (see [Flows](#flows)) |
 | `GET /api/v1/dns` | `[{ts, client_ip, device, device_name, server, qname, qtype, rcode, latency_ms, answers: [{name, type, data, ttl, expires}]}]`, newest first |
 | `GET /api/v1/facts` | `[{rel, src, src_label, dst, dst_label, first_seen, last_seen, count, source, attrs}]` |
 | `GET /api/v1/timeseries?step=5m` | `{step, precision, buckets: [{ts, bytes_out, bytes_in, flows_new, dns_queries, devices}]}` |
@@ -48,6 +49,28 @@ lookups and facts of every name under it.
 curl -s -H "Authorization: Bearer $NETGRAPH_READ_TOKEN" \
   "http://netgraph.lan:8443/api/v1/flows?from=-1h&device=alice-*&app=quic" | jq .
 ```
+
+### Flows
+
+A flow is one connection. `client_*` is the end that opened it and
+`server_*` the end that accepted it. `device` is the device here it belongs
+to, and `remote_*` the other end: the server, unless `direction` is `in`
+(someone outside connected to a server here), when it is the client.
+`bytes_out`/`pkts_out` are what the device sent, `bytes_in`/`pkts_in` what
+it received, whichever end opened the connection. For an inbound
+connection, `name` is the name the client asked for (its SNI or Host),
+which is the device's own; its `ja4` and `user_agent` are the client's, and
+are recorded as facts about the client's address. `peer_device` and
+`peer_name` name the server when it is a device here too. Rows from hourly
+rollups keep only the server's port.
+
+In graphs, every `connects` edge points from client to server, and its
+`bytes_out` is what the client sent (the edge's "up"). An inbound client is
+an `ip:` node with an edge into the device; Top N keeps each device's
+busiest `top` destinations and, separately, its busiest `top` clients, and
+the rest of each become `other:<device>` ("N more destinations") and
+`other:clients:<device>` ("N more clients"). A device node's `serves` and
+`served_names` attributes list the ports and names clients asked it for.
 
 ## Ingest
 

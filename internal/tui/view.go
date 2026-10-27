@@ -229,8 +229,8 @@ type col struct {
 }
 
 var (
-	devicesCols = []col{{"DEVICE", 24}, {"VENDOR", 14}, {"ADDRESSES", 26}, {"HOSTNAMES/SERVICES", 0}, {"CONNS", 6}, {"DNS", 5}, {"UP", 8}, {"DOWN", 8}}
-	flowsCols   = []col{{"OPENED", 8}, {"DEVICE", 18}, {"REMOTE", 26}, {"NAME", 0}, {"APP", 6}, {"STATE", 13}, {"UP", 8}, {"DOWN", 8}}
+	devicesCols = []col{{"DEVICE", 24}, {"VENDOR", 14}, {"ADDRESSES", 26}, {"HOSTNAMES/SERVICES", 0}, {"CONNS", 6}, {"DNS", 5}, {"SENT", 8}, {"RECV", 8}}
+	flowsCols   = []col{{"OPENED", 8}, {"DIR", 5}, {"CLIENT", 22}, {"SERVER", 26}, {"NAME", 0}, {"APP", 6}, {"STATE", 13}, {"SENT", 8}, {"RECV", 8}}
 	dnsCols     = []col{{"TIME", 8}, {"DEVICE", 18}, {"TYPE", 5}, {"NAME", 36}, {"RCODE", 8}, {"ANSWERS", 0}}
 	factsCols   = []col{{"REL", 11}, {"FROM", 22}, {"TO", 0}, {"FIRST", 8}, {"LAST", 8}, {"N", 4}, {"SOURCE", 6}}
 )
@@ -308,6 +308,9 @@ func deviceRow(d model.Device) []string {
 		vendor = d.Role
 	}
 	ids := append(append([]string{}, d.Hostnames...), d.Services...)
+	if len(d.Serves) > 0 {
+		ids = append(ids, "serves "+strings.Join(d.Serves, ","))
+	}
 	return []string{d.Label, vendor, strings.Join(d.IPs, ","), strings.Join(ids, ", "), strconv.Itoa(d.Flows), strconv.Itoa(d.DNSQueries), model.FormatBytes(d.BytesOut), model.FormatBytes(d.BytesIn)}
 }
 
@@ -316,12 +319,8 @@ func flowRow(f model.Flow) []string {
 	if f.Closed {
 		state += "/" + f.EndReason
 	}
-	remote := fmt.Sprintf("%s:%d/%s", f.RemoteIP, f.RemotePort, f.Proto)
-	dev := f.DeviceName
-	if dev == "" {
-		dev = f.ClientIP
-	}
-	return []string{hhmmss(f.FirstSeen), dev, remote, f.Name, f.App, state, model.FormatBytes(f.BytesOut), model.FormatBytes(f.BytesIn)}
+	client, server := f.Ends()
+	return []string{hhmmss(f.FirstSeen), f.Direction, client, server, f.Name, f.App, state, model.FormatBytes(f.BytesOut), model.FormatBytes(f.BytesIn)}
 }
 
 func dnsRow(q model.DNSQuery) []string {
@@ -347,10 +346,10 @@ func (m Model) summaryView() string {
 	}
 	kv := [][2]string{
 		{"devices", strconv.Itoa(s.Devices)},
-		{"connections", fmt.Sprintf("%d (peak %d at once)", s.Flows, s.PeakConns)},
+		{"connections", fmt.Sprintf("%d, %d of them inbound (peak %d at once)", s.Flows, s.Inbound, s.PeakConns)},
 		{"dns lookups", fmt.Sprintf("%d (%d names)", s.DNSQueries, s.Domains)},
 		{"remote addresses", strconv.Itoa(s.RemoteIPs)},
-		{"traffic", fmt.Sprintf("↑ %s  ↓ %s", model.FormatBytes(s.BytesOut), model.FormatBytes(s.BytesIn))},
+		{"traffic", fmt.Sprintf("devices sent %s, received %s", model.FormatBytes(s.BytesOut), model.FormatBytes(s.BytesIn))},
 		{"precision", s.Precision},
 	}
 	var b strings.Builder
@@ -377,9 +376,10 @@ type outlineRow struct {
 	id   string
 }
 
-// outline renders the graph as a tree: each device, then what it talked to
-// and looked up, then where those names pointed. It stays readable when
-// the diagram is too large for the terminal.
+// outline renders the graph as a tree: each device, then the clients that
+// connected to it, what it talked to and looked up, and where those names
+// pointed. It stays readable when the diagram is too large for the
+// terminal.
 func outline(g *model.Graph) []outlineRow {
 	if g == nil {
 		return nil
@@ -389,8 +389,14 @@ func outline(g *model.Graph) []outlineRow {
 		nodes[n.ID] = n
 	}
 	out := map[string][]model.Edge{}
+	clients := map[string][]model.Edge{} // device -> connects edges into it from outside
 	hasIn := map[string]bool{}
 	for _, e := range g.Edges {
+		if e.Rel == model.RelConnects && nodes[e.To].Kind == model.KindDevice && nodes[e.From].Kind != model.KindDevice {
+			// A client from outside: listed under the device it reached.
+			clients[e.To] = append(clients[e.To], e)
+			continue
+		}
 		out[e.From] = append(out[e.From], e)
 		hasIn[e.To] = true
 	}
@@ -406,7 +412,15 @@ func outline(g *model.Graph) []outlineRow {
 	}
 	var walk func(id, prefix string, depth int, seen map[string]bool)
 	walk = func(id, prefix string, depth int, seen map[string]bool) {
+		in := clients[id]
 		es := out[id]
+		for i, e := range in {
+			branch := "├─ "
+			if i == len(in)-1 && len(es) == 0 {
+				branch = "└─ "
+			}
+			rows = append(rows, outlineRow{text: fmt.Sprintf("%s%saccepts %s  %s", prefix, branch, label(e.From), graph.EdgeLabel(e)), id: e.From})
+		}
 		for i, e := range es {
 			last := i == len(es)-1
 			branch, next := "├─ ", "│  "
@@ -429,7 +443,7 @@ func outline(g *model.Graph) []outlineRow {
 			continue
 		}
 		if len(out[n.ID]) == 0 && n.Kind != model.KindDevice {
-			continue
+			continue // nothing of its own, or a client listed under its device
 		}
 		rows = append(rows, outlineRow{text: label(n.ID), id: n.ID})
 		walk(n.ID, "", 0, map[string]bool{n.ID: true})
@@ -481,7 +495,7 @@ func (m Model) renderDetail(d *model.EntityDetail) string {
 		section("Connections")
 		for _, f := range d.Flows {
 			r := flowRow(f)
-			fmt.Fprintf(&b, "  %s  %s  %s %s  %s  ↑%s ↓%s\n", r[0], r[1], r[2], r[3], r[5], r[6], r[7])
+			fmt.Fprintf(&b, "  %s  %s → %s %s  %s  sent %s recv %s\n", r[0], r[2], r[3], r[4], r[6], r[7], r[8])
 		}
 	}
 	if len(d.DNS) > 0 {

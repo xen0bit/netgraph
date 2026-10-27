@@ -99,8 +99,8 @@ func RenderD2(g *model.Graph, o RenderOptions) string {
 		fmt.Fprintf(&b, "  group: {style: {fill: %q; stroke: %q; border-radius: 8; font-size: 16}}\n", group[0], group[1])
 		b.WriteString("}\n")
 	}
-	// A device's many private destinations are drawn as a grid rather
-	// than a fan: the text renderer cannot draw grids.
+	// A device's many private destinations (or clients) are drawn as a
+	// grid rather than a fan: the text renderer cannot draw grids.
 	var groups []leafGroup
 	inGroup := map[string]bool{}
 	grouped := map[int]bool{}
@@ -109,7 +109,7 @@ func RenderD2(g *model.Graph, o RenderOptions) string {
 		for _, lg := range groups {
 			for _, i := range lg.edges {
 				grouped[i] = true
-				inGroup[g.Edges[i].To] = true
+				inGroup[lg.leaf(g.Edges[i])] = true
 			}
 		}
 	}
@@ -174,19 +174,29 @@ func nodeClass(n model.Node) string {
 	return model.KindIP
 }
 
-// GroupMin is how many private destinations a device needs before they are
-// drawn as a grid.
+// GroupMin is how many private destinations (or clients) a device needs
+// before they are drawn as a grid.
 const GroupMin = 8
 
 // GroupPrefix starts the key of the grid holding a device's private
-// destinations: "dests:" + the device's ID.
+// destinations: "dests:" + the device's ID. Its inbound clients' grid is
+// ClientsPrefix + the device's ID.
 const GroupPrefix = "dests:"
 
-// leafGroup is one device's private destinations: the connects edges to
-// nodes nothing else touches.
+// leafGroup is one device's private destinations, or its private clients:
+// the connects edges between it and nodes nothing else touches.
 type leafGroup struct {
-	src   string
-	edges []int // into g.Edges, busiest first
+	src     string // the device
+	clients bool   // the edges point into the device: its clients
+	edges   []int  // into g.Edges, busiest first
+}
+
+// leaf is the end of one of the group's edges that is not its device.
+func (lg leafGroup) leaf(e model.Edge) string {
+	if lg.clients {
+		return e.From
+	}
+	return e.To
 }
 
 func leafGroups(g *model.Graph) []leafGroup {
@@ -199,30 +209,38 @@ func leafGroups(g *model.Graph) []leafGroup {
 	for _, n := range g.Nodes {
 		kinds[n.ID] = n.Kind
 	}
-	by := map[string][]int{}
+	leaf := func(id string) bool {
+		return degree[id] == 1 && kinds[id] != model.KindOther && kinds[id] != model.KindDevice
+	}
+	by := [2]map[string][]int{{}, {}} // destinations, clients
 	for i, e := range g.Edges {
-		if e.Rel != model.RelConnects || degree[e.To] != 1 || kinds[e.To] == model.KindOther || kinds[e.To] == model.KindDevice {
-			continue
+		switch {
+		case e.Rel != model.RelConnects:
+		case leaf(e.To):
+			by[0][e.From] = append(by[0][e.From], i)
+		case leaf(e.From) && kinds[e.To] == model.KindDevice:
+			by[1][e.To] = append(by[1][e.To], i)
 		}
-		by[e.From] = append(by[e.From], i)
 	}
 	var out []leafGroup
-	for _, src := range slices.Sorted(maps.Keys(by)) {
-		idx := by[src]
-		if len(idx) < GroupMin {
-			continue
+	for side, m := range by {
+		for _, src := range slices.Sorted(maps.Keys(m)) {
+			idx := m[src]
+			if len(idx) < GroupMin {
+				continue
+			}
+			slices.SortStableFunc(idx, func(a, b int) int {
+				ea, eb := g.Edges[a], g.Edges[b]
+				return cmp.Compare(eb.BytesOut+eb.BytesIn, ea.BytesOut+ea.BytesIn)
+			})
+			out = append(out, leafGroup{src: src, clients: side == 1, edges: idx})
 		}
-		slices.SortStableFunc(idx, func(a, b int) int {
-			ea, eb := g.Edges[a], g.Edges[b]
-			return cmp.Compare(eb.BytesOut+eb.BytesIn, ea.BytesOut+ea.BytesIn)
-		})
-		out = append(out, leafGroup{src: src, edges: idx})
 	}
 	return out
 }
 
-// writeGroup draws a leaf group as a grid container with one edge from its
-// device carrying the totals. Each destination keeps its ports and
+// writeGroup draws a leaf group as a grid container with one edge between
+// it and its device carrying the totals. Each member keeps its ports and
 // connection count on its own label.
 func writeGroup(b *strings.Builder, g *model.Graph, nodes map[string]model.Node, lg leafGroup) {
 	var out, in uint64
@@ -233,23 +251,31 @@ func writeGroup(b *strings.Builder, g *model.Graph, nodes map[string]model.Node,
 		in += e.BytesIn
 		conns += e.Count
 	}
-	key := GroupPrefix + lg.src
+	key, what := GroupPrefix+lg.src, "destinations"
+	if lg.clients {
+		key, what = ClientsPrefix+lg.src, "clients"
+	}
 	n := len(lg.edges)
 	cols := int(math.Ceil(math.Sqrt(float64(n) * 1.5)))
 	fmt.Fprintf(b, "%s: {label: %s; class: group; grid-columns: %d; grid-gap: 12\n", quote(key),
-		quote(fmt.Sprintf("%s · %d destinations", nodes[lg.src].Label, n)), cols)
+		quote(fmt.Sprintf("%s · %d %s", nodes[lg.src].Label, n, what)), cols)
 	for _, i := range lg.edges {
 		e := g.Edges[i]
-		leaf := nodes[e.To]
+		id := lg.leaf(e)
+		leaf := nodes[id]
 		label := nodeLabel(leaf, false)
 		if s := leafSummary(e); s != "" {
 			label += "\n" + s
 		}
-		fmt.Fprintf(b, "  %s: {label: %s; class: %s%s}\n", quote(e.To), quote(label), nodeClass(leaf), anomalyStyle(leaf.Attrs, true))
+		fmt.Fprintf(b, "  %s: {label: %s; class: %s%s}\n", quote(id), quote(label), nodeClass(leaf), anomalyStyle(leaf.Attrs, true))
 	}
 	b.WriteString("}\n")
-	fmt.Fprintf(b, "%s -> %s: %s {class: connects}\n", quote(lg.src), quote(key),
-		quote(fmt.Sprintf("%d destinations up %s down %s x%d", n, model.FormatBytes(out), model.FormatBytes(in), conns)))
+	from, to := lg.src, key
+	if lg.clients {
+		from, to = key, lg.src
+	}
+	fmt.Fprintf(b, "%s -> %s: %s {class: connects}\n", quote(from), quote(to),
+		quote(fmt.Sprintf("%d %s up %s down %s x%d", n, what, model.FormatBytes(out), model.FormatBytes(in), conns)))
 }
 
 // leafSummary is a grouped connects edge's ports and count, for its
@@ -286,6 +312,14 @@ func nodeLabel(n model.Node, ascii bool) string {
 	lines := []string{n.Label}
 	if n.Sub != "" {
 		lines = append(lines, n.Sub)
+	}
+	if v := n.Attrs["serves"]; v != "" && n.Kind == model.KindDevice {
+		ports := strings.Split(v, ",")
+		s := "serves " + strings.Join(ports[:min(len(ports), 3)], ", ")
+		if len(ports) > 3 {
+			s += fmt.Sprintf(" +%d", len(ports)-3)
+		}
+		lines = append(lines, s)
 	}
 	if addrs := n.Attrs["addresses"]; addrs != "" && n.Kind == model.KindDomain {
 		ips := strings.Split(addrs, ",")
@@ -335,6 +369,15 @@ func EdgeLabel(e model.Edge) string {
 		parts = append(parts, conns)
 		if l := e.Attrs["lookups"]; l != "" {
 			parts = append(parts, "dns x"+l)
+		}
+		if v := e.Attrs["names"]; v != "" {
+			// What an inbound connection's client asked the server for.
+			names := strings.Split(v, ",")
+			s := "for " + names[0]
+			if len(names) > 1 {
+				s += fmt.Sprintf(" +%d", len(names)-1)
+			}
+			parts = append(parts, s)
 		}
 		return strings.Join(parts, " ")
 	case model.RelQueried:

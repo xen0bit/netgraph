@@ -39,9 +39,10 @@ type Filter struct {
 	Device string // MAC, hostname or label of the local device
 	IP     string // address or CIDR, either side of a flow
 	Domain string // DNS name, SNI or HTTP host
-	Port   int    // remote port
+	Port   int    // the server's port: the service
 	Proto  string // tcp, udp, icmp, or a protocol number
 	App    string // tls, quic, http, dns, ...
+	Dir    string // out, in, local or external
 
 	Multicast bool // include multicast/broadcast traffic
 	Limit     int  // maximum rows; 0 means the endpoint's default
@@ -60,11 +61,12 @@ type Summary struct {
 	Precision  string `json:"precision"`
 	Devices    int    `json:"devices"`
 	Flows      int    `json:"flows"`
+	Inbound    int    `json:"inbound"` // of Flows, opened from outside
 	DNSQueries int    `json:"dns_queries"`
 	Domains    int    `json:"domains"`
 	RemoteIPs  int    `json:"remote_ips"`
-	BytesOut   uint64 `json:"bytes_out"`
-	BytesIn    uint64 `json:"bytes_in"`
+	BytesOut   uint64 `json:"bytes_out"` // sent by devices here
+	BytesIn    uint64 `json:"bytes_in"`  // received by them
 	PeakConns  int    `json:"peak_connections"`
 	OldestData int64  `json:"oldest_data,omitempty"` // ms; what the database still holds
 	NewestData int64  `json:"newest_data,omitempty"` // ms
@@ -92,9 +94,11 @@ type Device struct {
 	ActiveFrom   int64    `json:"active_from,omitempty"`
 	ActiveTo     int64    `json:"active_to,omitempty"`
 	Flows        int      `json:"flows"`
+	Inbound      int      `json:"inbound"`          // of Flows, opened by someone outside
+	Serves       []string `json:"serves,omitempty"` // ports others connected to: "443/tcp"
 	DNSQueries   int      `json:"dns_queries"`
-	BytesOut     uint64   `json:"bytes_out"`
-	BytesIn      uint64   `json:"bytes_in"`
+	BytesOut     uint64   `json:"bytes_out"` // what the device sent
+	BytesIn      uint64   `json:"bytes_in"`  // what it received
 	Remotes      int      `json:"remotes"`
 }
 
@@ -104,17 +108,36 @@ const (
 	StateOpened  = "opened"  // opened inside the window
 )
 
+// Connection directions, from the local network's point of view.
+const (
+	DirOut      = "out"      // a device here connected to something outside
+	DirIn       = "in"       // something outside connected to a device here
+	DirLocal    = "local"    // both ends are here
+	DirExternal = "external" // neither end is (traffic passing through)
+)
+
 // Flow is one connection's activity inside the window.
+//
+// Client and server are the connection's two ends as TCP or UDP sees them:
+// the client opened it. Remote is whichever end is not the device: the
+// server, unless the connection came in (Direction "in"), when it is the
+// client. Byte and packet counters are from the device's side: BytesOut
+// is what the device sent, whichever end opened the connection.
 type Flow struct {
 	Key        string `json:"key"`
 	Proto      string `json:"proto"`
 	ClientIP   string `json:"client_ip"`
 	ClientPort int    `json:"client_port"`
-	ClientMAC  string `json:"client_mac,omitempty"`
+	ServerIP   string `json:"server_ip"`
+	ServerPort int    `json:"server_port"`
+	DeviceMAC  string `json:"device_mac,omitempty"`
 	Device     string `json:"device,omitempty"` // device ID
 	DeviceName string `json:"device_name,omitempty"`
 	RemoteIP   string `json:"remote_ip"`
 	RemotePort int    `json:"remote_port"`
+	// The remote end's device, when it is one here too (Direction "local").
+	PeerDevice string `json:"peer_device,omitempty"`
+	PeerName   string `json:"peer_name,omitempty"`
 	Direction  string `json:"direction"` // out, in, local, external
 	App        string `json:"app,omitempty"`
 	Name       string `json:"name,omitempty"` // best name: SNI, HTTP host, then DNS
@@ -133,6 +156,56 @@ type Flow struct {
 	BytesIn    uint64 `json:"bytes_in"`
 	PktsOut    uint64 `json:"pkts_out"`
 	PktsIn     uint64 `json:"pkts_in"`
+}
+
+// Inbound reports whether the connection was opened from outside to the
+// device.
+func (f Flow) Inbound() bool { return f.Direction == DirIn }
+
+// LocalIP is the device's end of the connection.
+func (f Flow) LocalIP() string {
+	if f.Inbound() {
+		return f.ServerIP
+	}
+	return f.ClientIP
+}
+
+// Service is the server's port and protocol, "443/tcp" (or just the
+// protocol, for one without ports).
+func (f Flow) Service() string {
+	if f.ServerPort == 0 {
+		return f.Proto
+	}
+	return fmt.Sprintf("%d/%s", f.ServerPort, f.Proto)
+}
+
+// Ends is how a table shows the flow's client and server: devices by name
+// and the other end by address, the server with its port.
+//
+//	laptop               93.184.215.14:443/tcp   (out)
+//	198.51.100.7:51234   nas:443/tcp             (in)
+func (f Flow) Ends() (client, server string) {
+	dev := f.DeviceName
+	if dev == "" {
+		dev = f.LocalIP()
+	}
+	addr := func(ip string, port int) string {
+		if strings.Contains(ip, ":") {
+			ip = "[" + ip + "]"
+		}
+		if port == 0 {
+			return ip
+		}
+		return ip + ":" + strconv.Itoa(port)
+	}
+	if f.Inbound() {
+		return addr(f.ClientIP, f.ClientPort), addr(dev, f.ServerPort) + "/" + f.Proto
+	}
+	server = f.ServerIP
+	if f.PeerName != "" {
+		server = f.PeerName
+	}
+	return dev, addr(server, f.ServerPort) + "/" + f.Proto
 }
 
 // DNSQuery is one lookup.
@@ -458,6 +531,7 @@ func (f Filter) Values() url.Values {
 	set("domain", f.Domain)
 	set("proto", f.Proto)
 	set("app", f.App)
+	set("dir", f.Dir)
 	if f.Port != 0 {
 		v.Set("port", strconv.Itoa(f.Port))
 	}
@@ -487,6 +561,11 @@ func ParseFilter(v url.Values, now time.Time) (Filter, error) {
 	}
 	f.Device, f.IP, f.Domain = v.Get("device"), v.Get("ip"), v.Get("domain")
 	f.Proto, f.App = v.Get("proto"), v.Get("app")
+	switch f.Dir = v.Get("dir"); f.Dir {
+	case "", DirOut, DirIn, DirLocal, DirExternal:
+	default:
+		return f, fmt.Errorf("dir: %q is not out, in, local or external", f.Dir)
+	}
 	if s := v.Get("port"); s != "" {
 		if f.Port, err = strconv.Atoi(s); err != nil {
 			return f, fmt.Errorf("port: %w", err)

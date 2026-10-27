@@ -196,9 +196,30 @@ func protoNumber(p string) (int, bool) {
 	return n, err == nil
 }
 
+// flowCols are the columns flowWhere filters on, which raw flows and
+// traffic_hourly name differently.
+type flowCols struct {
+	names []string // a connection's names
+	port  string   // the server's port
+}
+
+var (
+	// An inbound connection's server is the device: its port is the
+	// device's own.
+	rawCols    = flowCols{names: []string{"sni", "http_host", "qname"}, port: serverPort("")}
+	hourlyCols = flowCols{names: []string{"name"}, port: "remote_port"}
+)
+
+// serverPort is the SQL for the server's port of a connections or flows
+// row, its columns qualified by alias ("c." or "").
+func serverPort(alias string) string {
+	return "(CASE WHEN " + alias + "direction = 'in' THEN " + alias + "client_port ELSE " + alias + "remote_port END)"
+}
+
 // flowWhere builds the conditions shared by flow queries over table
 // columns (raw flows and traffic_hourly name some columns differently).
-func (s *Store) flowWhere(ctx context.Context, f model.Filter, w *where, nameCols []string) error {
+func (s *Store) flowWhere(ctx context.Context, f model.Filter, w *where, cols flowCols) error {
+	nameCols := cols.names
 	if f.Device != "" {
 		ids, err := s.deviceIDs(ctx, f.Device)
 		if err != nil {
@@ -220,7 +241,10 @@ func (s *Store) flowWhere(ctx context.Context, f model.Filter, w *where, nameCol
 		w.conds = append(w.conds, "("+strings.Join(ors, " OR ")+")")
 	}
 	if f.Port != 0 {
-		w.add("remote_port = ?", f.Port)
+		w.add(cols.port+" = ?", f.Port)
+	}
+	if f.Dir != "" {
+		w.add("direction = ?", f.Dir)
 	}
 	if f.Proto != "" {
 		if n, ok := protoNumber(f.Proto); ok {
@@ -306,7 +330,7 @@ func (s *Store) flowsWhere(ctx context.Context, f model.Filter, extra string, ex
 	if extra != "" {
 		w.add(extra, extraArgs...)
 	}
-	if err := s.flowWhere(ctx, f, w, []string{"sni", "http_host", "qname"}); err != nil {
+	if err := s.flowWhere(ctx, f, w, rawCols); err != nil {
 		return nil, err
 	}
 	q := `SELECT flow_key, proto, client_ip, client_port, client_mac, client_device, remote_ip, remote_port, direction,
@@ -328,11 +352,14 @@ func (s *Store) flowsWhere(ctx context.Context, f model.Filter, extra string, ex
 		var proto, final int
 		var dev int64
 		var bo, bi, po, pi float64
-		if err := rows.Scan(&fl.Key, &proto, &fl.ClientIP, &fl.ClientPort, &fl.ClientMAC, &dev, &fl.RemoteIP, &fl.RemotePort, &fl.Direction,
+		var localIP string
+		var localPort int
+		if err := rows.Scan(&fl.Key, &proto, &localIP, &localPort, &fl.DeviceMAC, &dev, &fl.RemoteIP, &fl.RemotePort, &fl.Direction,
 			&fl.App, &fl.SNI, &fl.HTTPHost, &fl.QName, &fl.ALPN, &fl.JA4, &fl.UserAgent,
 			&fl.FirstSeen, &fl.LastSeen, &final, &fl.EndReason, &bo, &bi, &po, &pi); err != nil {
 			return nil, err
 		}
+		setEnds(&fl, localIP, localPort)
 		fl.Proto = ProtoName(proto)
 		fl.BytesOut, fl.BytesIn, fl.PktsOut, fl.PktsIn = uint64(bo+0.5), uint64(bi+0.5), uint64(po+0.5), uint64(pi+0.5)
 		fl.Name = firstNonEmpty(fl.SNI, fl.HTTPHost, fl.QName)
@@ -350,6 +377,15 @@ func (s *Store) flowsWhere(ctx context.Context, f model.Filter, extra string, ex
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	peers, err := s.peerDevices(ctx, out, from, to)
+	if err != nil {
+		return nil, err
+	}
+	for _, id := range peers {
+		if id != 0 {
+			devs[id] = true
+		}
+	}
 	labels, macs, err := s.labels(ctx, devs)
 	if err != nil {
 		return nil, err
@@ -359,8 +395,99 @@ func (s *Store) flowsWhere(ctx context.Context, f model.Filter, extra string, ex
 			out[i].Device = model.EntityID(model.KindDevice, macs[id])
 			out[i].DeviceName = labels[id]
 		}
+		if id := peers[out[i].RemoteIP]; id != 0 && out[i].Direction == model.DirLocal {
+			out[i].PeerDevice = model.EntityID(model.KindDevice, macs[id])
+			out[i].PeerName = labels[id]
+		}
 	}
 	return out, nil
+}
+
+// peerDevices maps the remote addresses of LAN-to-LAN flows to the one
+// device that held each in the window (an address two devices held maps
+// to neither).
+func (s *Store) peerDevices(ctx context.Context, flows []model.Flow, from, to int64) (map[string]int64, error) {
+	ips := map[string]bool{}
+	for _, fl := range flows {
+		if fl.Direction == model.DirLocal {
+			ips[fl.RemoteIP] = true
+		}
+	}
+	out := map[string]int64{}
+	for chunk := range slices.Chunk(slices.Sorted(maps.Keys(ips)), 500) {
+		rows, err := s.r.QueryContext(ctx, `SELECT ip.key, f.src FROM entities ip JOIN facts f ON f.dst = ip.id AND f.rel = 'has_ip'
+			WHERE ip.kind = 'ip' AND ip.key IN (`+strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",")+`)
+			AND f.last_seen >= ? AND f.first_seen < ? GROUP BY 1, 2`, append(stringsToAny(chunk), from, to)...)
+		if err != nil {
+			return nil, err
+		}
+		for rows.Next() {
+			var ip string
+			var dev int64
+			if err := rows.Scan(&ip, &dev); err != nil {
+				rows.Close()
+				return nil, err
+			}
+			if _, dup := out[ip]; dup {
+				out[ip] = 0
+			} else {
+				out[ip] = dev
+			}
+		}
+		if err := rows.Close(); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
+}
+
+// maxServes is how many of a device's served ports Devices lists.
+const maxServes = 8
+
+// serves fills each device's Serves from rows of (device, port, proto,
+// connections): the ports it accepted connections on, busiest first.
+func (s *Store) serves(ctx context.Context, byID map[int64]*model.Device, q string, args []any) error {
+	rows, err := s.r.QueryContext(ctx, q, args...)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type svc struct {
+		name string
+		n    int
+	}
+	by := map[int64][]svc{}
+	for rows.Next() {
+		var dev int64
+		var port, proto, n int
+		if err := rows.Scan(&dev, &port, &proto, &n); err != nil {
+			return err
+		}
+		by[dev] = append(by[dev], svc{model.Flow{ServerPort: port, Proto: ProtoName(proto)}.Service(), n})
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for dev, ss := range by {
+		d := byID[dev]
+		if d == nil {
+			continue
+		}
+		slices.SortFunc(ss, func(a, b svc) int { return cmp.Or(cmp.Compare(b.n, a.n), cmp.Compare(a.name, b.name)) })
+		for _, x := range ss[:min(len(ss), maxServes)] {
+			d.Serves = append(d.Serves, x.name)
+		}
+	}
+	return nil
+}
+
+// setEnds fills a flow's client and server from its device's end and its
+// remote end, as the tables keep them.
+func setEnds(fl *model.Flow, localIP string, localPort int) {
+	fl.ClientIP, fl.ClientPort, fl.ServerIP, fl.ServerPort = localIP, localPort, fl.RemoteIP, fl.RemotePort
+	if fl.Inbound() {
+		fl.ClientIP, fl.ClientPort, fl.ServerIP, fl.ServerPort = fl.RemoteIP, fl.RemotePort, localIP, localPort
+	}
 }
 
 // flowsHourly answers Flows from rollups: one row per destination per
@@ -368,13 +495,13 @@ func (s *Store) flowsWhere(ctx context.Context, f model.Filter, extra string, ex
 func (s *Store) flowsHourly(ctx context.Context, f model.Filter, from, to int64) ([]model.Flow, error) {
 	w := &where{}
 	w.add("bucket < ? AND bucket >= ?", to, hourOf(from))
-	if err := s.flowWhere(ctx, f, w, []string{"name"}); err != nil {
+	if err := s.flowWhere(ctx, f, w, hourlyCols); err != nil {
 		return nil, err
 	}
-	rows, err := s.r.QueryContext(ctx, `SELECT client_device, client_ip, remote_ip, remote_port, proto, name, max(app),
+	rows, err := s.r.QueryContext(ctx, `SELECT client_device, client_ip, remote_ip, remote_port, proto, name, direction, max(app),
 		min(bucket), max(bucket), sum(flows), sum(bytes_out), sum(bytes_in)
 		FROM traffic_hourly WHERE `+w.sql()+`
-		GROUP BY client_device, client_ip, remote_ip, remote_port, proto, name ORDER BY 11 + 12 DESC LIMIT ?`, append(w.args, limit(f, 1000, 100000))...)
+		GROUP BY client_device, client_ip, remote_ip, remote_port, proto, name, direction ORDER BY sum(bytes_out) + sum(bytes_in) DESC LIMIT ?`, append(w.args, limit(f, 1000, 100000))...)
 	if err != nil {
 		return nil, err
 	}
@@ -387,14 +514,21 @@ func (s *Store) flowsHourly(ctx context.Context, f model.Filter, from, to int64)
 		var dev int64
 		var proto, n int
 		var first, last int64
-		if err := rows.Scan(&dev, &fl.ClientIP, &fl.RemoteIP, &fl.RemotePort, &proto, &fl.Name, &fl.App, &first, &last, &n, &fl.BytesOut, &fl.BytesIn); err != nil {
+		var localIP string
+		var port int
+		if err := rows.Scan(&dev, &localIP, &fl.RemoteIP, &port, &proto, &fl.Name, &fl.Direction, &fl.App, &first, &last, &n, &fl.BytesOut, &fl.BytesIn); err != nil {
 			return nil, err
 		}
-		fl.Key = fmt.Sprintf("hourly:%d:%s:%s:%d:%d", dev, fl.ClientIP, fl.RemoteIP, fl.RemotePort, proto)
+		fl.Key = fmt.Sprintf("hourly:%d:%s:%s:%d:%d:%s", dev, localIP, fl.RemoteIP, port, proto, fl.Direction)
 		fl.Proto = ProtoName(proto)
 		fl.FirstSeen, fl.LastSeen = first, last+hourMS
 		fl.State = model.StateOpened
-		fl.Direction = "out"
+		// Rollups keep only the server's port, which is the device's own
+		// when the connection came in.
+		if fl.Direction != model.DirIn {
+			fl.RemotePort, port = port, 0
+		}
+		setEnds(&fl, localIP, port)
 		fl.PktsOut = uint64(n) // connection count; packet counts are not rolled up
 		if dev != 0 {
 			devs[dev] = true
@@ -601,20 +735,30 @@ func (s *Store) Devices(ctx context.Context, f model.Filter) ([]model.Device, er
 		connsWindow(w, from, to)
 		w.add("c.client_device != 0 AND c.multicast <= ?", mc)
 		err = scan(`SELECT c.client_device, min(c.first_seen), max(c.last_seen), count(*), count(DISTINCT c.remote_ip),
-			CAST(round(sum(`+connBytes("bytes_out", from, to)+`)) AS INTEGER), CAST(round(sum(`+connBytes("bytes_in", from, to)+`)) AS INTEGER)
+			CAST(round(sum(`+connBytes("bytes_out", from, to)+`)) AS INTEGER), CAST(round(sum(`+connBytes("bytes_in", from, to)+`)) AS INTEGER),
+			sum(c.direction = 'in')
 			FROM connections c WHERE `+w.sql()+` GROUP BY c.client_device`, w.args, func(d *model.Device, _, _ int64, v []int64) {
-			d.Flows, d.Remotes, d.BytesOut, d.BytesIn = int(v[0]), int(v[1]), uint64(v[2]), uint64(v[3])
+			d.Flows, d.Remotes, d.BytesOut, d.BytesIn, d.Inbound = int(v[0]), int(v[1]), uint64(v[2]), uint64(v[3]), int(v[4])
 		})
+		if err == nil {
+			err = s.serves(ctx, byID, `SELECT c.client_device, c.client_port, c.proto, count(*) FROM connections c
+				WHERE `+w.sql()+` AND c.direction = 'in' GROUP BY 1, 2, 3`, w.args)
+		}
 		if err == nil {
 			err = scan(`SELECT client_device, min(ts), max(ts), count(*) FROM dns WHERE ts >= ? AND ts < ? AND client_device != 0 GROUP BY client_device`,
 				[]any{from, to}, func(d *model.Device, _, _ int64, v []int64) { d.DNSQueries = int(v[0]) })
 		}
 	} else {
-		err = scan(`SELECT client_device, min(bucket), max(bucket) + 3600000, sum(flows), count(DISTINCT remote_ip), sum(bytes_out), sum(bytes_in)
+		err = scan(`SELECT client_device, min(bucket), max(bucket) + 3600000, sum(flows), count(DISTINCT remote_ip), sum(bytes_out), sum(bytes_in),
+			sum(CASE WHEN direction = 'in' THEN flows ELSE 0 END)
 			FROM traffic_hourly WHERE bucket < ? AND bucket >= ? AND client_device != 0 AND multicast <= ? GROUP BY client_device`,
 			[]any{to, hourOf(from), mc}, func(d *model.Device, _, _ int64, v []int64) {
-				d.Flows, d.Remotes, d.BytesOut, d.BytesIn = int(v[0]), int(v[1]), uint64(v[2]), uint64(v[3])
+				d.Flows, d.Remotes, d.BytesOut, d.BytesIn, d.Inbound = int(v[0]), int(v[1]), uint64(v[2]), uint64(v[3]), int(v[4])
 			})
+		if err == nil {
+			err = s.serves(ctx, byID, `SELECT client_device, remote_port, proto, sum(flows) FROM traffic_hourly
+				WHERE bucket < ? AND bucket >= ? AND client_device != 0 AND multicast <= ? AND direction = 'in' GROUP BY 1, 2, 3`, []any{to, hourOf(from), mc})
+		}
 		if err == nil {
 			err = scan(`SELECT client_device, min(bucket), max(bucket), sum(count) FROM dns_hourly WHERE bucket < ? AND bucket >= ? AND client_device != 0 GROUP BY client_device`,
 				[]any{to, hourOf(from)}, func(d *model.Device, _, _ int64, v []int64) { d.DNSQueries = int(v[0]) })
@@ -789,7 +933,7 @@ func (s *Store) Timeseries(ctx context.Context, f model.Filter, step time.Durati
 	w := &where{}
 	if prec == model.PrecisionExact {
 		flowsWindow(w, from, to)
-		if err := s.flowWhere(ctx, f, w, []string{"sni", "http_host", "qname"}); err != nil {
+		if err := s.flowWhere(ctx, f, w, rawCols); err != nil {
 			return nil, err
 		}
 		rows, err := s.r.QueryContext(ctx, `SELECT flow_key, t_start, t_end, first_seen, bytes_out, bytes_in, client_device FROM `+flowsFrom+` WHERE `+w.sql(), w.args...)
@@ -856,7 +1000,7 @@ func (s *Store) Timeseries(ctx context.Context, f model.Filter, step time.Durati
 		return ts, nil
 	}
 	w.add("bucket < ? AND bucket >= ?", to, hourOf(from))
-	if err := s.flowWhere(ctx, f, w, []string{"name"}); err != nil {
+	if err := s.flowWhere(ctx, f, w, hourlyCols); err != nil {
 		return nil, err
 	}
 	rows, err := s.r.QueryContext(ctx, `SELECT bucket, sum(flows), sum(bytes_out), sum(bytes_in), count(DISTINCT client_device) FROM traffic_hourly WHERE `+w.sql()+` GROUP BY bucket`, w.args...)
@@ -950,11 +1094,11 @@ func (s *Store) Graph(ctx context.Context, f model.Filter, o model.GraphOptions)
 		// Pick each device's busiest destinations in SQL first, then fetch
 		// only their connections: the graph shows at most TopN per device,
 		// and a long window holds far more.
-		cond, args, names, rest, err := s.topDestinations(ctx, f, from, to, o)
+		cond, args, names, rest, restIn, err := s.topDestinations(ctx, f, from, to, o)
 		if err != nil {
 			return nil, err
 		}
-		in.Rest = rest
+		in.Rest, in.RestIn = rest, restIn
 		if in.Flows, err = s.flowsWhere(ctx, ff, cond, args); err != nil {
 			return nil, err
 		}
@@ -975,9 +1119,13 @@ func (s *Store) Graph(ctx context.Context, f model.Filter, o model.GraphOptions)
 		}
 	}
 	// Facts about what is in play only: answers and SNI for its names, and
-	// (with Identity) what its devices are.
+	// (with Identity) what its devices are. The name an inbound connection
+	// asked for is the device's own, not a destination.
 	names := map[string]bool{}
 	for _, fl := range in.Flows {
+		if fl.Inbound() {
+			continue
+		}
 		for _, n := range []string{fl.Name, fl.QName} {
 			if n != "" {
 				names[n] = true
@@ -1032,32 +1180,39 @@ func (s *Store) Graph(ctx context.Context, f model.Filter, o model.GraphOptions)
 }
 
 // destExpr is where a connection points in a graph: the name it was reached
-// by when collapsing, else its remote address. It matches graph.Build's
+// by when collapsing, else its remote address. An inbound connection's peer
+// is the client that opened it, always by address. It matches graph.Build's
 // choice for everything but LAN-to-LAN connections, which it maps to devices.
 func destExpr(collapse bool) string {
 	if collapse {
-		return `CASE WHEN c.direction != 'local' AND coalesce(nullif(c.sni, ''), nullif(c.http_host, ''), nullif(c.qname, '')) IS NOT NULL
+		return `CASE WHEN c.direction NOT IN ('local', 'in') AND coalesce(nullif(c.sni, ''), nullif(c.http_host, ''), nullif(c.qname, '')) IS NOT NULL
 			THEN 'domain:' || coalesce(nullif(c.sni, ''), nullif(c.http_host, ''), nullif(c.qname, '')) ELSE 'ip:' || c.remote_ip END`
 	}
 	return `'ip:' || c.remote_ip`
 }
 
+// srcExpr is a connection's device in topDestinations' keys: "o" or "i"
+// (outbound, or inbound: Top N keeps each side on its own), then "d<entity
+// id>" or "c<address>".
+const srcExpr = `(CASE WHEN c.direction = 'in' THEN 'i' ELSE 'o' END) || (CASE WHEN c.client_device != 0 THEN 'd' || c.client_device ELSE 'c' || c.client_ip END)`
+
 // topDestinations returns a condition selecting the connections to each
-// device's TopN destinations by traffic in the window, the DNS names among
-// those destinations, and per source what the rest add up to. With Sites a
-// destination is a registrable domain, as the graph draws it.
-func (s *Store) topDestinations(ctx context.Context, f model.Filter, from, to int64, o model.GraphOptions) (string, []any, map[string]bool, map[string]graph.Rest, error) {
+// device's TopN destinations by traffic in the window, and from its TopN
+// inbound clients; the DNS names among those destinations; and per device
+// what the rest of each add up to. With Sites a destination is a
+// registrable domain, as the graph draws it.
+func (s *Store) topDestinations(ctx context.Context, f model.Filter, from, to int64, o model.GraphOptions) (string, []any, map[string]bool, map[string]graph.Rest, map[string]graph.Rest, error) {
 	w := &where{}
 	connsWindow(w, from, to)
-	if err := s.flowWhere(ctx, f, w, []string{"sni", "http_host", "qname"}); err != nil {
-		return "", nil, nil, nil, err
+	if err := s.flowWhere(ctx, f, w, rawCols); err != nil {
+		return "", nil, nil, nil, nil, err
 	}
 	dest := destExpr(o.Collapse)
-	rows, err := s.r.QueryContext(ctx, `SELECT CASE WHEN c.client_device != 0 THEN 'd' || c.client_device ELSE 'c' || c.client_ip END AS src, `+dest+` AS dest,
+	rows, err := s.r.QueryContext(ctx, `SELECT `+srcExpr+` AS src, `+dest+` AS dest,
 		sum(`+connBytes("bytes_out", from, to)+`), sum(`+connBytes("bytes_in", from, to)+`), count(*)
 		FROM connections c WHERE `+w.sql()+` GROUP BY src, dest`, w.args...)
 	if err != nil {
-		return "", nil, nil, nil, err
+		return "", nil, nil, nil, nil, err
 	}
 	defer rows.Close()
 	type group struct {
@@ -1073,7 +1228,7 @@ func (s *Store) topDestinations(ctx context.Context, f model.Filter, from, to in
 		var out, in float64
 		var n int
 		if err := rows.Scan(&src, &d, &out, &in, &n); err != nil {
-			return "", nil, nil, nil, err
+			return "", nil, nil, nil, nil, err
 		}
 		key := d
 		if name, ok := strings.CutPrefix(d, "domain:"); ok && o.Sites {
@@ -1093,7 +1248,7 @@ func (s *Store) topDestinations(ctx context.Context, f model.Filter, from, to in
 		g.conns += n
 	}
 	if err := rows.Err(); err != nil {
-		return "", nil, nil, nil, err
+		return "", nil, nil, nil, nil, err
 	}
 	var keys []any
 	names := map[string]bool{}
@@ -1124,49 +1279,62 @@ func (s *Store) topDestinations(ctx context.Context, f model.Filter, from, to in
 			}
 		}
 	}
-	bySource, err := s.restSources(ctx, rest)
+	out, in, err := s.restSources(ctx, rest)
 	if err != nil {
-		return "", nil, nil, nil, err
+		return "", nil, nil, nil, nil, err
 	}
 	if len(keys) == 0 {
-		return "0", nil, names, bySource, nil
+		return "0", nil, names, out, in, nil
 	}
 	marks := strings.TrimSuffix(strings.Repeat("?,", len(keys)), ",")
-	cond := `(CASE WHEN c.client_device != 0 THEN 'd' || c.client_device ELSE 'c' || c.client_ip END) || '|' || ` + dest + ` IN (` + marks + `)`
-	return cond, keys, names, bySource, nil
+	cond := srcExpr + ` || '|' || ` + dest + ` IN (` + marks + `)`
+	return cond, keys, names, out, in, nil
 }
 
 // restSources rekeys topDestinations' per-source totals from its SQL keys
-// ("d<entity id>", "c<client ip>") to the graph's source IDs.
-func (s *Store) restSources(ctx context.Context, rest map[string]graph.Rest) (map[string]graph.Rest, error) {
-	out := map[string]graph.Rest{}
+// ("od<entity id>", "ic<client ip>", ...) to the graph's source IDs, split
+// into what was left out of outbound destinations and of inbound clients.
+func (s *Store) restSources(ctx context.Context, rest map[string]graph.Rest) (map[string]graph.Rest, map[string]graph.Rest, error) {
+	out, in := map[string]graph.Rest{}, map[string]graph.Rest{}
+	side := func(k string) map[string]graph.Rest {
+		if strings.HasPrefix(k, "i") {
+			return in
+		}
+		return out
+	}
 	var ids []int64
 	for k, r := range rest {
-		if ip, ok := strings.CutPrefix(k, "c"); ok {
-			out[model.EntityID(model.KindIP, ip)] = r
-		} else if id, err := strconv.ParseInt(strings.TrimPrefix(k, "d"), 10, 64); err == nil {
+		if ip, ok := strings.CutPrefix(k[1:], "c"); ok {
+			side(k)[model.EntityID(model.KindIP, ip)] = r
+		} else if id, err := strconv.ParseInt(strings.TrimPrefix(k[1:], "d"), 10, 64); err == nil && !slices.Contains(ids, id) {
 			ids = append(ids, id)
 		}
 	}
 	for chunk := range slices.Chunk(ids, 500) {
 		rows, err := s.r.QueryContext(ctx, `SELECT id, kind, key FROM entities WHERE id IN (`+idList(chunk)+`)`)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		for rows.Next() {
 			var id int64
 			var kind, key string
 			if err := rows.Scan(&id, &kind, &key); err != nil {
 				rows.Close()
-				return nil, err
+				return nil, nil, err
 			}
-			out[model.EntityID(kind, key)] = rest["d"+strconv.FormatInt(id, 10)]
+			d := "d" + strconv.FormatInt(id, 10)
+			if r, ok := rest["o"+d]; ok {
+				out[model.EntityID(kind, key)] = r
+			}
+			if r, ok := rest["i"+d]; ok {
+				in[model.EntityID(kind, key)] = r
+			}
 		}
 		if err := rows.Close(); err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 	}
-	return out, nil
+	return out, in, nil
 }
 
 // dnsNames returns the window's lookups, only of the given names when
@@ -1292,12 +1460,13 @@ func (s *Store) Summary(ctx context.Context, f model.Filter) (*model.Summary, er
 	if sum.Precision == model.PrecisionExact {
 		w := &where{}
 		connsWindow(w, from, to)
-		if err := s.flowWhere(ctx, f, w, []string{"sni", "http_host", "qname"}); err != nil {
+		if err := s.flowWhere(ctx, f, w, rawCols); err != nil {
 			return nil, err
 		}
 		var bo, bi float64
-		if err := s.r.QueryRowContext(ctx, `SELECT count(*), count(DISTINCT remote_ip), coalesce(sum(`+connBytes("bytes_out", from, to)+`), 0), coalesce(sum(`+connBytes("bytes_in", from, to)+`), 0)
-			FROM connections c WHERE `+w.sql(), w.args...).Scan(&sum.Flows, &sum.RemoteIPs, &bo, &bi); err != nil {
+		if err := s.r.QueryRowContext(ctx, `SELECT count(*), count(DISTINCT remote_ip), coalesce(sum(`+connBytes("bytes_out", from, to)+`), 0), coalesce(sum(`+connBytes("bytes_in", from, to)+`), 0),
+			coalesce(sum(direction = 'in'), 0)
+			FROM connections c WHERE `+w.sql(), w.args...).Scan(&sum.Flows, &sum.RemoteIPs, &bo, &bi, &sum.Inbound); err != nil {
 			return nil, err
 		}
 		sum.BytesOut, sum.BytesIn = uint64(bo+0.5), uint64(bi+0.5)
@@ -1337,8 +1506,9 @@ func (s *Store) Summary(ctx context.Context, f model.Filter) (*model.Summary, er
 			mc = 1
 		}
 		if err := s.r.QueryRowContext(ctx, `SELECT coalesce(sum(flows), 0), count(DISTINCT remote_ip), coalesce(sum(bytes_out), 0), coalesce(sum(bytes_in), 0),
-			count(DISTINCT nullif(name, '')) FROM traffic_hourly WHERE bucket < ? AND bucket >= ? AND multicast <= ?`, to, hourOf(from), mc).
-			Scan(&sum.Flows, &sum.RemoteIPs, &sum.BytesOut, &sum.BytesIn, &sum.Domains); err != nil {
+			count(DISTINCT nullif(name, '')), coalesce(sum(CASE WHEN direction = 'in' THEN flows ELSE 0 END), 0)
+			FROM traffic_hourly WHERE bucket < ? AND bucket >= ? AND multicast <= ?`, to, hourOf(from), mc).
+			Scan(&sum.Flows, &sum.RemoteIPs, &sum.BytesOut, &sum.BytesIn, &sum.Domains, &sum.Inbound); err != nil {
 			return nil, err
 		}
 		if err := s.r.QueryRowContext(ctx, `SELECT coalesce(sum(count), 0) FROM dns_hourly WHERE bucket < ? AND bucket >= ?`, to, hourOf(from)).Scan(&sum.DNSQueries); err != nil {

@@ -120,6 +120,28 @@ td .sub { color: var(--fg-2); font-size: 12px; }
 .badge.sev-medium { background: #ffedd5; color: #7c2d12; }
 .badge.sev-low { background: #fef9c3; color: #713f12; }
 .summary a.badge { cursor: pointer; font-size: 12px; }
+.badge.dir-in { background: #ede9fe; color: #4c1d95; }
+.badge.dir-out { background: #dbeafe; color: #1e3a8a; }
+.badge.dir-local { background: #dcfce7; color: #14532d; }
+td .muted { color: var(--fg-2); }
+.legend { color: var(--fg-2); font-size: 12px; padding: 0 16px 8px; display: flex; flex-wrap: wrap; gap: 4px 16px; }
+.legend b { color: var(--fg); font-weight: 600; }
+.legend .sw { display: inline-block; width: 12px; height: 10px; border: 1.5px solid; border-radius: 3px; vertical-align: -1px; margin-right: 4px; }
+.legend .sw.oval { border-radius: 6px; }
+.legend .sw.dashed { border-style: dashed; }
+/* The graph's palette (graph/render.go), light and dark. */
+.legend .sw.dev { border-color: #1d4ed8; background: #dbeafe; }
+.legend .sw.name { border-color: #15803d; background: #dcfce7; }
+.legend .sw.addr { border-color: #4b5563; background: #f3f4f6; }
+.legend .sw.rest { border-color: #9ca3af; }
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) .legend .sw.dev { border-color: #93c5fd; background: #1e3a8a; }
+  :root:not([data-theme="light"]) .legend .sw.name { border-color: #86efac; background: #14532d; }
+  :root:not([data-theme="light"]) .legend .sw.addr { border-color: #d1d5db; background: #374151; }
+}
+:root[data-theme="dark"] .legend .sw.dev { border-color: #93c5fd; background: #1e3a8a; }
+:root[data-theme="dark"] .legend .sw.name { border-color: #86efac; background: #14532d; }
+:root[data-theme="dark"] .legend .sw.addr { border-color: #d1d5db; background: #374151; }
 .anomaly-box { border: 1px solid var(--err); border-radius: 8px; padding: 8px 12px; margin-bottom: 12px; }
 .anomaly-box b { color: var(--err); }
 .anomaly-box ul { margin: 4px 0 0; padding-left: 18px; }

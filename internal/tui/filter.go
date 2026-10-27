@@ -43,10 +43,17 @@ func parseFilter(s string) (model.Filter, error) {
 			f.Proto = v
 		case "app":
 			f.App = v
+		case "dir", "direction":
+			switch v {
+			case model.DirOut, model.DirIn, model.DirLocal, model.DirExternal:
+			default:
+				return f, fmt.Errorf("dir: %q is not out, in, local or external", v)
+			}
+			f.Dir = v
 		case "multicast":
 			f.Multicast = v == "1" || v == "true" || v == "yes"
 		default:
-			return f, fmt.Errorf("unknown filter %q (device, ip, domain, port, proto, app, multicast)", k)
+			return f, fmt.Errorf("unknown filter %q (device, ip, domain, port, proto, app, dir, multicast)", k)
 		}
 	}
 	return f, nil
@@ -68,6 +75,7 @@ func filterString(f model.Filter) string {
 	}
 	add("proto", f.Proto)
 	add("app", f.App)
+	add("dir", f.Dir)
 	if f.Multicast {
 		add("multicast", "1")
 	}

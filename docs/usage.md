@@ -27,7 +27,8 @@ Filters narrow any query:
 | `-device` | a device's MAC, label or any hostname it had (glob: `alice-*`) |
 | `-ip` | an address or CIDR on either side |
 | `-domain` | a DNS name, TLS SNI or HTTP host (glob; a plain word matches as a substring) |
-| `-port`, `-proto`, `-app` | remote port; `tcp`/`udp`/`icmp`; `tls`, `quic`, `http`, `dns`, ... |
+| `-port`, `-proto`, `-app` | the server's port (the service); `tcp`/`udp`/`icmp`; `tls`, `quic`, `http`, `dns`, ... |
+| `-dir` | `out` (devices connecting out), `in` (connections from outside to a server here), `local`, `external` |
 | `-multicast` | include multicast and broadcast traffic (hidden by default) |
 
 ## The CLI
@@ -43,25 +44,26 @@ WINDOW             2026-10-25 15:48:34 → 2026-10-25 16:48:34
 precision          exact
 devices            6
 connections        11
+  inbound          0
 peak concurrent    4
 dns queries        5
 names              5
 remote addresses   7
-bytes up           6.7kB
-bytes down         57.9kB
+bytes sent         6.7kB
+bytes received     57.9kB
 
 $ netgraph query devices -from -1h
-DEVICE           MAC                VENDOR          ADDRESSES              HOSTNAMES        SERVICES        CONNS  DNS  UP     DOWN
-alice-iphone     3c:22:fb:01:02:03  Apple           192.168.1.23           alice-iphone                     7      4    5.9kB  57.6kB
-Google aa:bb:cc  f4:f5:d8:aa:bb:cc  Google          192.168.1.50,fd00::50                                   2      1    334B   239B
-desktop-1        00:15:5d:01:02:03  Microsoft       192.168.1.60           desktop-1                        1      0    96B    0B
-BRN001BA9        00:1b:a9:44:55:66  Brother         192.168.1.40           BRN001BA9.local  Office Printer  0      0    0B     0B
-core-switch      00:1b:21:aa:00:01  Intel [switch]                                                          0      0    0B     0B
+DEVICE           MAC                VENDOR          ADDRESSES              HOSTNAMES        SERVES · SERVICES  CONNS  DNS  SENT   RECV
+alice-iphone     3c:22:fb:01:02:03  Apple           192.168.1.23           alice-iphone                        7      4    5.9kB  57.6kB
+Google aa:bb:cc  f4:f5:d8:aa:bb:cc  Google          192.168.1.50,fd00::50                                      2      1    334B   239B
+desktop-1        00:15:5d:01:02:03  Microsoft       192.168.1.60           desktop-1                           1      0    96B    0B
+BRN001BA9        00:1b:a9:44:55:66  Brother         192.168.1.40           BRN001BA9.local  Office Printer     0      0    0B     0B
+core-switch      00:1b:21:aa:00:01  Intel [switch]                                                             0      0    0B     0B
 
 $ netgraph query flows -from -1h -device alice-iphone
-OPENED               DEVICE        REMOTE                 NAME              APP   STATE              UP     DOWN    LAST
-2026-10-25 16:38:35  alice-iphone  93.184.216.34:443/tcp  www.example.com   tls   opened,closed:fin  3.2kB  56.1kB  16:40:34
-2026-10-25 16:38:39  alice-iphone  203.0.113.10:443/udp   quic.example.org  quic  opened,closed:shutdown  2.5kB  1.2kB   16:38:39
+OPENED               DIR  CLIENT        SERVER                 NAME              APP   STATE                   SENT   RECV    LAST
+2026-10-25 16:38:35  out  alice-iphone  93.184.216.34:443/tcp  www.example.com   tls   opened,closed:fin       3.2kB  56.1kB  16:40:34
+2026-10-25 16:38:39  out  alice-iphone  203.0.113.10:443/udp   quic.example.org  quic  opened,closed:shutdown  2.5kB  1.2kB   16:38:39
 
 $ netgraph query dns -from -1h
 TIME                 DEVICE           TYPE  NAME               RCODE     MS    ANSWERS
@@ -126,7 +128,7 @@ alice-iphone  (Apple · 192.168.1.23)
 | `t` | cycle 15m, 1h, 6h, 24h, 7d ending now |
 | `n` | end the window now |
 | `l` | live: follow now, refreshing every 5 s |
-| `/` | filter: `device:alice-* domain:*.example.com ip:10.0.0.0/8 port:443 proto:udp app:quic` (a bare word is a domain) |
+| `/` | filter: `device:alice-* domain:*.example.com ip:10.0.0.0/8 port:443 dir:in proto:udp app:quic` (a bare word is a domain) |
 | `x` | clear the filter |
 | `enter` | details of the selected row: facts, connections, lookups, timeline |
 | Graph: `c` `d` `w` `i` | collapse, lookups, sites, identity |
@@ -145,11 +147,16 @@ page asks for it once and keeps it in the browser.
   across the traffic timeline to zoom into a slice. **Live** follows now
   and refreshes as sensors deliver.
 - **Filter:** the same syntax as the TUI.
-- **Graph:** devices, the names they looked up and reached, and where those
-  pointed (see [the graph](concepts.md#the-graph) for how it stays
-  readable). Drag to pan, scroll to zoom, click a node for its details; a
-  device's grid of destinations opens the device, and "N more
-  destinations" says how to see them.
+- **Graph:** devices, the names they looked up and reached, where those
+  pointed, and the clients that connected in to them (see [the
+  graph](concepts.md#the-graph) for how it stays readable). Every
+  connection points from client to server, labelled with the server's port;
+  a legend under the graph says how to read it. Drag to pan, scroll to
+  zoom, click a node for its details; a device's grid of destinations or
+  clients opens the device, and "N more destinations" or "N more clients"
+  says how to see them.
+- **Connections:** each connection's direction (`out`, `in`, `lan`), client
+  and server with the server's port, and what the device sent and received.
   Download the SVG or the d2 script. The graph is laid out in your
   browser by the same Go code as the server, compiled to WebAssembly
   (dagre). The **elk** layout is drawn by the server. While the next

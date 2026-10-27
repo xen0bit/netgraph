@@ -57,7 +57,7 @@ func (b *backendFlags) open() (model.Backend, func(), error) {
 type filterFlags struct {
 	from, to                  string
 	device, ip, domain, proto string
-	app                       string
+	app, dir                  string
 	port, limit               int
 	multicast                 bool
 }
@@ -68,9 +68,10 @@ func (f *filterFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&f.device, "device", "", "device MAC, hostname or label (glob)")
 	fs.StringVar(&f.ip, "ip", "", "address or CIDR on either side")
 	fs.StringVar(&f.domain, "domain", "", "DNS name, SNI or HTTP host (glob)")
-	fs.IntVar(&f.port, "port", 0, "remote port")
+	fs.IntVar(&f.port, "port", 0, "server port (the service)")
 	fs.StringVar(&f.proto, "proto", "", "tcp, udp, icmp or a protocol number")
 	fs.StringVar(&f.app, "app", "", "application: tls, quic, http, dns, ...")
+	fs.StringVar(&f.dir, "dir", "", "direction: out (devices connecting out), in (connections from outside), local or external")
 	fs.BoolVar(&f.multicast, "multicast", false, "include multicast and broadcast traffic")
 	fs.IntVar(&f.limit, "limit", 0, "maximum rows (0: default)")
 }
@@ -88,7 +89,7 @@ func (f *filterFlags) filter() (model.Filter, error) {
 	if !from.Before(to) {
 		return model.Filter{}, errors.New("-from must be before -to")
 	}
-	return model.Filter{From: from, To: to, Device: f.device, IP: f.ip, Domain: f.domain, Port: f.port, Proto: f.proto, App: f.app, Multicast: f.multicast, Limit: f.limit}, nil
+	return model.Filter{From: from, To: to, Device: f.device, IP: f.ip, Domain: f.domain, Port: f.port, Proto: f.proto, App: f.app, Dir: f.dir, Multicast: f.multicast, Limit: f.limit}, nil
 }
 
 func envOr(k, def string) string {
