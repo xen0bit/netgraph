@@ -121,7 +121,7 @@ func TestEndToEnd(t *testing.T) {
 		if err != nil {
 			t.Fatalf("%s: %v", format, err)
 		}
-		want := map[string]string{"d2": `"domain:www.example.com"`, "svg": "<svg", "txt": "www.example.com"}[format]
+		want := map[string]string{"d2": `"site:example.com"`, "svg": "<svg", "txt": "example.com"}[format]
 		if !strings.Contains(string(body), want) {
 			t.Errorf("%s output lacks %q:\n%.400s", format, want, body)
 		}

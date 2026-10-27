@@ -27,6 +27,7 @@ type Backend interface {
 	Entity(ctx context.Context, id string, f Filter) (*EntityDetail, error)
 	Sensors(ctx context.Context) ([]Sensor, error)
 	WiFi(ctx context.Context, f Filter) ([]WiFiNetwork, error)
+	Anomalies(ctx context.Context, f Filter) (*AnomalyReport, error)
 }
 
 // Filter selects what a query covers. The window is half-open: [From, To).
@@ -206,6 +207,10 @@ const (
 	KindUPnP        = "upnp"
 	KindLLDP        = "lldp"
 	KindSSID        = "ssid"
+	// Graph only: the names under one registrable domain (Sites), and the
+	// destinations of one device that Top N summarised.
+	KindSite  = "site"
+	KindOther = "other"
 )
 
 // EntityID builds an entity ID.
@@ -248,10 +253,15 @@ type GraphOptions struct {
 	// DNS adds device -> domain edges for lookups and domain -> address
 	// edges for answers.
 	DNS bool `json:"dns"`
+	// Sites groups names by registrable domain: one "time.com" node for
+	// www.time.com, auth.time.com and the rest.
+	Sites bool `json:"sites"`
+	// Anomalies marks the nodes that the window's anomalies are about.
+	Anomalies bool `json:"anomalies"`
 }
 
 // DefaultGraphOptions is what the UIs start from.
-var DefaultGraphOptions = GraphOptions{Collapse: true, TopN: 15, DNS: true}
+var DefaultGraphOptions = GraphOptions{Collapse: true, TopN: 15, DNS: true, Sites: true, Anomalies: true}
 
 // Values encodes graph options as query parameters.
 func (o GraphOptions) Values() map[string]string {
@@ -261,7 +271,8 @@ func (o GraphOptions) Values() map[string]string {
 		}
 		return "0"
 	}
-	return map[string]string{"collapse": b(o.Collapse), "identity": b(o.Identity), "dns": b(o.DNS), "top": strconv.Itoa(o.TopN)}
+	return map[string]string{"collapse": b(o.Collapse), "identity": b(o.Identity), "dns": b(o.DNS), "sites": b(o.Sites),
+		"anomalies": b(o.Anomalies), "top": strconv.Itoa(o.TopN)}
 }
 
 // ParseGraphOptions decodes query parameters over DefaultGraphOptions.
@@ -279,6 +290,8 @@ func ParseGraphOptions(q url.Values) GraphOptions {
 	o.Collapse = flag("collapse", o.Collapse)
 	o.Identity = flag("identity", o.Identity)
 	o.DNS = flag("dns", o.DNS)
+	o.Sites = flag("sites", o.Sites)
+	o.Anomalies = flag("anomalies", o.Anomalies)
 	if n, err := strconv.Atoi(q.Get("top")); err == nil {
 		o.TopN = n
 	}
@@ -357,6 +370,61 @@ type Sensor struct {
 	LastSeen   int64          `json:"last_seen"`
 	Interfaces []string       `json:"interfaces,omitempty"`
 	Stats      map[string]any `json:"stats,omitempty"`
+}
+
+// Anomaly kinds.
+const (
+	AnomalyNewDevice      = "new_device"      // a device used an address on the LAN for the first time
+	AnomalyNewDestination = "new_destination" // a device reached a site it never had
+	AnomalyUploadSpike    = "upload_spike"    // a device sent far more than its history
+	AnomalyBeacon         = "beacon"          // a device connects somewhere on a fixed period
+	AnomalyDNSFailures    = "dns_failures"    // many lookups of names that do not exist
+	AnomalyDNSTunnel      = "dns_tunnel"      // many long, unique names under one site
+	AnomalyRogueAP        = "rogue_ap"        // a network name with an unexpected access point
+)
+
+// Anomaly severities, least to most.
+const (
+	SeverityLow    = "low"
+	SeverityMedium = "medium"
+	SeverityHigh   = "high"
+)
+
+// SeverityRank orders severities: 0 for unknown, then low, medium, high.
+func SeverityRank(s string) int {
+	switch s {
+	case SeverityLow:
+		return 1
+	case SeverityMedium:
+		return 2
+	case SeverityHigh:
+		return 3
+	}
+	return 0
+}
+
+// Anomaly is something in a window that stands out, from the network's own
+// history or from how hosts normally behave, with the evidence for it.
+type Anomaly struct {
+	Kind       string            `json:"kind"`
+	Severity   string            `json:"severity"`
+	TS         int64             `json:"ts"`               // ms; when it started in the window
+	Device     string            `json:"device,omitempty"` // device ID
+	DeviceName string            `json:"device_name,omitempty"`
+	Entity     string            `json:"entity,omitempty"` // what it is about: a site, address, SSID or access point ID
+	Summary    string            `json:"summary"`
+	Evidence   map[string]string `json:"evidence,omitempty"`
+}
+
+// AnomalyReport is a window's anomalies. Checks that compare with history
+// need a day of it before the window; until then Learning is set and only
+// the checks that need no history run.
+type AnomalyReport struct {
+	FromMS    int64     `json:"from"`
+	ToMS      int64     `json:"to"`
+	SinceMS   int64     `json:"since,omitempty"` // when the first sensor first reported
+	Learning  bool      `json:"learning,omitempty"`
+	Anomalies []Anomaly `json:"anomalies"`
 }
 
 // WiFiNetwork is one SSID an access point was seen broadcasting. It exists

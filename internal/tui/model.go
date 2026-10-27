@@ -457,6 +457,9 @@ func (m Model) graphKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "d":
 		m.gopts.DNS = !m.gopts.DNS
 		return m, m.fetch()
+	case "w":
+		m.gopts.Sites = !m.gopts.Sites
+		return m, m.fetch()
 	case ">", ".":
 		m.gopts.TopN = min(m.gopts.TopN+5, 200)
 		return m, m.fetch()

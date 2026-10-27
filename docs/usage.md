@@ -81,6 +81,7 @@ TIME                 DEVICE           TYPE  NAME               RCODE     MS    A
 | `query entity ID` | everything about one entity (`device:<mac>`, `ip:<addr>`, `domain:<name>`), with a timeline |
 | `query sensors` | sensors and their counters (packets, kernel drops, events dropped) |
 | `query wifi` | Wi-Fi networks, security, channel and associated clients |
+| `query anomalies` | what stands out in the window, most severe first ([anomalies](concepts.md#anomalies)) |
 | `graph -o FILE` | the window's graph: `.svg`, `.d2`, `.txt`, `.json`, or `-` for text on stdout |
 | `label MAC NAME...`, `label -clear MAC` | name a device by hand; it overrides DHCP, mDNS and every other source until cleared. With `-server` it goes through the API; without, it writes the database file (stop the server first) |
 | `import FILE.pcap...` | ingest captures directly (re-importing a file is a no-op) |
@@ -89,9 +90,12 @@ TIME                 DEVICE           TYPE  NAME               RCODE     MS    A
 Add `-o json` or `-o csv` to any `query` for scripts.
 
 `graph` options: `-collapse` (default on; fold addresses into the names
-they were reached by), `-top N` (each device's busiest N destinations,
-`-1` for all), `-dns` (lookups and answers, default on), `-identity`
-(hostnames, services, fingerprints and vendors as nodes), `-layout
+they were reached by), `-sites` (default on; one node per registrable
+domain), `-anomalies` (default on; outline what medium and high
+anomalies are about), `-top N` (each device's busiest N destinations, `-1` for all; the
+rest are one "N more destinations" node), `-dns` (lookups and answers,
+default on), `-identity` (services, Wi-Fi networks, and the hostnames,
+addresses, fingerprints and vendors devices share), `-layout
 elk|dagre`, `-theme light|dark`, `-ascii` (no box-drawing characters).
 
 ## The TUI
@@ -125,7 +129,7 @@ alice-iphone  (Apple · 192.168.1.23)
 | `/` | filter: `device:alice-* domain:*.example.com ip:10.0.0.0/8 port:443 proto:udp app:quic` (a bare word is a domain) |
 | `x` | clear the filter |
 | `enter` | details of the selected row: facts, connections, lookups, timeline |
-| Graph: `c` `d` `i` | collapse, lookups, identity |
+| Graph: `c` `d` `w` `i` | collapse, lookups, sites, identity |
 | Graph: `<` `>` | fewer / more destinations per device |
 | Graph: `o` | switch between the d2 diagram and an outline tree |
 | Graph: `s` | save the graph as SVG and d2 in the current directory |
@@ -142,12 +146,19 @@ page asks for it once and keeps it in the browser.
   and refreshes as sensors deliver.
 - **Filter:** the same syntax as the TUI.
 - **Graph:** devices, the names they looked up and reached, and where those
-  pointed. Drag to pan, scroll to zoom, click a node for its details.
+  pointed (see [the graph](concepts.md#the-graph) for how it stays
+  readable). Drag to pan, scroll to zoom, click a node for its details; a
+  device's grid of destinations opens the device, and "N more
+  destinations" says how to see them.
   Download the SVG or the d2 script. The graph is laid out in your
   browser by the same Go code as the server, compiled to WebAssembly
   (dagre). The **elk** layout is drawn by the server. While the next
   window is fetched and laid out, the current graph stays visible under a
   small spinner rather than blanking.
+- **Anomalies:** what stands out in the window, most severe first, with the
+  evidence ([what is checked](concepts.md#anomalies)); the summary bar
+  counts them and opens the tab. On the graph, medium and high ones outline
+  their device and destination, and a marked node's details start with why.
 - **Tables:** devices, connections, DNS, facts, Wi-Fi networks and
   sensors. Click a row for details. The Wi-Fi table lists only networks reported by a
   monitor-mode sensor; it stays empty on an Ethernet-only deployment.

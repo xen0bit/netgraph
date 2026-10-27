@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/xen0bit/netgraph/internal/model"
+	"github.com/xen0bit/netgraph/internal/store"
 )
 
 const queryUsage = `usage: netgraph query <what> [flags]
@@ -26,6 +27,7 @@ what:
                domain:<name>, ...
   sensors      sensors that have sent data
   wifi         Wi-Fi networks seen by monitor-mode sensors
+  anomalies    what stands out in the window, most severe first
 `
 
 func runQuery(args []string) error {
@@ -121,6 +123,15 @@ func runQuery(args []string) error {
 			return err
 		}
 		v, t = ns, wifiTable(ns)
+	case "anomalies":
+		rep, err := be.Anomalies(ctx(), filter)
+		if err != nil {
+			return err
+		}
+		if rep.Learning {
+			fmt.Fprintf(os.Stderr, "learning: checks that compare with history start %s after the first sensor reported\n", store.AnomalyHistory)
+		}
+		v, t = rep, anomaliesTable(rep.Anomalies)
 	case "entity":
 		d, err := be.Entity(ctx(), id, filter)
 		if err != nil {
@@ -247,6 +258,14 @@ func wifiTable(ns []model.WiFiNetwork) *table {
 			ch = strconv.Itoa(n.Channel)
 		}
 		t.add(clip(n.SSID, 32), n.BSSID, n.Security, ch, strconv.Itoa(n.Clients), ts(n.FirstSeen), ts(n.LastSeen))
+	}
+	return t
+}
+
+func anomaliesTable(as []model.Anomaly) *table {
+	t := &table{head: []string{"SEVERITY", "TIME", "KIND", "DEVICE", "SUMMARY"}}
+	for _, a := range as {
+		t.add(a.Severity, ts(a.TS), a.Kind, clip(a.DeviceName, 32), a.Summary)
 	}
 	return t
 }

@@ -129,8 +129,67 @@ device ──broadcasts / probes / associates / handshake──▶ ssid or devic
 ```
 
 With **collapse** (default), a destination reached by name is one node
-listing its addresses, rather than a node per CDN address. **Top N** keeps
-each device's busiest destinations and marks the graph truncated.
+listing its addresses, rather than a node per CDN address. With **sites**
+(default), names are grouped by registrable domain under the ICANN public
+suffixes: one `time.com` node for www.time.com, auth.time.com and the rest,
+one `cloudfront.net` for its distributions. A site of one name reads as
+that name. **Top N** keeps each device's busiest destinations (sites, with
+sites on) and draws the rest as one "N more destinations" node, with their
+traffic, and marks the graph truncated.
+
+Each relationship is drawn once, so a busy window stays readable:
+
+- A device that looked a name up and connected to it has one `connects`
+  edge, with the lookups counted on it (`dns x3`). A lookup that led to no
+  connection (`NXDOMAIN`, a prefetch) keeps its own dashed edge.
+- A CNAME chain is folded into the name it started from: `via
+  fastly.net` on the node, not a node per CDN alias. A target the graph
+  draws anyway keeps its `cname` edge. Without collapse, chains are drawn
+  as they are.
+- With identity, services, UPnP and LLDP descriptions and Wi-Fi networks
+  are nodes; hostnames, addresses, fingerprints, user agents and vendors
+  are nodes only when two or more devices share them, which is when they
+  say something (the same JA4 on two devices; two devices claiming one
+  address). One device's own are on its node and in its details.
+- A device with eight or more destinations that only it reaches, and that
+  nothing else in the graph touches, draws them as a grid, busiest first,
+  with one edge carrying their totals; each keeps its ports and connection
+  count on its label.
+
+## Anomalies
+
+The server checks each window for what stands out, and says why. Every
+finding names the device, what it is about, and the numbers behind it; a
+rule that fired can always be explained from its evidence. Findings are
+listed most severe first (`GET /api/v1/anomalies`, the **Anomalies** tab,
+`netgraph query anomalies`), and with the graph's **anomalies** option
+(default on) medium and high ones outline their device, destination and the
+edge between them, red for high and orange for medium, with the reasons as
+a tooltip. Low ones stay in the list.
+
+Checks that need no history:
+
+| Kind | Fires when | Severity |
+|---|---|---|
+| `beacon` | a device opens connections to one destination on a fixed period: at least 8, at least 10 s apart, gaps within 10% (median) of each other. Starts within a second count once; DNS, NTP and mDNS are left out | low to a name, medium to an unnamed address |
+| `dns_failures` | a device looks up at least 20 names that do not exist, 30% or more of its names (malware generating domains, or a broken device). Single labels, reverse lookups and local suffixes do not count | medium, high from 100 |
+| `dns_tunnel` | a device looks up at least 50 different names under one site whose first labels are 20 characters or more (median): data smuggled out in the names | medium, high from 500 |
+| `rogue_ap` | access points broadcast one network name with different security | high when one is open or WEP and another protected (an evil twin); low otherwise (WPA2 next to WPA3 is common on mesh and 6 GHz radios) |
+
+Checks that compare with history need a day of it: until the first sensor
+has reported for 24 hours the report says `learning` and they are skipped,
+since everything is new to a network just met. They look back 7 days.
+
+| Kind | Fires when | Severity |
+|---|---|---|
+| `new_device` | a device uses an address on the LAN for the first time (the same event as a [new-device alert](deployment.md#new-device-alerts); not the router, not devices only heard over the air) | medium; low for a private (randomised) MAC, which phones rotate |
+| `new_destination` | a device with a day of history reaches a site, or an unnamed address, it had not in the last 7 days. A device that reached at most 30 destinations that week is predictable (a plug, a camera) and anything new from it counts; from a busier one only a new destination it uploaded 1 MB or more to | medium from a predictable device, high if also new to the whole network with 10 MB up; low from a busy one, medium if new to the network with 50 MB up. More than 10 for one device are summed up in one |
+| `upload_spike` | a device sends more per hour than in any hour of its last week, at least 4 times its median hour and at least 20 MB an hour. It needs 24 active hours of history | medium; high at 5 times its busiest hour and 200 MB an hour |
+| `rogue_ap` | a new access point broadcasts a network that the LAN's own devices (ones that used an address on it) associate with | medium |
+
+A window shorter than an hour is compared with hours as it is: its total
+is a lower bound on that hour's. A device filter keeps that device's
+findings; other filters do not apply.
 
 ## Wi-Fi
 

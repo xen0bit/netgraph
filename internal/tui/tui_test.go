@@ -171,7 +171,8 @@ func TestGraphAndWindow(t *testing.T) {
 	d.keys("6")
 	d.want("collapse", "top 15", "Google aa:bb:cc", "plain.example.net")
 	d.keys("o")
-	d.want("connects www.example.com", "queried")
+	// The lookup is counted on the connection it led to.
+	d.want("connects www.example.com", "dns x1")
 	d.keys("down", "enter")
 	d.want("Relationships in this window")
 	d.keys("esc", "s")

@@ -3,7 +3,8 @@
 //
 // d2 gives each shape group a class whose first word is the base64 of the
 // shape's key, HTML-escaped: our keys are quoted entity IDs, so
-// atob("JiMzNDtkZXZpY2U6...") is "&#34;device:...&#34;".
+// atob("JiMzNDtkZXZpY2U6...") is "&#34;device:...&#34;". Clicking a
+// device's grid of destinations reports "dests:<device ID>".
 export class Diagram {
   constructor(el, { onSelect } = {}) {
     this.el = el;
@@ -138,10 +139,18 @@ export class Diagram {
   }
 }
 
+// decodeShape returns the entity ID a shape's class names. A shape inside a
+// container (a device's grid of destinations) has the d2 path
+// "container"."shape": its ID is the last key.
 function decodeShape(cls) {
+  let s;
   try {
-    return atob(cls).replaceAll("&#34;", "").replaceAll("&amp;", "&").replaceAll("&lt;", "<").replaceAll("&gt;", ">");
+    s = atob(cls);
   } catch {
     return null;
   }
+  // Keys are d2 strings: an escaped quote inside one is \&#34;.
+  const keys = [...s.matchAll(/&#34;((?:\\.|\\&#34;|[^\\])*?)&#34;/g)].map((m) => m[1].replaceAll("\\&#34;", '"').replace(/\\(.)/g, "$1"));
+  const id = (keys.length ? keys[keys.length - 1] : s).replaceAll("&#34;", '"').replaceAll("&amp;", "&").replaceAll("&lt;", "<").replaceAll("&gt;", ">");
+  return s.includes("-&gt;") || s.includes("->") ? `${id}->` : id;
 }

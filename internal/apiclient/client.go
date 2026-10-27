@@ -186,6 +186,14 @@ func (c *Client) WiFi(ctx context.Context, f model.Filter) ([]model.WiFiNetwork,
 	return v, c.getJSON(ctx, "/api/v1/wifi", f.Values(), &v)
 }
 
+func (c *Client) Anomalies(ctx context.Context, f model.Filter) (*model.AnomalyReport, error) {
+	var v model.AnomalyReport
+	if err := c.getJSON(ctx, "/api/v1/anomalies", f.Values(), &v); err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
 // Version returns the server's version.
 func (c *Client) Version(ctx context.Context) (string, error) {
 	var v struct{ Version string }

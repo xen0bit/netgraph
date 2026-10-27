@@ -9,6 +9,7 @@ import (
 	"cmp"
 	"fmt"
 	"iter"
+	"maps"
 	"net/netip"
 	"slices"
 	"sort"
@@ -26,6 +27,17 @@ type Input struct {
 	Flows        []model.Flow
 	DNS          []model.DNSQuery
 	Facts        []model.Fact
+	// Rest is, per source, what the store's own Top N left out of Flows:
+	// the graph shows it as one "N more destinations" node.
+	Rest map[string]Rest
+}
+
+// Rest summarises destinations a graph does not draw one by one.
+type Rest struct {
+	Destinations int
+	Connections  int
+	BytesOut     uint64
+	BytesIn      uint64
 }
 
 type builder struct {
@@ -38,6 +50,7 @@ type builder struct {
 	eord    []string
 	owner   func(ip string) string // the one device holding a local address
 	devices map[string]*model.Device
+	names   map[string]map[string]bool // site node -> the names it stands for
 }
 
 // Build assembles a graph.
@@ -49,13 +62,23 @@ type builder struct {
 //	device ──connects─────────▶ address          (when it was not)
 //
 // With Collapse off, connections always point at addresses and names hang
-// off them through resolves_to/serves. Identity adds the device's
-// hostnames, services, fingerprints and vendor as their own nodes.
+// off them through resolves_to/serves. With Sites, a name node stands for
+// every name under one registrable domain. Identity adds what devices are:
+// services, UPnP and LLDP descriptions, Wi-Fi networks, and the hostnames,
+// addresses, fingerprints, user agents and vendors that two or more devices
+// share (one device's own are on its node already).
+//
+// A graph stays readable by drawing each relationship once: a device that
+// looked a name up and connected to it has one connects edge (with the
+// lookup count), a CNAME chain is folded into the name it started from
+// ("via" the CDN) unless its target is drawn anyway, and what Top N left
+// out is one "N more destinations" node per device.
 func Build(in Input, o model.GraphOptions) *model.Graph {
 	if o.TopN == 0 {
 		o.TopN = 15
 	}
-	b := &builder{in: in, o: o, nodes: map[string]*model.Node{}, edges: map[string]*model.Edge{}, spans: map[string][][2]int64{}}
+	b := &builder{in: in, o: o, nodes: map[string]*model.Node{}, edges: map[string]*model.Edge{}, spans: map[string][][2]int64{},
+		names: map[string]map[string]bool{}}
 	g := &model.Graph{FromMS: in.FromMS, ToMS: in.ToMS, Precision: in.Precision}
 
 	devices := map[string]*model.Device{}
@@ -103,6 +126,10 @@ func Build(in Input, o model.GraphOptions) *model.Graph {
 		d.flows = append(d.flows, fl)
 	}
 	keptDest := map[string]bool{}
+	rest := map[string]Rest{}
+	for src, r := range in.Rest {
+		rest[src] = r
+	}
 	for src, m := range perDev {
 		ds := make([]*dest, 0, len(m))
 		for _, d := range m {
@@ -115,8 +142,17 @@ func Build(in Input, o model.GraphOptions) *model.Graph {
 			return ds[i].key < ds[j].key
 		})
 		if o.TopN > 0 && len(ds) > o.TopN {
+			r := rest[src]
+			for _, d := range ds[o.TopN:] {
+				r.Destinations++
+				for _, fl := range d.flows {
+					r.Connections++
+					r.BytesOut += fl.BytesOut
+					r.BytesIn += fl.BytesIn
+				}
+			}
+			rest[src] = r
 			ds = ds[:o.TopN]
-			g.Truncated = true
 		}
 		b.sourceNode(src, devices)
 		for _, d := range ds {
@@ -125,6 +161,22 @@ func Build(in Input, o model.GraphOptions) *model.Graph {
 				b.connect(src, d.key, fl)
 			}
 		}
+	}
+
+	for _, src := range slices.Sorted(maps.Keys(rest)) {
+		r := rest[src]
+		if r.Destinations == 0 {
+			continue
+		}
+		g.Truncated = true
+		b.sourceNode(src, devices)
+		id := model.EntityID(model.KindOther, src)
+		n := b.node(id, model.KindOther, fmt.Sprintf("%d more destinations", r.Destinations), "")
+		n.BytesOut, n.BytesIn = r.BytesOut, r.BytesIn
+		n.Attrs = map[string]string{"destinations": strconv.Itoa(r.Destinations), "device": src}
+		e := b.edge(src, id, model.RelConnects)
+		e.Count = r.Connections
+		e.BytesOut, e.BytesIn = r.BytesOut, r.BytesIn
 	}
 
 	if o.Identity {
@@ -143,12 +195,12 @@ func Build(in Input, o model.GraphOptions) *model.Graph {
 			if src == "" {
 				src = model.EntityID(model.KindIP, q.ClientIP)
 			}
-			dom := model.EntityID(model.KindDomain, q.QName)
+			dom := b.nameID(q.QName)
 			if o.TopN > 0 && len(in.Flows) > 0 && !keptDest[dom] && !b.answersKept(q, keptDest) {
 				continue // a lookup that led nowhere the graph shows
 			}
 			b.sourceNode(src, devices)
-			b.node(dom, model.KindDomain, q.QName, "")
+			b.nameNode(q.QName)
 			e := b.edge(src, dom, model.RelQueried)
 			e.Count++
 			if q.RCode != "NOERROR" {
@@ -163,6 +215,8 @@ func Build(in Input, o model.GraphOptions) *model.Graph {
 
 	// Facts: answers and SNI tie names to addresses; identity facts describe
 	// devices.
+	cnames := map[string][]string{} // name -> its CNAME targets
+	var leaves []model.Fact         // identity facts drawn only if shared
 	for _, ft := range in.Facts {
 		switch ft.Rel {
 		case model.RelResolvesTo, model.RelServes:
@@ -170,9 +224,11 @@ func Build(in Input, o model.GraphOptions) *model.Graph {
 			if ft.Rel == model.RelServes {
 				dom, ip = ft.Dst, ft.Src
 			}
-			if !b.hasNode(dom) {
+			_, name, _ := model.SplitEntityID(dom)
+			if !b.drawn(name) {
 				continue
 			}
+			dom = b.nameID(name)
 			if o.Collapse {
 				// The address belongs on the domain node rather than as
 				// a node of its own, unless it is already one.
@@ -192,45 +248,64 @@ func Build(in Input, o model.GraphOptions) *model.Graph {
 			}
 			b.span(e, ft.FirstSeen, ft.LastSeen)
 		case model.RelCNAME:
-			if o.DNS && b.hasNode(ft.Src) {
-				_, key, _ := model.SplitEntityID(ft.Dst)
-				b.node(ft.Dst, model.KindDomain, key, "")
-				e := b.edge(ft.Src, ft.Dst, model.RelCNAME)
-				e.Count += ft.Count
-				b.span(e, ft.FirstSeen, ft.LastSeen)
+			_, from, _ := model.SplitEntityID(ft.Src)
+			_, to, _ := model.SplitEntityID(ft.Dst)
+			if !slices.Contains(cnames[from], to) {
+				cnames[from] = append(cnames[from], to)
 			}
+			src, dst := b.nameID(from), b.nameID(to)
+			// Folded into the name node unless the target is drawn anyway
+			// (with Collapse) or names are drawn as the chain they are.
+			if !o.DNS || !b.drawn(from) || src == dst || (o.Collapse && !b.hasNode(dst)) {
+				continue
+			}
+			b.nameNode(to)
+			e := b.edge(src, dst, model.RelCNAME)
+			e.Count += ft.Count
+			b.span(e, ft.FirstSeen, ft.LastSeen)
 		default:
 			if !o.Identity || !b.hasNode(ft.Src) {
 				continue
 			}
-			kind, _, _ := model.SplitEntityID(ft.Dst)
 			switch ft.Rel {
-			case model.RelHasIP, model.RelHostname, model.RelAnnounces, model.RelFingerprint, model.RelUserAgent, model.RelUPnP, model.RelNeighbor,
+			case model.RelAnnounces, model.RelUPnP, model.RelNeighbor,
 				model.RelBroadcasts, model.RelProbes, model.RelAssociates, model.RelHandshake:
-			default:
-				continue
+				b.identity(ft)
+			case model.RelHasIP, model.RelHostname, model.RelFingerprint, model.RelUserAgent:
+				leaves = append(leaves, ft)
 			}
-			b.node(ft.Dst, kind, ft.DstLabel, "")
-			e := b.edge(ft.Src, ft.Dst, ft.Rel)
-			e.Count += ft.Count
-			if ft.Source != "" {
-				if e.Attrs == nil {
-					e.Attrs = map[string]string{}
-				}
-				e.Attrs["source"] = ft.Source
-			}
-			b.span(e, ft.FirstSeen, ft.LastSeen)
 		}
 	}
 	if o.Identity {
-		for id := range perDev {
+		for _, id := range slices.Sorted(maps.Keys(perDev)) {
 			if d := devices[id]; d != nil && d.Vendor != "" {
-				v := model.EntityID(model.KindVendor, d.Vendor)
-				b.node(v, model.KindVendor, d.Vendor, "")
-				b.edge(id, v, model.RelVendor).Count = 1
+				leaves = append(leaves, model.Fact{Src: id, Rel: model.RelVendor, Dst: model.EntityID(model.KindVendor, d.Vendor), DstLabel: d.Vendor, Count: 1})
+			}
+		}
+		// A hostname, address, fingerprint, user agent or vendor of one
+		// device is already on its node; drawn, it is a node per device
+		// that says nothing. Shared, it ties devices together.
+		holders := map[string]map[string]bool{}
+		for _, ft := range leaves {
+			if holders[ft.Dst] == nil {
+				holders[ft.Dst] = map[string]bool{}
+			}
+			holders[ft.Dst][ft.Src] = true
+		}
+		for _, ft := range leaves {
+			if len(holders[ft.Dst]) > 1 {
+				b.identity(ft)
 			}
 		}
 	}
+	if o.Collapse {
+		for _, id := range b.order {
+			if n := b.nodes[id]; n.Kind == model.KindDomain || n.Kind == model.KindSite {
+				b.via(n, cnames)
+			}
+		}
+	}
+	b.foldLookups()
 
 	for _, k := range b.eord {
 		e := b.edges[k]
@@ -242,6 +317,19 @@ func Build(in Input, o model.GraphOptions) *model.Graph {
 	}
 	for _, id := range b.order {
 		n := b.nodes[id]
+		if names := b.names[id]; len(names) > 0 {
+			list := slices.Sorted(maps.Keys(names))
+			if n.Attrs == nil {
+				n.Attrs = map[string]string{}
+			}
+			n.Attrs["names"] = strings.Join(list, ",")
+			// A site of one name reads as that name.
+			if len(list) > 1 {
+				n.Sub = fmt.Sprintf("%d names", len(list))
+			} else {
+				n.Label = list[0]
+			}
+		}
 		if a := n.Attrs["addresses"]; a != "" {
 			ips := strings.Split(a, ",")
 			slices.SortFunc(ips, compareAddr)
@@ -272,9 +360,121 @@ func (b *builder) destination(fl model.Flow) string {
 		return model.EntityID(model.KindIP, fl.RemoteIP)
 	}
 	if b.o.Collapse && fl.Name != "" {
-		return model.EntityID(model.KindDomain, fl.Name)
+		return b.nameID(fl.Name)
 	}
 	return model.EntityID(model.KindIP, fl.RemoteIP)
+}
+
+// nameID is the node a DNS name is drawn as: its own, or with Sites its
+// registrable domain's.
+func (b *builder) nameID(name string) string {
+	if b.o.Sites {
+		return model.EntityID(model.KindSite, Site(name))
+	}
+	return model.EntityID(model.KindDomain, name)
+}
+
+// drawn reports whether the graph shows a name: its node, and with Sites
+// that name among the site's.
+func (b *builder) drawn(name string) bool {
+	id := b.nameID(name)
+	return b.hasNode(id) && (!b.o.Sites || b.names[id][name])
+}
+
+// nameNode adds the node for a name, and the name to its site.
+func (b *builder) nameNode(name string) *model.Node {
+	id := b.nameID(name)
+	if !b.o.Sites {
+		return b.node(id, model.KindDomain, name, "")
+	}
+	_, site, _ := model.SplitEntityID(id)
+	n := b.node(id, model.KindSite, site, "")
+	if b.names[id] == nil {
+		b.names[id] = map[string]bool{}
+	}
+	b.names[id][name] = true
+	return n
+}
+
+// identity draws one identity fact as a device -> descriptor edge.
+func (b *builder) identity(ft model.Fact) {
+	kind, _, _ := model.SplitEntityID(ft.Dst)
+	b.node(ft.Dst, kind, ft.DstLabel, "")
+	e := b.edge(ft.Src, ft.Dst, ft.Rel)
+	e.Count += ft.Count
+	if ft.Source != "" {
+		if e.Attrs == nil {
+			e.Attrs = map[string]string{}
+		}
+		e.Attrs["source"] = ft.Source
+	}
+	if ft.FirstSeen != 0 || ft.LastSeen != 0 {
+		b.span(e, ft.FirstSeen, ft.LastSeen)
+	}
+}
+
+// via notes on a name node the sites its names' CNAME chains lead to (the
+// CDN that serves them), following each chain a few hops.
+func (b *builder) via(n *model.Node, cnames map[string][]string) {
+	names := []string{n.Label}
+	if n.Kind == model.KindSite {
+		names = slices.Sorted(maps.Keys(b.names[n.ID]))
+	}
+	own := Site(n.Label)
+	var sites []string
+	seen := map[string]bool{}
+	for _, name := range names {
+		next := []string{name}
+		for hop := 0; hop < 8 && len(next) > 0; hop++ {
+			var more []string
+			for _, cur := range next {
+				for _, t := range cnames[cur] {
+					if seen[t] {
+						continue
+					}
+					seen[t] = true
+					more = append(more, t)
+					if st := Site(t); st != own && !slices.Contains(sites, st) {
+						sites = append(sites, st)
+					}
+				}
+			}
+			next = more
+		}
+	}
+	if len(sites) == 0 {
+		return
+	}
+	slices.Sort(sites)
+	if n.Attrs == nil {
+		n.Attrs = map[string]string{}
+	}
+	n.Attrs["via"] = strings.Join(sites, ",")
+}
+
+// foldLookups merges each device's lookups of a name into its connects
+// edge to that name: one edge per relationship, with the lookups counted on
+// it. Lookups that led to no connection keep their own edge.
+func (b *builder) foldLookups() {
+	keep := b.eord[:0]
+	for _, k := range b.eord {
+		e := b.edges[k]
+		if e.Rel == model.RelQueried {
+			if c, ok := b.edges[e.From+"\x00"+e.To+"\x00"+model.RelConnects]; ok {
+				if c.Attrs == nil {
+					c.Attrs = map[string]string{}
+				}
+				c.Attrs["lookups"] = strconv.Itoa(e.Count)
+				if rc := e.Attrs["rcode"]; rc != "" {
+					c.Attrs["rcode"] = rc
+				}
+				delete(b.edges, k)
+				continue
+			}
+		}
+		keep = append(keep, k)
+	}
+	b.eord = keep
 }
 
 func (b *builder) hasNode(id string) bool { _, ok := b.nodes[id]; return ok }
@@ -365,7 +565,11 @@ func (b *builder) connect(src, dst string, fl model.Flow) {
 	}
 	n.BytesOut += fl.BytesOut
 	n.BytesIn += fl.BytesIn
-	if kind == model.KindDomain {
+	switch kind {
+	case model.KindSite:
+		b.nameNode(fl.Name)
+		b.addAddr(dst, model.EntityID(model.KindIP, fl.RemoteIP))
+	case model.KindDomain:
 		b.addAddr(dst, model.EntityID(model.KindIP, fl.RemoteIP))
 	}
 	if kind == model.KindIP {

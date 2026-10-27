@@ -23,6 +23,8 @@ func runGraph(args []string) error {
 	top := fs.Int("top", 15, "keep each device's N busiest destinations (-1: all)")
 	identity := fs.Bool("identity", false, "draw hostnames, services, fingerprints and vendors as nodes")
 	dns := fs.Bool("dns", true, "draw lookups and answers")
+	sites := fs.Bool("sites", true, "group names by registrable domain: one time.com node for www.time.com, auth.time.com, ...")
+	anomalies := fs.Bool("anomalies", true, "outline what medium and high anomalies are about")
 	layout := fs.String("layout", "elk", "layout engine: elk or dagre")
 	theme := fs.String("theme", "light", "SVG theme: light or dark")
 	ascii := fs.Bool("ascii", false, "plain ASCII text instead of box-drawing characters")
@@ -38,7 +40,7 @@ func runGraph(args []string) error {
 		return err
 	}
 	defer closeFn()
-	g, err := be.Graph(ctx(), filter, model.GraphOptions{Collapse: *collapse, TopN: *top, Identity: *identity, DNS: *dns})
+	g, err := be.Graph(ctx(), filter, model.GraphOptions{Collapse: *collapse, TopN: *top, Identity: *identity, DNS: *dns, Sites: *sites, Anomalies: *anomalies})
 	if err != nil {
 		return err
 	}

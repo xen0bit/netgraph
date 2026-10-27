@@ -6,10 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
+	"slices"
 	"sort"
 	"strings"
 	"time"
 
+	"github.com/xen0bit/netgraph/internal/graph"
 	"github.com/xen0bit/netgraph/internal/model"
 )
 
@@ -23,6 +26,9 @@ func (s *Store) Entity(ctx context.Context, id string, f model.Filter) (*model.E
 	kind, key, ok := model.SplitEntityID(id)
 	if !ok {
 		return nil, fmt.Errorf("invalid entity id %q", id)
+	}
+	if kind == model.KindSite {
+		return s.siteEntity(ctx, id, key, f)
 	}
 	from, to := s.window(f)
 	d := &model.EntityDetail{ID: id, Kind: kind, Key: key}
@@ -85,6 +91,76 @@ func (s *Store) Entity(ctx context.Context, id string, f model.Filter) (*model.E
 		}
 	}
 	d.Timeline, err = s.timeline(ctx, kind, key, eid, d, from, to)
+	return d, err
+}
+
+// siteEntity is what the window holds for the names under one registrable
+// domain (a graph's site node): their connections, lookups and facts, with
+// the names it found listed in attrs.
+func (s *Store) siteEntity(ctx context.Context, id, site string, f model.Filter) (*model.EntityDetail, error) {
+	from, to := s.window(f)
+	d := &model.EntityDetail{ID: id, Kind: model.KindSite, Key: site, Label: site}
+	in := func(name string) bool { return name != "" && graph.Site(name) == site }
+	// The domain filter matches a substring; the site test makes it exact.
+	wf := model.Filter{From: time.UnixMilli(from), To: time.UnixMilli(to), Limit: 200, Multicast: true, Domain: site}
+	var err error
+	if d.Flows, err = s.Flows(ctx, wf); err != nil {
+		return nil, err
+	}
+	d.Flows = filterFlows(d.Flows, func(fl model.Flow) bool { return in(fl.Name) || in(fl.QName) })
+	if d.DNS, err = s.DNS(ctx, wf); err != nil {
+		return nil, err
+	}
+	d.DNS = filterDNS(d.DNS, func(q model.DNSQuery) bool { return in(q.QName) })
+
+	rows, err := s.r.QueryContext(ctx, `SELECT id, key, first_seen, last_seen FROM entities WHERE kind = 'domain' AND (key = ? OR key GLOB ?)`, site, "*."+site)
+	if err != nil {
+		return nil, err
+	}
+	var ids []int64
+	names := map[string]bool{}
+	for rows.Next() {
+		var eid, first, last int64
+		var key string
+		if err := rows.Scan(&eid, &key, &first, &last); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		if !in(key) || first >= to || last < from {
+			continue
+		}
+		ids = append(ids, eid)
+		names[key] = true
+		if d.FirstSeen == 0 || first < d.FirstSeen {
+			d.FirstSeen = first
+		}
+		d.LastSeen = max(d.LastSeen, last)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if len(ids) == 0 && len(d.Flows) == 0 && len(d.DNS) == 0 {
+		return nil, ErrNotFound
+	}
+	for chunk := range slices.Chunk(ids, 500) {
+		w := &where{}
+		list := idList(chunk)
+		w.add("(f.src IN ("+list+") OR f.dst IN ("+list+")) AND f.first_seen < ? AND f.last_seen >= ?", to, from)
+		facts, err := s.queryFacts(ctx, w, 500)
+		if err != nil {
+			return nil, err
+		}
+		d.Facts = append(d.Facts, facts...)
+	}
+	for _, fl := range d.Flows {
+		names[firstNonEmpty(fl.Name, fl.QName)] = true
+	}
+	for _, q := range d.DNS {
+		names[q.QName] = true
+	}
+	delete(names, "")
+	d.Attrs = map[string]string{"names": strings.Join(slices.Sorted(maps.Keys(names)), ",")}
+	d.Timeline, err = s.timeline(ctx, model.KindSite, site, 0, d, from, to)
 	return d, err
 }
 

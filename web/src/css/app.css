@@ -116,6 +116,13 @@ td .sub { color: var(--fg-2); font-size: 12px; }
 .badge.carried { background: #fef3c7; color: #78350f; }
 .badge.closed { background: var(--bg-3); color: var(--fg-2); }
 .badge.err { background: #fee2e2; color: #7f1d1d; }
+.badge.sev-high { background: #fee2e2; color: #7f1d1d; font-weight: 600; }
+.badge.sev-medium { background: #ffedd5; color: #7c2d12; }
+.badge.sev-low { background: #fef9c3; color: #713f12; }
+.summary a.badge { cursor: pointer; font-size: 12px; }
+.anomaly-box { border: 1px solid var(--err); border-radius: 8px; padding: 8px 12px; margin-bottom: 12px; }
+.anomaly-box b { color: var(--err); }
+.anomaly-box ul { margin: 4px 0 0; padding-left: 18px; }
 .empty { color: var(--fg-2); padding: 24px 8px; }
 
 .panel {

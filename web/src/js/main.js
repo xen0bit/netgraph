@@ -40,7 +40,7 @@ const state = {
   live: false,
   filter: "",
   tab: "graph",
-  gopts: { collapse: true, dns: true, identity: false, top: 15 },
+  gopts: { collapse: true, dns: true, sites: true, anomalies: true, identity: false, top: 15 },
   // dagre runs inside the WASM engine; d2's ELK needs a host-provided
   // synchronous ELK in the browser, so "elk" is drawn by the server.
   layout: "dagre",
@@ -56,7 +56,7 @@ function loadHash() {
   state.live = p.get("live") === "1" || !p.has("to");
   state.filter = p.get("q") || "";
   if (p.get("tab")) state.tab = p.get("tab");
-  for (const k of ["collapse", "dns", "identity"]) if (p.has(k)) state.gopts[k] = p.get(k) === "1";
+  for (const k of ["collapse", "dns", "sites", "anomalies", "identity"]) if (p.has(k)) state.gopts[k] = p.get(k) === "1";
   if (p.has("top")) state.gopts.top = Number(p.get("top"));
 }
 
@@ -65,7 +65,7 @@ function saveHash() {
   if (state.live) { p.set("live", "1"); p.set("span", state.span); } else { p.set("from", state.to - state.span); p.set("to", state.to); }
   if (state.filter) p.set("q", state.filter);
   if (state.tab !== "graph") p.set("tab", state.tab);
-  for (const k of ["collapse", "dns", "identity"]) p.set(k, state.gopts[k] ? "1" : "0");
+  for (const k of ["collapse", "dns", "sites", "anomalies", "identity"]) p.set(k, state.gopts[k] ? "1" : "0");
   p.set("top", state.gopts.top);
   lastHash = p.toString();
   history.replaceState(null, "", "#" + lastHash);
@@ -190,12 +190,13 @@ async function refresh() {
   const seq = ++refreshSeq;
   const cols = Math.max(Math.floor($("#spark").clientWidth / 3), 30);
   const step = Math.max(Math.floor(state.span / cols / 1000), 1) + "s";
-  const [summary, series] = await Promise.all([
+  const [summary, series, anomalies] = await Promise.all([
     track(api("summary")).catch(() => null),
     track(api("timeseries", { step })).catch(() => null),
+    track(api("anomalies")).catch(() => null),
   ]);
   if (seq !== refreshSeq) return;
-  renderSummary(summary);
+  renderSummary(summary, anomalies);
   renderSpark(series);
   await renderTab(seq);
 }
@@ -204,18 +205,28 @@ async function renderTab(seq) {
   const t = state.tab;
   try {
     if (t === "graph") return await renderGraph(seq);
-    const path = { devices: "devices", flows: "flows", dns: "dns", facts: "facts", wifi: "wifi", sensors: "sensors" }[t];
-    const rows = await track(api(path));
+    const path = { devices: "devices", flows: "flows", dns: "dns", facts: "facts", wifi: "wifi", sensors: "sensors", anomalies: "anomalies" }[t];
+    let rows = await track(api(path));
     if (seq !== refreshSeq) return;
+    if (t === "anomalies") {
+      $("#anomaly-note").textContent = rows?.learning
+        ? "Learning the network: until it has a day of history, only the checks that need none run (beacons, failed lookups, DNS tunnels, access points). New devices, new destinations and upload spikes follow."
+        : "";
+      rows = rows?.anomalies;
+    }
     state.data[t] = rows || [];
     renderTable(t);
   } catch { /* status shows it */ }
 }
 
-function renderSummary(s) {
+function renderSummary(s, rep) {
   const el = $("#summary");
   if (!s) { el.textContent = ""; return; }
+  const as = rep?.anomalies || [];
+  const top = ["high", "medium", "low"].find((sev) => as.some((a) => a.severity === sev));
   el.innerHTML = [
+    as.length ? `<a class="badge sev-${top}" data-tab="anomalies" title="Most severe: ${esc(top)}">${as.length} ${as.length === 1 ? "anomaly" : "anomalies"}</a>`
+      : rep?.learning ? `<span class="hour" title="Checks that compare with history start a day after the first sensor reported">learning the network</span>` : "",
     `<span><b>${s.devices}</b> devices</span>`,
     `<span><b>${s.flows}</b> connections (peak <b>${s.peak_connections}</b>)</span>`,
     `<span><b>${s.dns_queries}</b> lookups of <b>${s.domains}</b> names</span>`,
@@ -349,6 +360,11 @@ const tables = {
     ],
     id: (n) => `device:${n.bssid}`,
   },
+  anomalies: {
+    cols: ["Severity", "When", "Kind", "Device", "What"],
+    row: (a) => [badge(a.severity, `sev-${a.severity}`), stamp(a.ts), esc(a.kind.replaceAll("_", " ")), esc(a.device_name || ""), esc(a.summary)],
+    id: (a) => a.device || a.entity || null,
+  },
   sensors: {
     cols: ["Sensor", "Version", "Interfaces", "First seen", "Last seen", "Packets", "Kernel drops", "Events dropped"],
     num: [5, 6, 7],
@@ -391,7 +407,8 @@ function theme() {
 }
 
 function graphOpts() {
-  return { collapse: state.gopts.collapse ? "1" : "0", dns: state.gopts.dns ? "1" : "0", identity: state.gopts.identity ? "1" : "0", top: String(state.gopts.top) };
+  const b = (k) => (state.gopts[k] ? "1" : "0");
+  return { collapse: b("collapse"), dns: b("dns"), sites: b("sites"), anomalies: b("anomalies"), identity: b("identity"), top: String(state.gopts.top) };
 }
 
 let lastView = null;
@@ -489,6 +506,8 @@ function fileStamp() {
 async function openEntity(id) {
   const panel = $("#panel");
   panel.hidden = false;
+  if (id.startsWith("other:")) return openRest(id);
+  if (id.startsWith("dests:")) id = id.slice("dests:".length);
   $("#panel-body").innerHTML = `<p class="muted">Loading ${esc(id)}…</p>`;
   let d;
   try {
@@ -522,7 +541,9 @@ async function openEntity(id) {
   const flows = (d.flows || []).slice(0, 100).map((f) =>
     `<li><time>${clock(f.first_seen)}</time>${esc(f.device_name || f.client_ip)} → ${link(f.name ? "domain:" + f.name : "ip:" + f.remote_ip, f.name || f.remote_ip)}:${f.remote_port}/${esc(f.proto)} ${badge(f.state, f.state)}${f.closed ? badge(f.end_reason, "closed") : ""} <span class="muted">↑${bytes(f.bytes_out)} ↓${bytes(f.bytes_in)}</span></li>`).join("");
   const timeline = (d.timeline || []).slice(-300).map((e) => `<li><time>${clock(e.ts)}</time>${badge(e.type)} ${esc(e.detail)}</li>`).join("");
-  $("#panel-body").innerHTML = `
+  const flagged = state.graph?.nodes?.find((n) => n.id === id)?.attrs?.anomalies;
+  const anomalyBox = flagged ? `<div class="anomaly-box"><b>Anomalies</b><ul>${flagged.split("\n").map((l) => `<li>${esc(l)}</li>`).join("")}</ul></div>` : "";
+  $("#panel-body").innerHTML = `${anomalyBox}
     <h2>${esc(d.label || d.key)}</h2>
     <div class="muted mono">${esc(d.id)}</div>${rename}
     <dl><dt>first seen</dt><dd>${stamp(d.first_seen)}</dd><dt>last seen</dt><dd>${stamp(d.last_seen)}</dd>${devInfo}${attrs}</dl>
@@ -557,8 +578,30 @@ async function openEntity(id) {
 function filterFor(d) {
   if (d.kind === "device") return `device:${d.key}`;
   if (d.kind === "ip") return `ip:${d.key}`;
-  if (d.kind === "domain") return `domain:${d.key}`;
+  if (d.kind === "domain" || d.kind === "site") return `domain:${d.key}`;
   return "";
+}
+
+// openRest explains a graph's "N more destinations" node: what Top N left
+// out for one device, and the two ways to see it.
+function openRest(id) {
+  const n = state.graph?.nodes?.find((x) => x.id === id);
+  const dev = n?.attrs?.device || id.slice("other:".length);
+  const name = state.graph?.nodes?.find((x) => x.id === dev)?.label || dev;
+  $("#panel-body").innerHTML = `
+    <h2>${esc(n?.label || "More destinations")}</h2>
+    <div class="muted">of ${esc(name)}</div>
+    <p>Top ${esc(state.gopts.top)} draws each device's busiest destinations; these ${esc(n?.attrs?.destinations || "")} add up to
+      ↑ ${bytes(n?.bytes_out || 0)} ↓ ${bytes(n?.bytes_in || 0)}.</p>
+    <p><a data-id="${esc(dev)}">Details of ${esc(name)}</a></p>
+    <p><a data-filter="${esc(dev.startsWith("device:") ? dev : "ip:" + dev.slice(3))}">Filter the window to this device</a> to draw its destinations alone,
+      or raise Top N.</p>`;
+  $("#panel-body").onclick = (e) => {
+    const a = e.target.closest("a");
+    if (!a) return;
+    if (a.dataset.id) openEntity(a.dataset.id);
+    if (a.dataset.filter) { state.filter = a.dataset.filter; $("#filter").value = state.filter; refresh(); }
+  };
 }
 
 // --- live ---------------------------------------------------------------------------
@@ -604,6 +647,8 @@ function init() {
   $("#filter").value = state.filter;
   $("#g-collapse").checked = state.gopts.collapse;
   $("#g-dns").checked = state.gopts.dns;
+  $("#g-sites").checked = state.gopts.sites;
+  $("#g-anomalies").checked = state.gopts.anomalies;
   $("#g-identity").checked = state.gopts.identity;
   $("#g-top").value = state.gopts.top;
   $("#g-layout").value = state.layout;
@@ -622,7 +667,8 @@ function init() {
   let typing;
   $("#filter").oninput = () => { clearTimeout(typing); typing = setTimeout(() => { state.filter = $("#filter").value; refresh(); }, 400); };
   for (const b of $$(".tabs button")) b.onclick = () => selectTab(b.dataset.tab);
-  for (const [id, k] of [["#g-collapse", "collapse"], ["#g-dns", "dns"], ["#g-identity", "identity"]]) {
+  $("#summary").onclick = (e) => { const a = e.target.closest("[data-tab]"); if (a) selectTab(a.dataset.tab); };
+  for (const [id, k] of [["#g-collapse", "collapse"], ["#g-dns", "dns"], ["#g-sites", "sites"], ["#g-anomalies", "anomalies"], ["#g-identity", "identity"]]) {
     $(id).onchange = () => { state.gopts[k] = $(id).checked; refresh(); };
   }
   $("#g-top").onchange = () => { state.gopts.top = Number($("#g-top").value) || 15; refresh(); };
