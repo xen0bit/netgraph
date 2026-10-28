@@ -124,11 +124,35 @@ func TestScale(t *testing.T) {
 			}
 			t.Logf("  %-10s %-10s %6d rows  %s", w.name, what, n, time.Since(t0).Round(time.Millisecond))
 		}
-		time1("summary", func() (int, error) { s, err := st.Summary(ctx, w.f); return s.Flows, err })
+		time1("summary", func() (int, error) {
+			s, err := st.Summary(ctx, w.f)
+			if err != nil {
+				return 0, err
+			}
+			return s.Flows, nil
+		})
 		time1("devices", func() (int, error) { d, err := st.Devices(ctx, w.f); return len(d), err })
 		time1("flows", func() (int, error) { f, err := st.Flows(ctx, w.f); return len(f), err })
 		time1("dns", func() (int, error) { d, err := st.DNS(ctx, w.f); return len(d), err })
-		time1("timeseries", func() (int, error) { s, err := st.Timeseries(ctx, w.f, 0); return len(s.Buckets), err })
-		time1("graph", func() (int, error) { g, err := st.Graph(ctx, w.f, model.DefaultGraphOptions); return len(g.Edges), err })
+		time1("timeseries", func() (int, error) {
+			s, err := st.Timeseries(ctx, w.f, 0)
+			if err != nil {
+				return 0, err
+			}
+			return len(s.Buckets), nil
+		})
+		graph := func(o model.GraphOptions) func() (int, error) {
+			return func() (int, error) {
+				g, err := st.Graph(ctx, w.f, o)
+				if err != nil {
+					return 0, err
+				}
+				return len(g.Edges), nil
+			}
+		}
+		time1("graph", graph(model.DefaultGraphOptions))
+		all := model.DefaultGraphOptions
+		all.TopN = -1
+		time1("graph all", graph(all))
 	}
 }

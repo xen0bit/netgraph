@@ -170,6 +170,17 @@ func idList(ids []int64) string {
 	return strings.Join(parts, ",")
 }
 
+// inList is "expr IN (vals)" for any number of values, bound as one JSON
+// array: a placeholder per value would run into SQLite's limit on bound
+// variables (32766) in a busy window.
+func inList(expr string, vals []string) (string, any) {
+	if vals == nil {
+		vals = []string{}
+	}
+	b, _ := json.Marshal(vals) // a []string always marshals
+	return expr + " IN (SELECT value FROM json_each(?))", string(b)
+}
+
 // ipCond matches column against an address or CIDR.
 func ipCond(col, ip string) (string, any) {
 	if strings.Contains(ip, "/") {
@@ -414,31 +425,30 @@ func (s *Store) peerDevices(ctx context.Context, flows []model.Flow, from, to in
 		}
 	}
 	out := map[string]int64{}
-	for chunk := range slices.Chunk(slices.Sorted(maps.Keys(ips)), 500) {
-		rows, err := s.r.QueryContext(ctx, `SELECT ip.key, f.src FROM entities ip JOIN facts f ON f.dst = ip.id AND f.rel = 'has_ip'
-			WHERE ip.kind = 'ip' AND ip.key IN (`+strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",")+`)
-			AND f.last_seen >= ? AND f.first_seen < ? GROUP BY 1, 2`, append(stringsToAny(chunk), from, to)...)
-		if err != nil {
+	if len(ips) == 0 {
+		return out, nil
+	}
+	cond, arg := inList("ip.key", slices.Sorted(maps.Keys(ips)))
+	rows, err := s.r.QueryContext(ctx, `SELECT ip.key, f.src FROM entities ip JOIN facts f ON f.dst = ip.id AND f.rel = 'has_ip'
+		WHERE ip.kind = 'ip' AND `+cond+`
+		AND f.last_seen >= ? AND f.first_seen < ? GROUP BY 1, 2`, arg, from, to)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var ip string
+		var dev int64
+		if err := rows.Scan(&ip, &dev); err != nil {
 			return nil, err
 		}
-		for rows.Next() {
-			var ip string
-			var dev int64
-			if err := rows.Scan(&ip, &dev); err != nil {
-				rows.Close()
-				return nil, err
-			}
-			if _, dup := out[ip]; dup {
-				out[ip] = 0
-			} else {
-				out[ip] = dev
-			}
-		}
-		if err := rows.Close(); err != nil {
-			return nil, err
+		if _, dup := out[ip]; dup {
+			out[ip] = 0
+		} else {
+			out[ip] = dev
 		}
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 // maxServes is how many of a device's served ports Devices lists.
@@ -559,13 +569,12 @@ func (s *Store) DNS(ctx context.Context, f model.Filter) ([]model.DNSQuery, erro
 	return s.dnsQuery(ctx, f, "", nil)
 }
 
-func (s *Store) dnsQuery(ctx context.Context, f model.Filter, extra string, extraArgs []any) ([]model.DNSQuery, error) {
-	from, to := s.window(f)
+// dnsWhere selects the window's lookups that match the filter's device,
+// domain and address. Ports, protocols and directions describe connections,
+// not lookups.
+func (s *Store) dnsWhere(ctx context.Context, f model.Filter, from, to int64) (*where, error) {
 	w := &where{}
 	w.add("ts >= ? AND ts < ?", from, to)
-	if extra != "" {
-		w.add(extra, extraArgs...)
-	}
 	if f.Device != "" {
 		ids, err := s.deviceIDs(ctx, f.Device)
 		if err != nil {
@@ -580,6 +589,18 @@ func (s *Store) dnsQuery(ctx context.Context, f model.Filter, extra string, extr
 		c1, a1 := ipCond("client_ip", f.IP)
 		c2, a2 := ipCond("data", f.IP)
 		w.add("("+c1+" OR id IN (SELECT dns_id FROM dns_answers WHERE "+c2+" AND ts >= ? AND ts < ?))", a1, a2, from, to)
+	}
+	return w, nil
+}
+
+func (s *Store) dnsQuery(ctx context.Context, f model.Filter, extra string, extraArgs []any) ([]model.DNSQuery, error) {
+	from, to := s.window(f)
+	w, err := s.dnsWhere(ctx, f, from, to)
+	if err != nil {
+		return nil, err
+	}
+	if extra != "" {
+		w.add(extra, extraArgs...)
 	}
 	rows, err := s.r.QueryContext(ctx, `SELECT ts, client_ip, client_device, server_ip, qname, qtype, rcode, coalesce(latency_ms, 0), answers
 		FROM dns WHERE `+w.sql()+` ORDER BY ts DESC LIMIT ?`, append(w.args, limit(f, 500, 50000))...)
@@ -1250,7 +1271,7 @@ func (s *Store) topDestinations(ctx context.Context, f model.Filter, from, to in
 	if err := rows.Err(); err != nil {
 		return "", nil, nil, nil, nil, err
 	}
-	var keys []any
+	var keys []string
 	names := map[string]bool{}
 	rest := map[string]graph.Rest{}
 	for _, src := range slices.Sorted(maps.Keys(groups)) {
@@ -1286,9 +1307,8 @@ func (s *Store) topDestinations(ctx context.Context, f model.Filter, from, to in
 	if len(keys) == 0 {
 		return "0", nil, names, out, in, nil
 	}
-	marks := strings.TrimSuffix(strings.Repeat("?,", len(keys)), ",")
-	cond := srcExpr + ` || '|' || ` + dest + ` IN (` + marks + `)`
-	return cond, keys, names, out, in, nil
+	cond, arg := inList(srcExpr+` || '|' || `+dest, keys)
+	return cond, []any{arg}, names, out, in, nil
 }
 
 // restSources rekeys topDestinations' per-source totals from its SQL keys
@@ -1343,28 +1363,8 @@ func (s *Store) dnsNames(ctx context.Context, f model.Filter, names map[string]b
 	if names == nil {
 		return s.DNS(ctx, f)
 	}
-	var out []model.DNSQuery
-	list := make([]string, 0, len(names))
-	for n := range names {
-		list = append(list, n)
-	}
-	sort.Strings(list)
-	for chunk := range slices.Chunk(list, 500) {
-		qs, err := s.dnsQuery(ctx, f, "qname IN ("+strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",")+")", stringsToAny(chunk))
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, qs...)
-	}
-	return out, nil
-}
-
-func stringsToAny(ss []string) []any {
-	out := make([]any, len(ss))
-	for i, s := range ss {
-		out[i] = s
-	}
-	return out
+	cond, arg := inList("qname", slices.Sorted(maps.Keys(names)))
+	return s.dnsQuery(ctx, f, cond, []any{arg})
 }
 
 // entityIDs looks up the IDs of entities of one kind by key.
@@ -1399,7 +1399,10 @@ func (s *Store) entityIDs(ctx context.Context, kind string, keys map[string]bool
 	return out, nil
 }
 
-func (s *Store) dnsHourly(ctx context.Context, f model.Filter, from, to int64) ([]model.DNSQuery, error) {
+// dnsHourlyWhere is dnsWhere for the hourly rollup, which keeps names but
+// not answers: a domain filter matches the name looked up, and an address
+// filter, which may name an answer, does not apply.
+func (s *Store) dnsHourlyWhere(ctx context.Context, f model.Filter, from, to int64) (*where, error) {
 	w := &where{}
 	w.add("bucket < ? AND bucket >= ?", to, hourOf(from))
 	if f.Device != "" {
@@ -1411,6 +1414,14 @@ func (s *Store) dnsHourly(ctx context.Context, f model.Filter, from, to int64) (
 	}
 	if f.Domain != "" {
 		w.add("lower(qname) GLOB ?", glob(f.Domain))
+	}
+	return w, nil
+}
+
+func (s *Store) dnsHourly(ctx context.Context, f model.Filter, from, to int64) ([]model.DNSQuery, error) {
+	w, err := s.dnsHourlyWhere(ctx, f, from, to)
+	if err != nil {
+		return nil, err
 	}
 	rows, err := s.r.QueryContext(ctx, `SELECT bucket, client_device, client_ip, qname, qtype, rcode, count FROM dns_hourly WHERE `+w.sql()+` LIMIT ?`, append(w.args, limit(f, 20000, 100000))...)
 	if err != nil {
@@ -1491,27 +1502,36 @@ func (s *Store) Summary(ctx context.Context, f model.Filter) (*model.Summary, er
 				}
 			}
 		})
-		if err := s.r.QueryRowContext(ctx, `SELECT count(*) FROM dns WHERE ts >= ? AND ts < ?`, from, to).Scan(&sum.DNSQueries); err != nil {
+		dw, err := s.dnsWhere(ctx, f, from, to)
+		if err != nil {
 			return nil, err
 		}
-		args := append(append([]any{}, w.args...), from, to)
+		if err := s.r.QueryRowContext(ctx, `SELECT count(*) FROM dns WHERE `+dw.sql(), dw.args...).Scan(&sum.DNSQueries); err != nil {
+			return nil, err
+		}
+		args := append(append([]any{}, w.args...), dw.args...)
 		if err := s.r.QueryRowContext(ctx, `SELECT count(*) FROM (
 			SELECT coalesce(nullif(sni, ''), nullif(http_host, ''), nullif(qname, '')) AS n FROM connections c WHERE `+w.sql()+`
-			UNION SELECT qname FROM dns WHERE ts >= ? AND ts < ?) WHERE n IS NOT NULL`, args...).Scan(&sum.Domains); err != nil {
+			UNION SELECT qname FROM dns WHERE `+dw.sql()+`) WHERE n IS NOT NULL`, args...).Scan(&sum.Domains); err != nil {
 			return nil, err
 		}
 	} else {
-		mc := 0
-		if f.Multicast {
-			mc = 1
+		w := &where{}
+		w.add("bucket < ? AND bucket >= ?", to, hourOf(from))
+		if err := s.flowWhere(ctx, f, w, hourlyCols); err != nil {
+			return nil, err
 		}
 		if err := s.r.QueryRowContext(ctx, `SELECT coalesce(sum(flows), 0), count(DISTINCT remote_ip), coalesce(sum(bytes_out), 0), coalesce(sum(bytes_in), 0),
 			count(DISTINCT nullif(name, '')), coalesce(sum(CASE WHEN direction = 'in' THEN flows ELSE 0 END), 0)
-			FROM traffic_hourly WHERE bucket < ? AND bucket >= ? AND multicast <= ?`, to, hourOf(from), mc).
+			FROM traffic_hourly WHERE `+w.sql(), w.args...).
 			Scan(&sum.Flows, &sum.RemoteIPs, &sum.BytesOut, &sum.BytesIn, &sum.Domains, &sum.Inbound); err != nil {
 			return nil, err
 		}
-		if err := s.r.QueryRowContext(ctx, `SELECT coalesce(sum(count), 0) FROM dns_hourly WHERE bucket < ? AND bucket >= ?`, to, hourOf(from)).Scan(&sum.DNSQueries); err != nil {
+		dw, err := s.dnsHourlyWhere(ctx, f, from, to)
+		if err != nil {
+			return nil, err
+		}
+		if err := s.r.QueryRowContext(ctx, `SELECT coalesce(sum(count), 0) FROM dns_hourly WHERE `+dw.sql(), dw.args...).Scan(&sum.DNSQueries); err != nil {
 			return nil, err
 		}
 	}

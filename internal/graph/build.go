@@ -52,6 +52,7 @@ type builder struct {
 	owner   func(ip string) string // the one device holding a local address
 	devices map[string]*model.Device
 	names   map[string]map[string]bool // site node -> the names it stands for
+	addrs   map[string]map[string]bool // name node -> the addresses in its "addresses"
 }
 
 // Build assembles a graph.
@@ -82,7 +83,7 @@ func Build(in Input, o model.GraphOptions) *model.Graph {
 		o.TopN = 15
 	}
 	b := &builder{in: in, o: o, nodes: map[string]*model.Node{}, edges: map[string]*model.Edge{}, spans: map[string][][2]int64{},
-		names: map[string]map[string]bool{}}
+		names: map[string]map[string]bool{}, addrs: map[string]map[string]bool{}}
 	g := &model.Graph{FromMS: in.FromMS, ToMS: in.ToMS, Precision: in.Precision}
 
 	devices := map[string]*model.Device{}
@@ -612,12 +613,18 @@ func (b *builder) addAddr(dom, ip string) {
 	if n.Attrs == nil {
 		n.Attrs = map[string]string{}
 	}
-	cur := n.Attrs["addresses"]
-	for _, a := range strings.Split(cur, ",") {
-		if a == key {
-			return
-		}
+	// A site can collect thousands of addresses: look them up in a set
+	// rather than in the list.
+	seen := b.addrs[dom]
+	if seen == nil {
+		seen = map[string]bool{}
+		b.addrs[dom] = seen
 	}
+	if seen[key] {
+		return
+	}
+	seen[key] = true
+	cur := n.Attrs["addresses"]
 	if cur == "" {
 		n.Attrs["addresses"] = key
 	} else {
