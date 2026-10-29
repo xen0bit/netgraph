@@ -23,6 +23,11 @@
       <button id="live" class="toggle" aria-pressed="false" title="Follow now (l)">● Live</button>
     </div>
     <div class="right">
+      <div class="search">
+        <input id="search" type="search" role="combobox" aria-label="Find a device, address, name or network" aria-controls="search-results"
+               aria-expanded="false" aria-autocomplete="list" autocomplete="off" spellcheck="false" placeholder="Find (f)">
+        <ul id="search-results" role="listbox" hidden></ul>
+      </div>
       <button class="icon" id="theme" title="Toggle dark mode">◐</button>
     </div>
   </header>

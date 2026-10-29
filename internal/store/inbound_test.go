@@ -294,3 +294,24 @@ func TestHostName(t *testing.T) {
 		}
 	}
 }
+
+// An address filter keeps the names of the devices the address talked to.
+func TestGraphAddressFilterNamesDevices(t *testing.T) {
+	st, at := inboundStore(t, Config{})
+	if err := st.SetDeviceLabel(context.Background(), webMAC, "web"); err != nil {
+		t.Fatal(err)
+	}
+	g, err := st.Graph(context.Background(), model.Filter{From: at, To: at.Add(time.Hour), IP: visitor.String()}, model.DefaultGraphOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var label string
+	for _, n := range g.Nodes {
+		if n.ID == model.EntityID(model.KindDevice, webMAC) {
+			label = n.Label
+		}
+	}
+	if label != "web" || len(g.Edges) != 1 {
+		t.Errorf("device drawn as %q, %d edges", label, len(g.Edges))
+	}
+}

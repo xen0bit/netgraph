@@ -58,7 +58,16 @@ button.toggle[aria-pressed="true"] { background: var(--ok); color: var(--bg); bo
 .presets button:first-child { border-radius: 6px 0 0 6px; }
 .presets button:last-child { border-radius: 0 6px 6px 0; }
 .presets button.on { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
-.right { margin-left: auto; }
+.right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
+.search { position: relative; }
+.search input { width: 15rem; }
+.search ul {
+  position: absolute; right: 0; top: calc(100% + 4px); z-index: 5; min-width: 24rem; max-width: 36rem; max-height: 60vh; overflow: auto;
+  margin: 0; padding: 4px 0; list-style: none; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow);
+}
+.search li { padding: 4px 10px; cursor: pointer; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.search li.active, .search li[data-i]:hover { background: var(--sel); }
+.search li .mono { font-size: 12px; }
 
 .timeline { padding: 6px 16px 0; }
 #spark { width: 100%; height: 56px; display: block; cursor: crosshair; background: var(--bg-2); border-radius: 6px; }
@@ -107,6 +116,12 @@ main { position: relative; overflow: hidden; display: flex; min-height: 0; }
 table { border-collapse: collapse; width: 100%; font-size: 13px; }
 thead th { position: sticky; top: 0; background: var(--bg); text-align: left; font-weight: 600; padding: 8px 8px 6px; border-bottom: 1px solid var(--border); white-space: nowrap; cursor: pointer; user-select: none; }
 thead th.num, td.num { text-align: right; }
+thead th button.sort { all: unset; cursor: pointer; }
+thead th button.sort:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+thead th[aria-sort] { color: var(--accent); }
+.table-tools { display: flex; align-items: center; gap: 8px; padding: 6px 8px; font-size: 12px; color: var(--fg-2); }
+.table-tools .spacer { flex: 1; }
+.table-tools button { padding: 2px 8px; font-size: 12px; }
 tbody td { padding: 5px 8px; border-bottom: 1px solid var(--bg-3); vertical-align: top; }
 tbody tr { cursor: pointer; }
 tbody tr:hover { background: var(--bg-2); }

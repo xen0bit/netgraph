@@ -28,6 +28,17 @@ type Backend interface {
 	Sensors(ctx context.Context) ([]Sensor, error)
 	WiFi(ctx context.Context, f Filter) ([]WiFiNetwork, error)
 	Anomalies(ctx context.Context, f Filter) (*AnomalyReport, error)
+	Search(ctx context.Context, q string, limit int) ([]SearchResult, error)
+}
+
+// SearchResult is an entity whose key or name matches a search: a device by
+// MAC, name or label, an address, a DNS name or a network.
+type SearchResult struct {
+	ID       string `json:"id"`
+	Kind     string `json:"kind"`
+	Key      string `json:"key"`
+	Label    string `json:"label"`
+	LastSeen int64  `json:"last_seen"`
 }
 
 // Filter selects what a query covers. The window is half-open: [From, To).

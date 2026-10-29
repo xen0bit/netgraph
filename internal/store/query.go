@@ -1145,6 +1145,29 @@ func (s *Store) Graph(ctx context.Context, f model.Filter, o model.GraphOptions)
 	} else if in.Flows, err = s.Flows(ctx, ff); err != nil {
 		return nil, err
 	}
+	if f.IP != "" {
+		// An address filter selects connections by either end, but devices
+		// by their own addresses: a device talking to the address would
+		// lose its name. Add the devices the connections belong to.
+		df := f
+		df.IP = ""
+		all, err := s.Devices(ctx, df)
+		if err != nil {
+			return nil, err
+		}
+		have, used := map[string]bool{}, map[string]bool{}
+		for _, d := range in.Devices {
+			have[d.ID] = true
+		}
+		for _, fl := range in.Flows {
+			used[fl.Device], used[fl.PeerDevice] = true, true
+		}
+		for _, d := range all {
+			if used[d.ID] && !have[d.ID] {
+				in.Devices = append(in.Devices, d)
+			}
+		}
+	}
 	if o.DNS || o.Collapse {
 		dq := f
 		dq.Limit = 20000

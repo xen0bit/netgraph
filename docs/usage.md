@@ -150,6 +150,8 @@ page asks for it once and keeps it in the browser.
   across the traffic timeline to zoom into a slice. **Live** follows now
   and refreshes as sensors deliver.
 - **Filter:** the same syntax as the TUI.
+- **Find** (`f`): devices by MAC, name or label, addresses, DNS names and
+  networks, as you type; Enter or a click opens the details.
 - **Graph:** devices, the names they looked up and reached, where those
   pointed, and the clients that connected in to them (see [the
   graph](concepts.md#the-graph) for how it stays readable). Every
@@ -167,11 +169,22 @@ page asks for it once and keeps it in the browser.
   small spinner rather than blanking.
 - **Anomalies:** what stands out in the window, most severe first, with the
   evidence ([what is checked](concepts.md#anomalies)); the summary bar
-  counts them and opens the tab. On the graph, medium and high ones outline
-  their device and destination, and a marked node's details start with why.
+  counts them and opens the tab. Click one to see it on the graph, filtered
+  to the address, network or device it is about, with its evidence at the
+  top of the details. On the graph, medium and high ones outline their
+  device and destination, and a marked node's details start with why.
 - **Tables:** devices, connections, DNS, facts, Wi-Fi networks and
-  sensors. Click a row for details. The Wi-Fi table lists only networks reported by a
+  sensors. Click a row for details, and a column's header to sort by it
+  (again to reverse, a third time for the table's own order). Connections,
+  lookups and facts stop at the API's default number of rows (1000, 500
+  and 2000); the bar above the table says so and **Load more** doubles it.
+  **CSV** downloads the rows as shown, every field the API returns, with
+  times in ISO 8601; text that a spreadsheet would run as a formula is
+  prefixed with `'`. The Wi-Fi table lists only networks reported by a
   monitor-mode sensor; it stays empty on an Ethernet-only deployment.
+- **Links:** the address bar holds the window, filter, tab, graph options,
+  a table's sort and the details that are open, so a copied link shows the
+  same view.
 - **Details:** an entity's relationships in the window, its connections,
   and a timeline merging DHCP, mDNS, ARP/NDP, lookups and connections
   opening and closing. A device's panel has a **Rename** box: your name

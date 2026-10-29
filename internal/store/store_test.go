@@ -675,3 +675,56 @@ loop:
 		t.Errorf("recent flows %d -> %d (%v)", len(before), len(after), err)
 	}
 }
+
+func TestSearch(t *testing.T) {
+	st, _, _ := homeStore(t)
+	ctx := context.Background()
+	ids := func(q string) []string {
+		t.Helper()
+		rs, err := st.Search(ctx, q, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var out []string
+		for _, r := range rs {
+			out = append(out, r.ID)
+		}
+		return out
+	}
+	iphone := "device:3c:22:fb:01:02:03"
+	for _, c := range []struct {
+		q     string
+		first string // the best match
+	}{
+		{"alice", iphone},                   // a hostname
+		{"ALICE-iPhone", iphone},            // in any case
+		{"3c:22:fb", iphone},                // a MAC prefix
+		{"192.168.1.23", "ip:192.168.1.23"}, // an address: exact first
+		{"www.example.com", "domain:www.example.com"},
+		{"device:3c:22", iphone}, // one kind
+	} {
+		got := ids(c.q)
+		if len(got) == 0 || got[0] != c.first {
+			t.Errorf("Search(%q) = %v, want %s first", c.q, got, c.first)
+		}
+	}
+	for _, q := range []string{"", "a", "%", "_x", "no-such-thing"} {
+		if got := ids(q); len(got) != 0 {
+			t.Errorf("Search(%q) = %v, want nothing", q, got)
+		}
+	}
+	if got := ids("ip:alice"); len(got) != 0 {
+		t.Errorf("a kind's search found other kinds: %v", got)
+	}
+	// A device found by its own name is labelled with it.
+	if err := st.SetDeviceLabel(ctx, "3c:22:fb:01:02:03", "Living room"); err != nil {
+		t.Fatal(err)
+	}
+	rs, err := st.Search(ctx, "living", 5)
+	if err != nil || len(rs) != 1 || rs[0].Label != "Living room" || rs[0].Kind != model.KindDevice {
+		t.Errorf("by label: %+v %v", rs, err)
+	}
+	if got := ids("alice"); len(got) == 0 || got[0] != iphone {
+		t.Errorf("by automatic name after a label: %v", got)
+	}
+}

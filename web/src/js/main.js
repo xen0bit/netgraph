@@ -46,6 +46,12 @@ const state = {
   layout: "dagre",
   graph: null,
   data: {},
+  // Per table: the column it is sorted by ({col, dir}), and how many rows
+  // to ask for when "load more" raised the API's default.
+  sort: {},
+  limits: {},
+  // The entity whose details are open, so a link can reopen them.
+  open: "",
 };
 
 function loadHash() {
@@ -58,6 +64,11 @@ function loadHash() {
   if (p.get("tab")) state.tab = p.get("tab");
   for (const k of ["collapse", "dns", "sites", "anomalies", "networks", "identity"]) if (p.has(k)) state.gopts[k] = p.get(k) === "1";
   if (p.has("top")) state.gopts.top = Number(p.get("top"));
+  // sort=<table>.<column>.<asc|desc>
+  state.sort = {};
+  const [st, col, dir] = (p.get("sort") || "").split(".");
+  if (tables[st] && tables[st].keys[Number(col)] && (dir === "asc" || dir === "desc")) state.sort[st] = { col: Number(col), dir };
+  state.open = p.get("open") || "";
 }
 
 function saveHash() {
@@ -67,6 +78,9 @@ function saveHash() {
   if (state.tab !== "graph") p.set("tab", state.tab);
   for (const k of ["collapse", "dns", "sites", "anomalies", "networks", "identity"]) p.set(k, state.gopts[k] ? "1" : "0");
   p.set("top", state.gopts.top);
+  const so = state.sort[state.tab];
+  if (so) p.set("sort", `${state.tab}.${so.col}.${so.dir}`);
+  if (state.open) p.set("open", state.open);
   lastHash = p.toString();
   history.replaceState(null, "", "#" + lastHash);
 }
@@ -206,11 +220,11 @@ async function renderTab(seq) {
   try {
     if (t === "graph") return await renderGraph(seq);
     const path = { devices: "devices", flows: "flows", dns: "dns", facts: "facts", wifi: "wifi", sensors: "sensors", anomalies: "anomalies" }[t];
-    let rows = await track(api(path));
+    let rows = await track(api(path, state.limits[t] ? { limit: state.limits[t] } : {}));
     if (seq !== refreshSeq) return;
     if (t === "anomalies") {
       $("#anomaly-note").textContent = rows?.learning
-        ? "Learning the network: until it has a day of history, only the checks that need none run (beacons, failed lookups, DNS tunnels, access points). New devices, new destinations and upload spikes follow."
+        ? "Learning the network: until it has a day of history, only the checks that need none run (beacons, failed lookups, DNS tunnels, access points, scans, password guessing). New devices, new destinations, upload spikes, new services and inbound surges follow."
         : "";
       rows = rows?.anomalies;
     }
@@ -346,6 +360,9 @@ const tables = {
       d.flows + (d.inbound ? `<div class="sub">${d.inbound} in</div>` : ""), d.dns_queries, bytes(d.bytes_out), bytes(d.bytes_in),
       `${clock(d.active_from)}–${clock(d.active_to)}`,
     ],
+    keys: [(d) => d.label, (d) => (d.randomized ? "private MAC" : d.vendor_short || d.vendor), (d) => addrKey(d.ips?.[0]),
+      (d) => [...(d.hostnames || []), ...(d.services || [])].join(" "), (d) => d.flows, (d) => d.dns_queries, (d) => d.bytes_out,
+      (d) => d.bytes_in, (d) => d.active_from],
     id: (d) => d.id,
     sort: (d) => -(d.bytes_in + d.bytes_out),
   },
@@ -370,6 +387,10 @@ const tables = {
         bytes(f.bytes_out), bytes(f.bytes_in), clock(f.last_seen),
       ];
     },
+    keys: [(f) => f.first_seen, (f) => f.direction,
+      (f) => (f.direction === "in" ? addrKey(f.client_ip) : f.device_name || addrKey(f.client_ip)), null,
+      (f) => (f.direction === "in" ? f.device_name || addrKey(f.server_ip) : f.peer_name || addrKey(f.server_ip)),
+      (f) => f.name, (f) => f.app, (f) => f.state, (f) => f.bytes_out, (f) => f.bytes_in, (f) => f.last_seen],
     id: peerID,
   },
   dns: {
@@ -381,6 +402,8 @@ const tables = {
       q.latency_ms ? q.latency_ms.toFixed(1) : "",
       `<span class="mono">${(q.answers || []).map((a) => `${esc(a.data)} (${a.ttl}s)`).join("<br>")}</span>`,
     ],
+    keys: [(q) => q.ts, (q) => q.device_name || addrKey(q.client_ip), (q) => q.qtype, (q) => q.qname, (q) => q.rcode,
+      (q) => q.latency_ms, (q) => q.answers?.length || 0],
     id: (q) => `domain:${q.qname}`,
   },
   facts: {
@@ -390,6 +413,8 @@ const tables = {
       badge(f.rel), esc(f.src_label || f.src), esc(f.dst_label || f.dst), stamp(f.first_seen), stamp(f.last_seen), f.count, esc(f.source),
       Object.entries(f.attrs || {}).map(([k, v]) => `${esc(k)}=${esc(v)}`).join(" "),
     ],
+    keys: [(f) => f.rel, (f) => f.src_label || f.src, (f) => f.dst_label || f.dst, (f) => f.first_seen, (f) => f.last_seen,
+      (f) => f.count, (f) => f.source, null],
     id: (f) => f.dst,
   },
   wifi: {
@@ -402,28 +427,133 @@ const tables = {
       n.channel || "",
       n.clients ?? 0, stamp(n.first_seen), stamp(n.last_seen),
     ],
+    keys: [(n) => n.ssid, (n) => n.bssid, (n) => n.security, (n) => n.channel, (n) => n.clients, (n) => n.first_seen, (n) => n.last_seen],
     id: (n) => `device:${n.bssid}`,
   },
   anomalies: {
     cols: ["Severity", "When", "Kind", "Device", "What"],
+    titles: { 4: "Click a row to see it on the graph" },
     row: (a) => [badge(a.severity, `sev-${a.severity}`), stamp(a.ts), esc(a.kind.replaceAll("_", " ")), esc(a.device_name || ""), esc(a.summary)],
+    keys: [(a) => ({ high: 3, medium: 2, low: 1 })[a.severity] || 0, (a) => a.ts, (a) => a.kind, (a) => a.device_name, (a) => a.summary],
     id: (a) => a.device || a.entity || null,
+    // On the graph, narrowed to what it is about: the address or network
+    // it names (the device's connections with it), else the device. The
+    // details start with the anomaly, whatever its severity.
+    open: (a) => {
+      const id = a.device || a.entity;
+      // Their entity IDs read as filters: ip:…, asn:…, device:….
+      const narrow = [a.entity, a.device].find((x) => /^(ip|asn|device):/.test(x || ""));
+      if (narrow) { state.filter = narrow; $("#filter").value = narrow; }
+      selectTab("graph").then(() => openEntity(id, { anomaly: a }));
+    },
   },
   sensors: {
     cols: ["Sensor", "Version", "Interfaces", "First seen", "Last seen", "Packets", "Kernel drops", "Events dropped"],
     num: [5, 6, 7],
     row: (s) => [esc(s.name), esc(s.version), esc((s.interfaces || []).join(", ")), stamp(s.first_seen), stamp(s.last_seen),
       s.stats?.packets ?? "", s.stats?.kernel_drops ?? "", s.stats?.events_dropped ?? ""],
+    keys: [(s) => s.name, (s) => s.version, (s) => (s.interfaces || []).join(" "), (s) => s.first_seen, (s) => s.last_seen,
+      (s) => s.stats?.packets, (s) => s.stats?.kernel_drops, (s) => s.stats?.events_dropped],
     id: () => null,
   },
 };
 
+// What the API returns at most by default, and at most at all: past the
+// default, "load more" doubles the request.
+const limits = { flows: [1000, 100000], dns: [500, 50000], facts: [2000, 100000] };
+
+// addrKey sorts addresses by their numbers: 10.0.0.9 before 10.0.0.10.
+const addrKey = (ip) => {
+  if (!ip) return "";
+  const v4 = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/.exec(ip);
+  if (v4) return "4" + v4.slice(1).map((o) => o.padStart(3, "0")).join(".");
+  return "6" + String(ip).toLowerCase();
+};
+
+// compare orders two sort keys: numbers by value, text naturally
+// ("host2" before "host10"), and empty values last whichever the direction.
+const collator = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
+function compare(a, b, dir) {
+  const ea = a === null || a === undefined || a === "", eb = b === null || b === undefined || b === "";
+  if (ea || eb) return ea === eb ? 0 : ea ? 1 : -1;
+  const c = typeof a === "number" && typeof b === "number" ? a - b : collator.compare(String(a), String(b));
+  return dir === "desc" ? -c : c;
+}
+
+// A column's first click sorts numbers largest first and text A to Z; the
+// second reverses it; the third goes back to the table's own order.
+function sortBy(t, col) {
+  const spec = tables[t];
+  const cur = state.sort[t];
+  const sample = state.data[t]?.map(spec.keys[col]).find((v) => v !== null && v !== undefined && v !== "");
+  const first = typeof sample === "number" ? "desc" : "asc";
+  if (!cur || cur.col !== col) state.sort[t] = { col, dir: first };
+  else if (cur.dir === first) state.sort[t] = { col, dir: first === "asc" ? "desc" : "asc" };
+  else delete state.sort[t];
+  saveHash();
+  renderTable(t);
+}
+
+// --- CSV ------------------------------------------------------------------------
+
+// Fields holding unix milliseconds, written as times.
+const timeFields = new Set(["ts", "first_seen", "last_seen", "active_from", "active_to", "expires"]);
+
+// csvCell quotes a value for CSV. Text from the network could be a
+// spreadsheet formula ("=HYPERLINK(...)" as a hostname), so text starting
+// like one is prefixed with a quote.
+function csvCell(k, v) {
+  if (v === null || v === undefined) return "";
+  if (timeFields.has(k) && typeof v === "number" && v > 0) v = new Date(v).toISOString();
+  else if (Array.isArray(v)) v = v.map((x) => (typeof x === "object" ? JSON.stringify(x) : x)).join("; ");
+  else if (typeof v === "object") v = JSON.stringify(v);
+  let s = String(v);
+  if (typeof v !== "number" && typeof v !== "boolean" && /^[=+\-@\t\r]/.test(s)) s = "'" + s;
+  return /[",\r\n]/.test(s) ? `"${s.replaceAll('"', '""')}"` : s;
+}
+
+// toCSV writes rows as the API returned them, every field, in the order
+// the table shows them.
+function toCSV(rows) {
+  const cols = [];
+  for (const r of rows) for (const k of Object.keys(r)) if (!cols.includes(k)) cols.push(k);
+  return [cols.join(","), ...rows.map((r) => cols.map((k) => csvCell(k, r[k])).join(","))].join("\r\n") + "\r\n";
+}
+
 function renderTable(t) {
   const spec = tables[t];
-  const rows = [...(state.data[t] || [])];
+  const all = state.data[t] || [];
+  const rows = [...all];
   if (spec.sort) rows.sort((a, b) => spec.sort(a) - spec.sort(b));
+  const so = state.sort[t];
+  if (so) rows.sort((a, b) => compare(spec.keys[so.col](a), spec.keys[so.col](b), so.dir));
   const el = $(`#t-${t}`);
-  const head = `<thead><tr>${spec.cols.map((c, i) => `<th class="${spec.num?.includes(i) ? "num" : ""}"${spec.titles?.[i] ? ` title="${esc(spec.titles[i])}"` : ""}>${esc(c)}</th>`).join("")}</tr></thead>`;
+  const tools = tableTools(t, el);
+  const head = `<thead><tr>${spec.cols.map((c, i) => {
+    const sorted = so?.col === i ? (so.dir === "asc" ? "ascending" : "descending") : "";
+    const label = esc(c) + (sorted ? (so.dir === "asc" ? " ▲" : " ▼") : "");
+    const cls = spec.num?.includes(i) ? "num" : "";
+    const title = spec.titles?.[i] ? ` title="${esc(spec.titles[i])}"` : "";
+    return spec.keys[i] && c
+      ? `<th class="${cls}"${title}${sorted ? ` aria-sort="${sorted}"` : ""}><button class="sort" data-col="${i}">${label}</button></th>`
+      : `<th class="${cls}"${title}>${esc(c)}</th>`;
+  }).join("")}</tr></thead>`;
+  // Past the API's limit the table is the first rows only: say so, and
+  // offer more.
+  const [def, max] = limits[t] || [];
+  const asked = state.limits[t] || def;
+  const capped = def && all.length >= asked;
+  tools.querySelector(".count").textContent = `${all.length} ${all.length === 1 ? "row" : "rows"}` +
+    (capped ? ` · the first ${asked}${so ? "; sorting covers these only" : ""}` : "");
+  const more = tools.querySelector("[data-more]");
+  more.hidden = !capped || asked >= max;
+  more.onclick = () => { state.limits[t] = Math.min(asked * 2, max); refresh(); };
+  tools.querySelector("[data-csv]").disabled = !rows.length;
+  tools.querySelector("[data-csv]").onclick = () => download(`netgraph-${t}-${fileStamp()}.csv`, toCSV(rows), "text/csv");
+  el.onclick = (e) => {
+    const b = e.target.closest("thead button.sort");
+    if (b) sortBy(t, Number(b.dataset.col));
+  };
   if (!rows.length) {
     el.innerHTML = head + `<tbody><tr><td class="empty" colspan="${spec.cols.length}">Nothing in this window.</td></tr></tbody>`;
     return;
@@ -433,9 +563,26 @@ function renderTable(t) {
   el.querySelector("tbody").onclick = (e) => {
     const tr = e.target.closest("tr[data-i]");
     if (!tr) return;
-    const id = spec.id(rows[Number(tr.dataset.i)]);
-    if (id) openEntity(id);
+    const r = rows[Number(tr.dataset.i)];
+    const id = spec.id(r);
+    if (!id) return;
+    if (spec.open) spec.open(r);
+    else openEntity(id);
   };
+}
+
+// tableTools is the bar above a table: its row count, "load more" and CSV.
+function tableTools(t, table) {
+  let tools = document.getElementById(`tt-${t}`);
+  if (!tools) {
+    tools = document.createElement("div");
+    tools.id = `tt-${t}`;
+    tools.className = "table-tools";
+    tools.innerHTML = `<span class="count"></span><button data-more hidden>Load more</button><span class="spacer"></span>
+      <button data-csv title="Download these rows, every field, as CSV">CSV</button>`;
+    table.before(tools);
+  }
+  return tools;
 }
 
 // --- graph ----------------------------------------------------------------------
@@ -547,9 +694,11 @@ function fileStamp() {
 
 // --- entity panel -------------------------------------------------------------------
 
-async function openEntity(id) {
+async function openEntity(id, { anomaly } = {}) {
   const panel = $("#panel");
   panel.hidden = false;
+  state.open = id;
+  saveHash();
   if (id.startsWith("other:")) return openRest(id);
   if (id.startsWith("dests:")) id = id.slice("dests:".length);
   if (id.startsWith("clients:")) id = id.slice("clients:".length);
@@ -594,8 +743,10 @@ async function openEntity(id) {
     return `<li><time>${clock(f.first_seen)}</time>${dirBadge(f.direction)} ${line} ${badge(f.state, f.state)}${f.closed ? badge(f.end_reason, "closed") : ""} <span class="muted">sent ${bytes(f.bytes_out)} · received ${bytes(f.bytes_in)}</span></li>`;
   }).join("");
   const timeline = (d.timeline || []).slice(-300).map((e) => `<li><time>${clock(e.ts)}</time>${badge(e.type)} ${esc(e.detail)}</li>`).join("");
-  const flagged = state.graph?.nodes?.find((n) => n.id === id)?.attrs?.anomalies;
-  const anomalyBox = flagged ? `<div class="anomaly-box"><b>Anomalies</b><ul>${flagged.split("\n").map((l) => `<li>${esc(l)}</li>`).join("")}</ul></div>` : "";
+  const flagged = anomaly
+    ? [anomaly.summary, ...Object.entries(anomaly.evidence || {}).map(([k, v]) => `${k}: ${v}`)]
+    : state.graph?.nodes?.find((n) => n.id === id)?.attrs?.anomalies?.split("\n");
+  const anomalyBox = flagged ? `<div class="anomaly-box"><b>${anomaly ? `${esc(anomaly.severity)} ${esc(anomaly.kind.replaceAll("_", " "))}` : "Anomalies"}</b><ul>${flagged.map((l) => `<li>${esc(l)}</li>`).join("")}</ul></div>` : "";
   $("#panel-body").innerHTML = `${anomalyBox}
     <h2>${esc(d.label || d.key)}</h2>
     <div class="muted mono">${esc(d.id)}</div>${rename}
@@ -696,7 +847,73 @@ function selectTab(t) {
   state.tab = t;
   for (const b of $$(".tabs button")) b.setAttribute("aria-selected", String(b.dataset.tab === t));
   for (const v of $$(".view")) v.hidden = v.id !== `view-${t}`;
-  refresh();
+  return refresh();
+}
+
+// closePanel hides the details, and forgets them for links.
+function closePanel() {
+  $("#panel").hidden = true;
+  state.open = "";
+  saveHash();
+}
+
+// --- search ---------------------------------------------------------------------
+
+// The header's search box: devices, addresses, names and networks by key or
+// name, from GET /api/v1/search. Enter or a click opens the details.
+function search() {
+  const input = $("#search"), list = $("#search-results");
+  let seq = 0, timer, results = [], active = -1;
+  const close = () => { list.hidden = true; input.setAttribute("aria-expanded", "false"); active = -1; };
+  const show = () => {
+    list.innerHTML = results.length
+      ? results.map((r, i) => `<li role="option" id="sr-${i}" data-i="${i}"${i === active ? ` class="active" aria-selected="true"` : ""}>${badge(r.kind)} ${esc(r.label)}${r.label !== r.key ? ` <span class="muted mono">${esc(r.key)}</span>` : ""}</li>`).join("")
+      : `<li class="muted">Nothing matches.</li>`;
+    list.hidden = false;
+    input.setAttribute("aria-expanded", "true");
+    if (active >= 0) input.setAttribute("aria-activedescendant", `sr-${active}`);
+    else input.removeAttribute("aria-activedescendant");
+  };
+  const pick = (i) => {
+    const r = results[i];
+    if (!r) return;
+    close();
+    input.value = "";
+    // Out of the box, so Escape closes the details it opened.
+    input.blur();
+    openEntity(r.id);
+  };
+  input.oninput = () => {
+    clearTimeout(timer);
+    const q = input.value.trim();
+    if (q.length < 2) { close(); return; }
+    timer = setTimeout(async () => {
+      const n = ++seq;
+      let rs;
+      try { rs = await api("search", { q, limit: 12 }); } catch { return; }
+      if (n !== seq) return;
+      results = rs || [];
+      active = results.length ? 0 : -1;
+      show();
+    }, 200);
+  };
+  input.onkeydown = (e) => {
+    if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+      if (!results.length) return;
+      e.preventDefault();
+      active = (active + (e.key === "ArrowDown" ? 1 : -1) + results.length) % results.length;
+      show();
+    } else if (e.key === "Enter") {
+      e.preventDefault();
+      pick(Math.max(active, 0));
+    } else if (e.key === "Escape") {
+      close();
+      input.blur();
+    }
+  };
+  // mousedown, not click: it lands before the input's blur closes the list.
+  list.onmousedown = (e) => { const li = e.target.closest("li[data-i]"); if (li) { e.preventDefault(); pick(Number(li.dataset.i)); } };
+  input.onblur = () => setTimeout(close, 100);
 }
 
 function init() {
@@ -742,7 +959,7 @@ function init() {
       : await api("graph", { ...graphOpts(), format: "d2" }, true);
     download(`netgraph-${fileStamp()}.d2`, script, "text/plain");
   };
-  $("#panel-close").onclick = () => { $("#panel").hidden = true; };
+  $("#panel-close").onclick = closePanel;
   $("#theme").onclick = () => {
     const next = theme() === "dark" ? "light" : "dark";
     document.documentElement.dataset.theme = next;
@@ -752,11 +969,12 @@ function init() {
   document.addEventListener("keydown", (e) => {
     if (e.target.matches("input, select, textarea")) return;
     const k = e.key;
-    if (k === "Escape") $("#panel").hidden = true;
+    if (k === "Escape") closePanel();
     else if (k === "[") $("#back").click();
     else if (k === "]") $("#fwd").click();
     else if (k === "l") $("#live").click();
     else if (k === "/") { e.preventDefault(); $("#filter").focus(); }
+    else if (k === "f") { e.preventDefault(); $("#search").focus(); }
     else if (k >= "1" && Number(k) <= $$(".tabs button").length) selectTab($$(".tabs button")[Number(k) - 1].dataset.tab);
   });
   brush();
@@ -770,9 +988,14 @@ function init() {
     const changed = state.live !== wasLive;
     if (changed) setLive(state.live);
     if (!changed || !state.live) selectTab(state.tab);
+    if (state.open) openEntity(state.open);
+    else $("#panel").hidden = true;
   });
+  search();
   selectTab(state.tab);
   if (state.live) setLive(true);
+  // A link with open= starts with those details.
+  if (state.open) openEntity(state.open);
 }
 
 init();
