@@ -57,9 +57,9 @@ func (s *Store) Anomalies(ctx context.Context, f model.Filter) (*model.AnomalyRe
 	history := rep.SinceMS != 0 && from-rep.SinceMS >= AnomalyHistory.Milliseconds()
 	rep.Learning = !history
 	a := &anomalies{s: s, from: from, to: to, since: rep.SinceMS, devs: map[int64]*anomalyDevice{}}
-	checks := []func(context.Context) error{a.newDevices, a.beacons, a.dns, a.accessPoints}
+	checks := []func(context.Context) error{a.newDevices, a.beacons, a.dns, a.accessPoints, a.scans, a.bruteForce}
 	if history {
-		checks = append(checks, a.newDestinations, a.uploadSpikes)
+		checks = append(checks, a.newDestinations, a.uploadSpikes, a.newServices, a.inboundSurges)
 	}
 	for _, check := range checks {
 		if err := check(ctx); err != nil {

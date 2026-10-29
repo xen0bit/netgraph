@@ -46,9 +46,11 @@ func MarkAnomalies(g *model.Graph, as []model.Anomaly) {
 				}
 			}
 		}
+		// The edge between them, whichever way it points: a client from
+		// outside connects into the device.
 		for i := range g.Edges {
 			e := &g.Edges[i]
-			if e.From == a.Device && slices.Contains(targets, e.To) {
+			if e.From == a.Device && slices.Contains(targets, e.To) || e.To == a.Device && slices.Contains(targets, e.From) {
 				mark(&e.Attrs, a)
 			}
 		}

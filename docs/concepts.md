@@ -212,6 +212,8 @@ Checks that need no history:
 | `dns_failures` | a device looks up at least 20 names that do not exist, 30% or more of its names (malware generating domains, or a broken device). Single labels, reverse lookups and local suffixes do not count | medium, high from 100 |
 | `dns_tunnel` | a device looks up at least 50 different names under one site whose first labels are 20 characters or more (median): data smuggled out in the names | medium, high from 500 |
 | `rogue_ap` | access points broadcast one network name with different security | high when one is open or WEP and another protected (an evil twin); low otherwise (WPA2 next to WPA3 is common on mesh and 6 GHz radios) |
+| `scan` | an address outside tries at least 10 ports on a device, most of them probes that never became a session (refused, unanswered, or half-open); or one port on at least 10 addresses here | low: a server on the internet is scanned all day. More than 10 scanners of one device are one finding, with the networks most of them came from |
+| `brute_force` | an address outside opens at least 50 short sessions (under 10 s) to a login service on a device: SSH, Telnet, FTP, RDP, VNC, mail, databases. Web logins look like any page load, so they are not counted | medium, high from 500; low for 500 or more from at least 20 addresses with fewer each |
 
 Checks that compare with history need a day of it: until the first sensor
 has reported for 24 hours the report says `learning` and they are skipped,
@@ -223,6 +225,15 @@ since everything is new to a network just met. They look back 7 days.
 | `new_destination` | a device with a day of history connects to a site, or an unnamed address, it had not in the last 7 days. A device that reached at most 30 destinations that week is predictable (a plug, a camera) and anything new from it counts; from a busier one only a new destination it uploaded 1 MB or more to | medium from a predictable device, high if also new to the whole network with 10 MB up; low from a busy one, medium if new to the network with 50 MB up. More than 10 for one device are summed up in one |
 | `upload_spike` | a device sends more per hour, on connections it opened, than in any hour of its last week, at least 4 times its median hour and at least 20 MB an hour. It needs 24 active hours of history | medium; high at 5 times its busiest hour and 200 MB an hour |
 | `rogue_ap` | a new access point broadcasts a network that the LAN's own devices (ones that used an address on it) associate with | medium |
+| `new_service` | a device holds sessions with clients outside on a port it had not served in the last 7 days, with at least 3 clients or 1 MB: a newly forwarded port or a container published by mistake. Dynamic ports (49152 and up), which peer-to-peer apps open, do not count | medium |
+| `inbound_surge` | a device accepts more connections from outside in an hour than 4 times its busiest hour of the last 7 days, and at least 1000. It needs 24 active hours of history | medium; high at 10 times and 10,000 an hour |
+
+The checks for servers here look only at connections opened from outside
+(direction `in`): traffic between devices here, such as a reverse proxy's
+loopback, never counts. A probe is a connection in which the client sent
+at most 3 packets and the device at most 2; a session is one the device
+answered with 3 or more. With an [ASN table](deployment.md#networks-and-countries),
+findings name each source's network and country.
 
 A window shorter than an hour is compared with hours as it is: its total
 is a lower bound on that hour's. A device filter keeps that device's

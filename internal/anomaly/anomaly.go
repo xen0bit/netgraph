@@ -101,6 +101,30 @@ func Spike(rate float64, hours []float64) (spike, high bool, median, peak float6
 	return spike, high, median, peak
 }
 
+// Surge rules: connections from outside to a device in an hour against its
+// busiest recent hours.
+const (
+	SurgeMinHours = 24   // active hours of history needed
+	SurgeMinRate  = 1000 // connections an hour: below this nothing is a surge
+	SurgeOverMax  = 4    // and at least this many times the busiest hour
+	SurgeHighOver = 10   // high severity: this many times the busiest hour
+	SurgeHighRate = 10000
+)
+
+// Surge compares a rate (connections per hour) with a device's past active
+// hours. Unlike Spike it measures against the busiest hour, not the
+// median: a server's traffic swings with the day, and its own peak is the
+// honest bar.
+func Surge(rate float64, hours []float64) (surge, high bool, peak float64) {
+	if len(hours) < SurgeMinHours {
+		return false, false, 0
+	}
+	peak = slices.Max(hours)
+	surge = rate >= SurgeMinRate && rate >= SurgeOverMax*peak
+	high = surge && rate >= SurgeHighOver*peak && rate >= SurgeHighRate
+	return surge, high, peak
+}
+
 // LocalName reports names that fail to resolve as a matter of course:
 // single labels (search-domain probes, WPAD), reverse lookups and
 // local-only suffixes. They are not evidence of anything.

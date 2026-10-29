@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xen0bit/netgraph/internal/asn"
 	"github.com/xen0bit/netgraph/internal/model"
 	"github.com/xen0bit/netgraph/internal/testutil"
 	"github.com/xen0bit/netgraph/internal/wire"
@@ -20,6 +21,7 @@ type anomalyNet struct {
 	t      *testing.T
 	evs    []wire.Event
 	flowID uint64
+	asn    *asn.DB // the server's ASN table, if any
 }
 
 func (n *anomalyNet) add(at time.Time, e wire.Event) {
@@ -64,7 +66,7 @@ func (n *anomalyNet) store(started time.Time) *Store {
 	// The server's clock follows the events as they arrive: it dates when a
 	// sensor first reported.
 	now := started
-	st, err := Open(filepath.Join(n.t.TempDir(), "ng.db"), Config{Now: func() time.Time { return now }})
+	st, err := Open(filepath.Join(n.t.TempDir(), "ng.db"), Config{Now: func() time.Time { return now }, ASN: func() *asn.DB { return n.asn }})
 	if err != nil {
 		n.t.Fatal(err)
 	}

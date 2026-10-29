@@ -487,6 +487,10 @@ const (
 	AnomalyDNSFailures    = "dns_failures"    // many lookups of names that do not exist
 	AnomalyDNSTunnel      = "dns_tunnel"      // many long, unique names under one site
 	AnomalyRogueAP        = "rogue_ap"        // a network name with an unexpected access point
+	AnomalyScan           = "scan"            // an address outside tried many ports, or one port on many hosts
+	AnomalyBruteForce     = "brute_force"     // many short sessions to a login service from outside
+	AnomalyNewService     = "new_service"     // a device here started serving a port to clients outside
+	AnomalyInboundSurge   = "inbound_surge"   // far more connections from outside than in any recent hour
 )
 
 // Anomaly severities, least to most.
