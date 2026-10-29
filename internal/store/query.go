@@ -210,15 +210,20 @@ func protoNumber(p string) (int, bool) {
 // flowCols are the columns flowWhere filters on, which raw flows and
 // traffic_hourly name differently.
 type flowCols struct {
-	names []string // a connection's names
-	port  string   // the server's port
+	names   []string // a connection's names
+	port    string   // the server's port
+	asn, cc string   // the remote end's network and country
 }
 
 var (
 	// An inbound connection's server is the device: its port is the
 	// device's own.
-	rawCols    = flowCols{names: []string{"sni", "http_host", "qname"}, port: serverPort("")}
-	hourlyCols = flowCols{names: []string{"name"}, port: "remote_port"}
+	rawCols    = flowCols{names: []string{"sni", "http_host", "qname"}, port: serverPort(""), asn: "remote_asn", cc: "remote_cc"}
+	hourlyCols = flowCols{names: []string{"name"}, port: "remote_port", asn: "remote_asn", cc: "remote_cc"}
+	// Interval records keep no network: their connection has it.
+	recordCols = flowCols{names: rawCols.names, port: rawCols.port,
+		asn: "(SELECT n.remote_asn FROM connections n WHERE n.flow_key = flows.flow_key)",
+		cc:  "(SELECT n.remote_cc FROM connections n WHERE n.flow_key = flows.flow_key)"}
 )
 
 // serverPort is the SQL for the server's port of a connections or flows
@@ -264,6 +269,12 @@ func (s *Store) flowWhere(ctx context.Context, f model.Filter, w *where, cols fl
 	}
 	if f.App != "" {
 		w.add("app = ?", f.App)
+	}
+	if f.ASN != 0 {
+		w.add(cols.asn+" = ?", f.ASN)
+	}
+	if f.Country != "" {
+		w.add(cols.cc+" = ?", f.Country)
 	}
 	if !f.Multicast {
 		w.add("multicast = 0")
@@ -346,6 +357,7 @@ func (s *Store) flowsWhere(ctx context.Context, f model.Filter, extra string, ex
 	}
 	q := `SELECT flow_key, proto, client_ip, client_port, client_mac, client_device, remote_ip, remote_port, direction,
 		app, sni, http_host, qname, alpn, ja4, user_agent, first_seen, last_seen, final, end_reason,
+		coalesce(remote_asn, 0), remote_cc,
 		` + connBytes("bytes_out", from, to) + ` AS bo, ` + connBytes("bytes_in", from, to) + ` AS bi,
 		` + connBytes("pkts_out", from, to) + `, ` + connBytes("pkts_in", from, to) + `
 		FROM connections c WHERE ` + w.sql() + `
@@ -367,7 +379,7 @@ func (s *Store) flowsWhere(ctx context.Context, f model.Filter, extra string, ex
 		var localPort int
 		if err := rows.Scan(&fl.Key, &proto, &localIP, &localPort, &fl.DeviceMAC, &dev, &fl.RemoteIP, &fl.RemotePort, &fl.Direction,
 			&fl.App, &fl.SNI, &fl.HTTPHost, &fl.QName, &fl.ALPN, &fl.JA4, &fl.UserAgent,
-			&fl.FirstSeen, &fl.LastSeen, &final, &fl.EndReason, &bo, &bi, &po, &pi); err != nil {
+			&fl.FirstSeen, &fl.LastSeen, &final, &fl.EndReason, &fl.ASN, &fl.Country, &bo, &bi, &po, &pi); err != nil {
 			return nil, err
 		}
 		setEnds(&fl, localIP, localPort)
@@ -399,6 +411,9 @@ func (s *Store) flowsWhere(ctx context.Context, f model.Filter, extra string, ex
 	}
 	labels, macs, err := s.labels(ctx, devs)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.setASOrgs(ctx, out); err != nil {
 		return nil, err
 	}
 	for i, id := range devIDs {
@@ -509,7 +524,7 @@ func (s *Store) flowsHourly(ctx context.Context, f model.Filter, from, to int64)
 		return nil, err
 	}
 	rows, err := s.r.QueryContext(ctx, `SELECT client_device, client_ip, remote_ip, remote_port, proto, name, direction, max(app),
-		min(bucket), max(bucket), sum(flows), sum(bytes_out), sum(bytes_in)
+		min(bucket), max(bucket), sum(flows), sum(bytes_out), sum(bytes_in), coalesce(max(remote_asn), 0), max(remote_cc)
 		FROM traffic_hourly WHERE `+w.sql()+`
 		GROUP BY client_device, client_ip, remote_ip, remote_port, proto, name, direction ORDER BY sum(bytes_out) + sum(bytes_in) DESC LIMIT ?`, append(w.args, limit(f, 1000, 100000))...)
 	if err != nil {
@@ -526,7 +541,7 @@ func (s *Store) flowsHourly(ctx context.Context, f model.Filter, from, to int64)
 		var first, last int64
 		var localIP string
 		var port int
-		if err := rows.Scan(&dev, &localIP, &fl.RemoteIP, &port, &proto, &fl.Name, &fl.Direction, &fl.App, &first, &last, &n, &fl.BytesOut, &fl.BytesIn); err != nil {
+		if err := rows.Scan(&dev, &localIP, &fl.RemoteIP, &port, &proto, &fl.Name, &fl.Direction, &fl.App, &first, &last, &n, &fl.BytesOut, &fl.BytesIn, &fl.ASN, &fl.Country); err != nil {
 			return nil, err
 		}
 		fl.Key = fmt.Sprintf("hourly:%d:%s:%s:%d:%d:%s", dev, localIP, fl.RemoteIP, port, proto, fl.Direction)
@@ -551,6 +566,9 @@ func (s *Store) flowsHourly(ctx context.Context, f model.Filter, from, to int64)
 	}
 	labels, macs, err := s.labels(ctx, devs)
 	if err != nil {
+		return nil, err
+	}
+	if err := s.setASOrgs(ctx, out); err != nil {
 		return nil, err
 	}
 	for i, id := range devIDs {
@@ -954,7 +972,7 @@ func (s *Store) Timeseries(ctx context.Context, f model.Filter, step time.Durati
 	w := &where{}
 	if prec == model.PrecisionExact {
 		flowsWindow(w, from, to)
-		if err := s.flowWhere(ctx, f, w, rawCols); err != nil {
+		if err := s.flowWhere(ctx, f, w, recordCols); err != nil {
 			return nil, err
 		}
 		rows, err := s.r.QueryContext(ctx, `SELECT flow_key, t_start, t_end, first_seen, bytes_out, bytes_in, client_device FROM `+flowsFrom+` WHERE `+w.sql(), w.args...)
@@ -1201,15 +1219,20 @@ func (s *Store) Graph(ctx context.Context, f model.Filter, o model.GraphOptions)
 }
 
 // destExpr is where a connection points in a graph: the name it was reached
-// by when collapsing, else its remote address. An inbound connection's peer
-// is the client that opened it, always by address. It matches graph.Build's
-// choice for everything but LAN-to-LAN connections, which it maps to devices.
-func destExpr(collapse bool) string {
-	if collapse {
-		return `CASE WHEN c.direction NOT IN ('local', 'in') AND coalesce(nullif(c.sni, ''), nullif(c.http_host, ''), nullif(c.qname, '')) IS NOT NULL
-			THEN 'domain:' || coalesce(nullif(c.sni, ''), nullif(c.http_host, ''), nullif(c.qname, '')) ELSE 'ip:' || c.remote_ip END`
+// by when collapsing, else its remote address, or with Networks the
+// address's network. An inbound connection's peer is the client that
+// opened it, by address or network. It matches graph.Build's choice for
+// everything but LAN-to-LAN connections, which it maps to devices.
+func destExpr(o model.GraphOptions) string {
+	addr := `'ip:' || c.remote_ip`
+	if o.Networks {
+		addr = `(CASE WHEN c.direction != 'local' AND coalesce(c.remote_asn, 0) != 0 THEN 'asn:' || c.remote_asn ELSE 'ip:' || c.remote_ip END)`
 	}
-	return `'ip:' || c.remote_ip`
+	if o.Collapse {
+		return `CASE WHEN c.direction NOT IN ('local', 'in') AND coalesce(nullif(c.sni, ''), nullif(c.http_host, ''), nullif(c.qname, '')) IS NOT NULL
+			THEN 'domain:' || coalesce(nullif(c.sni, ''), nullif(c.http_host, ''), nullif(c.qname, '')) ELSE ` + addr + ` END`
+	}
+	return addr
 }
 
 // srcExpr is a connection's device in topDestinations' keys: "o" or "i"
@@ -1228,7 +1251,7 @@ func (s *Store) topDestinations(ctx context.Context, f model.Filter, from, to in
 	if err := s.flowWhere(ctx, f, w, rawCols); err != nil {
 		return "", nil, nil, nil, nil, err
 	}
-	dest := destExpr(o.Collapse)
+	dest := destExpr(o)
 	rows, err := s.r.QueryContext(ctx, `SELECT `+srcExpr+` AS src, `+dest+` AS dest,
 		sum(`+connBytes("bytes_out", from, to)+`), sum(`+connBytes("bytes_in", from, to)+`), count(*)
 		FROM connections c WHERE `+w.sql()+` GROUP BY src, dest`, w.args...)

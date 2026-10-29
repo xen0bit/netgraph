@@ -191,15 +191,25 @@ func devicesTable(ds []model.Device) *table {
 }
 
 func flowsTable(fl []model.Flow) *table {
-	t := &table{head: []string{"OPENED", "DIR", "CLIENT", "SERVER", "NAME", "APP", "STATE", "SENT", "RECV", "LAST"}}
+	// The remote end's network, when the server has an ASN table.
+	networks := slices.ContainsFunc(fl, func(f model.Flow) bool { return f.ASN != 0 })
+	head := []string{"OPENED", "DIR", "CLIENT", "SERVER", "NAME", "APP", "STATE", "SENT", "RECV", "LAST"}
+	if networks {
+		head = slices.Insert(head, 4, "NETWORK")
+	}
+	t := &table{head: head}
 	for _, f := range fl {
 		state := f.State
 		if f.Closed {
 			state += ",closed:" + f.EndReason
 		}
 		client, server := f.Ends()
-		t.add(ts(f.FirstSeen), f.Direction, clip(client, 28), clip(server, 32), clip(f.Name, 36), f.App, state,
-			model.FormatBytes(f.BytesOut), model.FormatBytes(f.BytesIn), ts(f.LastSeen)[11:])
+		row := []string{ts(f.FirstSeen), f.Direction, clip(client, 28), clip(server, 32), clip(f.Name, 36), f.App, state,
+			model.FormatBytes(f.BytesOut), model.FormatBytes(f.BytesIn), ts(f.LastSeen)[11:]}
+		if networks {
+			row = slices.Insert(row, 4, clip(f.Network(), 32))
+		}
+		t.add(row...)
 	}
 	return t
 }

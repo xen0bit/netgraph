@@ -133,15 +133,18 @@ td .muted { color: var(--fg-2); }
 .legend .sw.dev { border-color: #1d4ed8; background: #dbeafe; }
 .legend .sw.name { border-color: #15803d; background: #dcfce7; }
 .legend .sw.addr { border-color: #4b5563; background: #f3f4f6; }
+.legend .sw.net { border-color: #0e7490; background: #ecfeff; }
 .legend .sw.rest { border-color: #9ca3af; }
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) .legend .sw.dev { border-color: #93c5fd; background: #1e3a8a; }
   :root:not([data-theme="light"]) .legend .sw.name { border-color: #86efac; background: #14532d; }
   :root:not([data-theme="light"]) .legend .sw.addr { border-color: #d1d5db; background: #374151; }
+  :root:not([data-theme="light"]) .legend .sw.net { border-color: #67e8f9; background: #164e63; }
 }
 :root[data-theme="dark"] .legend .sw.dev { border-color: #93c5fd; background: #1e3a8a; }
 :root[data-theme="dark"] .legend .sw.name { border-color: #86efac; background: #14532d; }
 :root[data-theme="dark"] .legend .sw.addr { border-color: #d1d5db; background: #374151; }
+:root[data-theme="dark"] .legend .sw.net { border-color: #67e8f9; background: #164e63; }
 .anomaly-box { border: 1px solid var(--err); border-radius: 8px; padding: 8px 12px; margin-bottom: 12px; }
 .anomaly-box b { color: var(--err); }
 .anomaly-box ul { margin: 4px 0 0; padding-left: 18px; }

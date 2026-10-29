@@ -13,10 +13,13 @@ RUN go mod download
 COPY . .
 ARG VERSION=dev
 ENV CGO_ENABLED=0
-RUN make web.build VERSION=${VERSION} \
+# The ASN table is embedded when the context has one (make asn.fetch first);
+# this build does not download it, so the lab stays offline.
+RUN tags=embed_web; [ -s internal/asn/ip2asn-combined.tsv.gz ] && [ -s internal/asn/ip2asn.date ] && tags=$tags,embed_asn; \
+    make web.build VERSION=${VERSION} \
  && go build -trimpath -ldflags "-s -w -X github.com/xen0bit/netgraph/internal/buildinfo.Version=${VERSION}" \
         -o /out/netgraph-sensor ./cmd/netgraph-sensor \
- && go build -trimpath -tags embed_web -ldflags "-s -w -X github.com/xen0bit/netgraph/internal/buildinfo.Version=${VERSION}" \
+ && go build -trimpath -tags $tags -ldflags "-s -w -X github.com/xen0bit/netgraph/internal/buildinfo.Version=${VERSION}" \
         -o /out/netgraph ./cmd/netgraph \
  && mkdir -p /out/data
 

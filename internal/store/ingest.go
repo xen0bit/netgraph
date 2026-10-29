@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xen0bit/netgraph/internal/asn"
 	"github.com/xen0bit/netgraph/internal/model"
 	"github.com/xen0bit/netgraph/internal/oui"
 	"github.com/xen0bit/netgraph/internal/wire"
@@ -149,6 +150,8 @@ type trafficKey struct {
 type trafficAgg struct {
 	flows     int64
 	bout, bin int64
+	asn       any // remote_asn: nil (not looked up) or int64
+	cc        string
 }
 
 type dnsKey struct {
@@ -808,6 +811,10 @@ func (g *ingester) flowRecord(ctx context.Context, sid int64, sensor, boot strin
 		delete(g.flowName, key)
 	}
 	name := firstNonEmpty(f.SNI, f.HTTPHost, qname)
+	rasn, rcc, err := g.network(ctx, remote, dir == "local" || multicast, end)
+	if err != nil {
+		return err
+	}
 
 	if _, err := g.tx.ExecContext(ctx, `INSERT INTO flows (
 		sensor_id, flow_key, proto, src_ip, src_port, dst_ip, dst_port, first_seen, t_start, t_end,
@@ -821,9 +828,12 @@ func (g *ingester) flowRecord(ctx context.Context, sid int64, sensor, boot strin
 	}
 	if _, err := g.tx.ExecContext(ctx, `INSERT INTO connections (
 		flow_key, sensor_id, proto, client_ip, client_port, client_mac, client_device, remote_ip, remote_port, direction, multicast,
-		first_seen, last_seen, final, end_reason, app, sni, alpn, ja4, http_host, user_agent, qname, bytes_out, bytes_in, pkts_out, pkts_in)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		first_seen, last_seen, final, end_reason, app, sni, alpn, ja4, http_host, user_agent, qname, bytes_out, bytes_in, pkts_out, pkts_in,
+		remote_asn, remote_cc)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (flow_key) DO UPDATE SET
+			remote_asn = coalesce(remote_asn, excluded.remote_asn),
+			remote_cc = CASE WHEN remote_asn IS NULL THEN excluded.remote_cc ELSE remote_cc END,
 			first_seen = min(first_seen, excluded.first_seen), last_seen = max(last_seen, excluded.last_seen),
 			final = max(final, excluded.final),
 			end_reason = CASE WHEN excluded.final = 1 THEN excluded.end_reason ELSE end_reason END,
@@ -840,7 +850,7 @@ func (g *ingester) flowRecord(ctx context.Context, sid int64, sensor, boot strin
 			pkts_out = pkts_out + excluded.pkts_out, pkts_in = pkts_in + excluded.pkts_in`,
 		key, sid, f.Proto, client.String(), cport, devMAC, dev, remote.String(), rport, dir, boolInt(multicast),
 		first, end, boolInt(f.Final), f.EndReason, f.App, f.SNI, f.ALPN, f.JA4, f.HTTPHost, f.UserAgent, qname,
-		f.BytesOut, f.BytesIn, f.PktsOut, f.PktsIn); err != nil {
+		f.BytesOut, f.BytesIn, f.PktsOut, f.PktsIn, rasn, rcc); err != nil {
 		return err
 	}
 
@@ -904,7 +914,7 @@ func (g *ingester) flowRecord(ctx context.Context, sid int64, sensor, boot strin
 		sport = cport
 	}
 	g.addTraffic(trafficKey{device: dev, client: client.String(), remote: remote.String(), port: int(sport), proto: int(f.Proto), name: name, app: f.App, multicast: multicast, dir: dir},
-		start, end, first, int64(f.BytesOut), int64(f.BytesIn))
+		start, end, first, int64(f.BytesOut), int64(f.BytesIn), rasn, rcc)
 	if start == first || f.Final {
 		detail := fmt.Sprintf("%s → %s %s", client, firstNonEmpty(name, remote.String()), portProto(int(rport), f.Proto))
 		if inbound {
@@ -913,6 +923,56 @@ func (g *ingester) flowRecord(ctx context.Context, sid int64, sensor, boot strin
 		g.live = append(g.live, LiveEvent{Type: "flow", TS: end, Device: dev, Detail: detail})
 	}
 	return nil
+}
+
+// network is the autonomous system a connection's remote end belongs to,
+// for its remote_asn and remote_cc columns: 0 for a local or group address
+// or one no network announces, and nil (NULL, to be filled in by
+// EnrichASN) while no ASN table is loaded. Each network seen becomes an
+// asn entity named after its organisation.
+func (g *ingester) network(ctx context.Context, remote netip.Addr, here bool, ts int64) (any, string, error) {
+	if here || g.s.nets.isLocal(remote) {
+		return int64(0), "", nil
+	}
+	db := g.s.cfg.ASN()
+	if db == nil {
+		return nil, "", nil
+	}
+	info, ok := db.Lookup(remote)
+	if !ok {
+		return int64(0), "", nil
+	}
+	if err := g.asnEntity(ctx, info, ts); err != nil {
+		return nil, "", err
+	}
+	return int64(info.ASN), info.Country, nil
+}
+
+// asnEntity records a network: its organisation as the label (the latest
+// table's name for it) and the country of the addresses seen in it.
+func (g *ingester) asnEntity(ctx context.Context, info asn.Info, ts int64) error {
+	key := strconv.FormatUint(uint64(info.ASN), 10)
+	label := ASNLabel(info.ASN, info.Org)
+	if _, err := g.entity(ctx, model.KindASN, key, ts, func(e *entRow) {
+		e.label = label
+		if info.Country != "" {
+			e.attrs["country"] = info.Country
+		}
+	}); err != nil {
+		return err
+	}
+	g.relabel(model.KindASN, key, label)
+	g.setAttr(model.KindASN, key, "country", info.Country)
+	return nil
+}
+
+// ASNLabel is how a network is named: "AS13335 CLOUDFLARENET", or just
+// "AS13335" when its organisation is unknown.
+func ASNLabel(n uint32, org string) string {
+	if org == "" {
+		return "AS" + strconv.FormatUint(uint64(n), 10)
+	}
+	return "AS" + strconv.FormatUint(uint64(n), 10) + " " + org
 }
 
 // hostName is a server name from an SNI or HTTP Host header as the server
@@ -1526,13 +1586,13 @@ func hourOf(t int64) int64 { return t - ((t%hourMS)+hourMS)%hourMS }
 
 // addTraffic spreads a record's bytes over the hours it covers and counts
 // the flow once, in the hour it began.
-func (g *ingester) addTraffic(k trafficKey, start, end, first, bout, bin int64) {
+func (g *ingester) addTraffic(k trafficKey, start, end, first, bout, bin int64, rasn any, cc string) {
 	add := func(bucket, flows, bo, bi int64) {
 		kk := k
 		kk.bucket = bucket
 		a := g.traffic[kk]
 		if a == nil {
-			a = &trafficAgg{}
+			a = &trafficAgg{asn: rasn, cc: cc}
 			g.traffic[kk] = a
 		}
 		a.flows += flows
@@ -1560,12 +1620,14 @@ func (g *ingester) addTraffic(k trafficKey, start, end, first, bout, bin int64) 
 
 func (g *ingester) flushRollupsTx(ctx context.Context) error {
 	for k, a := range g.traffic {
-		if _, err := g.tx.ExecContext(ctx, `INSERT INTO traffic_hourly (bucket, client_device, client_ip, remote_ip, remote_port, proto, name, direction, app, multicast, flows, bytes_out, bytes_in)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		if _, err := g.tx.ExecContext(ctx, `INSERT INTO traffic_hourly (bucket, client_device, client_ip, remote_ip, remote_port, proto, name, direction, app, multicast, flows, bytes_out, bytes_in, remote_asn, remote_cc)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT (bucket, client_device, client_ip, remote_ip, remote_port, proto, name, direction) DO UPDATE SET
 			flows = flows + excluded.flows, bytes_out = bytes_out + excluded.bytes_out, bytes_in = bytes_in + excluded.bytes_in,
-			app = CASE WHEN excluded.app != '' THEN excluded.app ELSE app END`,
-			k.bucket, k.device, k.client, k.remote, k.port, k.proto, k.name, k.dir, k.app, boolInt(k.multicast), a.flows, a.bout, a.bin); err != nil {
+			app = CASE WHEN excluded.app != '' THEN excluded.app ELSE app END,
+			remote_cc = CASE WHEN remote_asn IS NULL THEN excluded.remote_cc ELSE remote_cc END,
+			remote_asn = coalesce(remote_asn, excluded.remote_asn)`,
+			k.bucket, k.device, k.client, k.remote, k.port, k.proto, k.name, k.dir, k.app, boolInt(k.multicast), a.flows, a.bout, a.bin, a.asn, a.cc); err != nil {
 			return err
 		}
 	}

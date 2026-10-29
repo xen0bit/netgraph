@@ -29,6 +29,7 @@ Filters narrow any query:
 | `-domain` | a DNS name, TLS SNI or HTTP host (glob; a plain word matches as a substring) |
 | `-port`, `-proto`, `-app` | the server's port (the service); `tcp`/`udp`/`icmp`; `tls`, `quic`, `http`, `dns`, ... |
 | `-dir` | `out` (devices connecting out), `in` (connections from outside to a server here), `local`, `external` |
+| `-asn`, `-cc` | the remote end's network (`13335` or `AS13335`) and country (`DE`); needs the server's [ASN table](deployment.md#networks-and-countries) |
 | `-multicast` | include multicast and broadcast traffic (hidden by default) |
 
 ## The CLI
@@ -76,7 +77,7 @@ TIME                 DEVICE           TYPE  NAME               RCODE     MS    A
 |---|---|
 | `query summary` | headline numbers |
 | `query devices` | devices active in the window, with addresses, names, services, traffic |
-| `query flows` | connections, with the bytes each carried **inside** the window and their state (`opened`, `carried`, `closed:fin/rst/idle`) |
+| `query flows` | connections, with the bytes each carried **inside** the window and their state (`opened`, `carried`, `closed:fin/rst/idle`); with an ASN table, a NETWORK column names the remote end's |
 | `query dns` | lookups, answers, TTLs, response times |
 | `query facts` | relationships that held in the window: `has_ip`, `hostname`, `announces`, `resolves_to`, `cname`, `serves`, `fingerprint`, `user_agent`, `upnp`, `neighbor` |
 | `query timeseries [-step 5m]` | traffic per step |
@@ -88,13 +89,15 @@ TIME                 DEVICE           TYPE  NAME               RCODE     MS    A
 | `label MAC NAME...`, `label -clear MAC` | name a device by hand; it overrides DHCP, mDNS and every other source until cleared. With `-server` it goes through the API; without, it writes the database file (stop the server first) |
 | `import FILE.pcap...` | ingest captures directly (re-importing a file is a no-op) |
 | `db migrate`/`backup`/`retain`/`vacuum` | maintenance |
+| `db enrich -asn-file FILE` | look up the network of connections stored without an [ASN table](deployment.md#networks-and-countries) |
 
 Add `-o json` or `-o csv` to any `query` for scripts.
 
 `graph` options: `-collapse` (default on; fold addresses into the names
 they were reached by), `-sites` (default on; one node per registrable
-domain), `-anomalies` (default on; outline what medium and high
-anomalies are about), `-top N` (each device's busiest N destinations, `-1` for all; the
+domain), `-networks` (default on; with an ASN table, one node per network
+for clients from outside and unnamed destinations), `-anomalies` (default
+on; outline what medium and high anomalies are about), `-top N` (each device's busiest N destinations, `-1` for all; the
 rest are one "N more destinations" node), `-dns` (lookups and answers,
 default on), `-identity` (services, Wi-Fi networks, and the hostnames,
 addresses, fingerprints and vendors devices share), `-layout

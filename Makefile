@@ -59,10 +59,10 @@ web.build:
 	gzip -9 -f web/dist/web.wasm
 	@echo "web/dist: $$(du -sh web/dist | cut -f1) ($$(du -h web/dist/web.wasm.gz | cut -f1) compressed wasm)"
 
-## build-full: build netgraph with the web UI embedded
+## build-full: build netgraph with the web UI and the ASN table embedded
 .PHONY: build-full
-build-full: web.build
-	CGO_ENABLED=0 $(GO) build -trimpath -tags embed_web -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/netgraph ./cmd/netgraph
+build-full: web.build asn.fetch
+	CGO_ENABLED=0 $(GO) build -trimpath -tags embed_web,embed_asn -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/netgraph ./cmd/netgraph
 
 ## demo: generate a demo capture and database, then serve it on :8443
 .PHONY: demo
@@ -76,6 +76,29 @@ demo: build-full build-sensor
 .PHONY: oui.update
 oui.update:
 	$(GO) run ./internal/oui/gen -o internal/oui/oui.tsv.gz
+
+# The network (AS) table release builds embed (the embed_asn tag): iptoasn.com,
+# public domain under the PDDL. It is not in git; a plain `go build` or
+# `go install` has none, and the server then uses -asn-file.
+ASN_URL   ?= https://iptoasn.com/data/ip2asn-combined.tsv.gz
+ASN_TABLE := internal/asn/ip2asn-combined.tsv.gz
+ASN_DATE  := internal/asn/ip2asn.date
+
+## asn.fetch: download the ASN table builds embed, unless it is already here
+.PHONY: asn.fetch
+asn.fetch:
+	@if [ -s $(ASN_TABLE) ] && [ -s $(ASN_DATE) ]; then \
+		echo "$(ASN_TABLE): from $$(cat $(ASN_DATE)) (make asn.update to refresh)"; \
+	else $(MAKE) --no-print-directory asn.update; fi
+
+## asn.update: download the ASN table again
+.PHONY: asn.update
+asn.update:
+	curl -fsSL --retry 3 -o $(ASN_TABLE).tmp $(ASN_URL)
+	gzip -t $(ASN_TABLE).tmp
+	mv $(ASN_TABLE).tmp $(ASN_TABLE)
+	date -u +%Y-%m-%d > $(ASN_DATE)
+	@echo "$(ASN_TABLE): $$(du -h $(ASN_TABLE) | cut -f1)"
 
 ## test: run all tests with the race detector
 .PHONY: test

@@ -163,6 +163,16 @@ lists the ports it served (`serves 443/tcp, 80/tcp`). A client's TLS
 fingerprint and user agent describe the client: they are facts about its
 address, not the device's identity.
 
+**Networks.** When the server has an [ASN
+table](deployment.md#networks-and-countries), each connection records the
+network (autonomous system) and country of its remote end at ingest. With
+**networks** (default), an address whose network is known is drawn as its
+network: one `AS24940 HETZNER-AS` node (`DE · 14 addresses`) for a server's
+visitors from that provider, and likewise for destinations reached without
+a name. Named destinations stay names. Top N then ranks networks, so many
+small visitors from one provider can outrank one large one. Without the
+option, an address node is labelled with its network.
+
 Each relationship is drawn once, so a busy window stays readable:
 
 - A device that looked a name up and connected to it has one `connects`

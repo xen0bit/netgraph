@@ -40,7 +40,7 @@ const state = {
   live: false,
   filter: "",
   tab: "graph",
-  gopts: { collapse: true, dns: true, sites: true, anomalies: true, identity: false, top: 15 },
+  gopts: { collapse: true, dns: true, sites: true, anomalies: true, networks: true, identity: false, top: 15 },
   // dagre runs inside the WASM engine; d2's ELK needs a host-provided
   // synchronous ELK in the browser, so "elk" is drawn by the server.
   layout: "dagre",
@@ -56,7 +56,7 @@ function loadHash() {
   state.live = p.get("live") === "1" || !p.has("to");
   state.filter = p.get("q") || "";
   if (p.get("tab")) state.tab = p.get("tab");
-  for (const k of ["collapse", "dns", "sites", "anomalies", "identity"]) if (p.has(k)) state.gopts[k] = p.get(k) === "1";
+  for (const k of ["collapse", "dns", "sites", "anomalies", "networks", "identity"]) if (p.has(k)) state.gopts[k] = p.get(k) === "1";
   if (p.has("top")) state.gopts.top = Number(p.get("top"));
 }
 
@@ -65,7 +65,7 @@ function saveHash() {
   if (state.live) { p.set("live", "1"); p.set("span", state.span); } else { p.set("from", state.to - state.span); p.set("to", state.to); }
   if (state.filter) p.set("q", state.filter);
   if (state.tab !== "graph") p.set("tab", state.tab);
-  for (const k of ["collapse", "dns", "sites", "anomalies", "identity"]) p.set(k, state.gopts[k] ? "1" : "0");
+  for (const k of ["collapse", "dns", "sites", "anomalies", "networks", "identity"]) p.set(k, state.gopts[k] ? "1" : "0");
   p.set("top", state.gopts.top);
   lastHash = p.toString();
   history.replaceState(null, "", "#" + lastHash);
@@ -81,7 +81,7 @@ function parseFilter(s) {
     const i = tok.indexOf(":");
     const k = i > 0 ? tok.slice(0, i) : "";
     const v = tok.slice(i + 1);
-    if (["device", "ip", "domain", "port", "proto", "app", "dir", "multicast"].includes(k)) out[k] = v;
+    if (["device", "ip", "domain", "port", "proto", "app", "dir", "asn", "cc", "multicast"].includes(k)) out[k] = v;
     else if (/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(tok)) out.device = tok;
     else if (tok.split(":").length > 2) out.ip = tok;
     else out.domain = tok;
@@ -316,11 +316,17 @@ const hostPort = (ip, port) => (String(ip).includes(":") ? `[${ip}]` : ip) + (po
 function ends(f) {
   const dev = `<b>${esc(f.device_name || (f.direction === "in" ? f.server_ip : f.client_ip))}</b>`;
   if (f.direction === "in") {
-    return [`<span class="mono">${esc(hostPort(f.client_ip, f.client_port))}</span>`, `${dev}<span class="mono">:${f.server_port}/${esc(f.proto)}</span>`];
+    return [`<span class="mono">${esc(hostPort(f.client_ip, f.client_port))}</span>${network(f)}`, `${dev}<span class="mono">:${f.server_port}/${esc(f.proto)}</span>`];
   }
   if (f.peer_name) return [dev, `<b>${esc(f.peer_name)}</b><span class="mono">:${f.server_port}/${esc(f.proto)}</span>`];
-  return [dev, `<span class="mono">${esc(hostPort(f.server_ip, f.server_port))}/${esc(f.proto)}</span>`];
+  return [dev, `<span class="mono">${esc(hostPort(f.server_ip, f.server_port))}/${esc(f.proto)}</span>${network(f)}`];
 }
+
+// network is the remote end's AS and country, under its address.
+const network = (f) => f.asn
+  ? `<div class="sub" title="${esc(`AS${f.asn} ${f.as_org || ""}`)}">${esc(asName(f.asn, f.as_org))}${f.country ? ` · ${esc(f.country)}` : ""}</div>`
+  : "";
+const asName = (n, org) => `AS${n}${org ? " " + org : ""}`;
 
 // peerID is the entity a connection's row opens: what the device talked to,
 // or the client that reached it.
@@ -446,7 +452,7 @@ function theme() {
 
 function graphOpts() {
   const b = (k) => (state.gopts[k] ? "1" : "0");
-  return { collapse: b("collapse"), dns: b("dns"), sites: b("sites"), anomalies: b("anomalies"), identity: b("identity"), top: String(state.gopts.top) };
+  return { collapse: b("collapse"), dns: b("dns"), sites: b("sites"), anomalies: b("anomalies"), networks: b("networks"), identity: b("identity"), top: String(state.gopts.top) };
 }
 
 let lastView = null;
@@ -626,6 +632,7 @@ function filterFor(d) {
   if (d.kind === "device") return `device:${d.key}`;
   if (d.kind === "ip") return `ip:${d.key}`;
   if (d.kind === "domain" || d.kind === "site") return `domain:${d.key}`;
+  if (d.kind === "asn") return `asn:${d.key}`;
   return "";
 }
 
@@ -701,6 +708,7 @@ function init() {
   $("#g-dns").checked = state.gopts.dns;
   $("#g-sites").checked = state.gopts.sites;
   $("#g-anomalies").checked = state.gopts.anomalies;
+  $("#g-networks").checked = state.gopts.networks;
   $("#g-identity").checked = state.gopts.identity;
   $("#g-top").value = state.gopts.top;
   $("#g-layout").value = state.layout;
@@ -720,7 +728,7 @@ function init() {
   $("#filter").oninput = () => { clearTimeout(typing); typing = setTimeout(() => { state.filter = $("#filter").value; refresh(); }, 400); };
   for (const b of $$(".tabs button")) b.onclick = () => selectTab(b.dataset.tab);
   $("#summary").onclick = (e) => { const a = e.target.closest("[data-tab]"); if (a) selectTab(a.dataset.tab); };
-  for (const [id, k] of [["#g-collapse", "collapse"], ["#g-dns", "dns"], ["#g-sites", "sites"], ["#g-anomalies", "anomalies"], ["#g-identity", "identity"]]) {
+  for (const [id, k] of [["#g-collapse", "collapse"], ["#g-dns", "dns"], ["#g-sites", "sites"], ["#g-anomalies", "anomalies"], ["#g-networks", "networks"], ["#g-identity", "identity"]]) {
     $(id).onchange = () => { state.gopts[k] = $(id).checked; refresh(); };
   }
   $("#g-top").onchange = () => { state.gopts.top = Number($("#g-top").value) || 15; refresh(); };

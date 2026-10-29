@@ -320,6 +320,15 @@ func flowRow(f model.Flow) []string {
 		state += "/" + f.EndReason
 	}
 	client, server := f.Ends()
+	// The remote end's network, briefly: "AS13335 US".
+	if f.ASN != 0 {
+		net := strings.TrimSpace("AS" + strconv.FormatUint(uint64(f.ASN), 10) + " " + f.Country)
+		if f.Inbound() {
+			client += " (" + net + ")"
+		} else {
+			server += " (" + net + ")"
+		}
+	}
 	return []string{hhmmss(f.FirstSeen), f.Direction, client, server, f.Name, f.App, state, model.FormatBytes(f.BytesOut), model.FormatBytes(f.BytesIn)}
 }
 

@@ -294,3 +294,64 @@ func TestRenderGroupsClients(t *testing.T) {
 		t.Errorf("clients drawn as destinations:\n%s", d2)
 	}
 }
+
+// With Networks, clients and unnamed destinations with a known network are
+// one node per network, listing their addresses; named destinations stay
+// names, and an address with no network stays an address.
+func TestBuildNetworks(t *testing.T) {
+	nas := "device:aa:bb:cc:00:00:10"
+	in := Input{Devices: []model.Device{{ID: nas, MAC: "aa:bb:cc:00:00:10", Label: "nas"}}}
+	hetzner := func(f model.Flow) model.Flow {
+		f.ASN, f.ASOrg, f.Country = 24940, "HETZNER-AS", "DE"
+		return f
+	}
+	in.Flows = []model.Flow{
+		hetzner(visit(nas, "5.9.0.1", 443, 100, 1000)),
+		hetzner(visit(nas, "5.9.0.2", 443, 200, 2000)),
+		hetzner(visit(nas, "5.9.0.1", 22, 10, 20)),
+		visit(nas, "198.51.100.7", 443, 5, 5), // no network known
+		hetzner(flow(nas, "", "5.9.9.9", 300)),
+		hetzner(flow(nas, "backup.example.com", "5.9.9.10", 400)),
+	}
+	g := Build(in, model.GraphOptions{Collapse: true, Sites: true, TopN: 15, Networks: true})
+	n, ok := nodeOf(g, "asn:24940")
+	if !ok || n.Label != "AS24940 HETZNER-AS" || n.Sub != "DE · 3 addresses" || n.Attrs["addresses"] != "5.9.0.1,5.9.0.2,5.9.9.9" {
+		t.Fatalf("network node = %+v (%v)", n, ok)
+	}
+	e, ok := edgesOf(g, "asn:24940", nas)[model.RelConnects]
+	if !ok || e.Count != 3 || e.BytesOut != 3020 || !slices.Equal(e.Ports, []string{"22/tcp", "443/tcp"}) {
+		t.Errorf("clients' edge = %+v (%v)", e, ok)
+	}
+	if e, ok := edgesOf(g, nas, "asn:24940")[model.RelConnects]; !ok || e.Count != 1 {
+		t.Errorf("unnamed destination's edge = %+v (%v)", e, ok)
+	}
+	if _, ok := nodeOf(g, "site:example.com"); !ok {
+		t.Error("a named destination was grouped into its network")
+	}
+	if _, ok := nodeOf(g, "ip:198.51.100.7"); !ok {
+		t.Error("an address with no network was dropped")
+	}
+	for _, id := range []string{"ip:5.9.0.1", "ip:5.9.9.9"} {
+		if _, ok := nodeOf(g, id); ok {
+			t.Errorf("%s drawn beside its network", id)
+		}
+	}
+	// An anomaly about one address outlines its network.
+	MarkAnomalies(g, []model.Anomaly{{Kind: "beacon", Severity: model.SeverityMedium, Device: nas, Entity: "ip:5.9.9.9", Summary: "beacons"}})
+	if n, _ := nodeOf(g, "asn:24940"); n.Attrs["anomaly"] != model.SeverityMedium {
+		t.Errorf("network not marked: %v", n.Attrs)
+	}
+
+	// Without Networks each address is its own node, labelled with its
+	// network.
+	g = Build(in, model.GraphOptions{Collapse: true, Sites: true, TopN: 15})
+	if _, ok := nodeOf(g, "asn:24940"); ok {
+		t.Error("network node without Networks")
+	}
+	if n, ok := nodeOf(g, "ip:5.9.0.2"); !ok || n.Sub != "AS24940 · DE" || n.Attrs["as_org"] != "HETZNER-AS" {
+		t.Errorf("address node = %+v (%v)", n, ok)
+	}
+	if d2 := RenderD2(g, RenderOptions{}); !strings.Contains(d2, "AS24940 · DE") {
+		t.Errorf("d2 lacks the address's network:\n%s", d2)
+	}
+}

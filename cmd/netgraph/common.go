@@ -57,7 +57,7 @@ func (b *backendFlags) open() (model.Backend, func(), error) {
 type filterFlags struct {
 	from, to                  string
 	device, ip, domain, proto string
-	app, dir                  string
+	app, dir, asn, country    string
 	port, limit               int
 	multicast                 bool
 }
@@ -72,6 +72,8 @@ func (f *filterFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&f.proto, "proto", "", "tcp, udp, icmp or a protocol number")
 	fs.StringVar(&f.app, "app", "", "application: tls, quic, http, dns, ...")
 	fs.StringVar(&f.dir, "dir", "", "direction: out (devices connecting out), in (connections from outside), local or external")
+	fs.StringVar(&f.asn, "asn", "", "the remote end's network: an AS number (13335 or AS13335); needs the server's -asn-file")
+	fs.StringVar(&f.country, "cc", "", "the remote end's country: a two-letter code; needs the server's -asn-file")
 	fs.BoolVar(&f.multicast, "multicast", false, "include multicast and broadcast traffic")
 	fs.IntVar(&f.limit, "limit", 0, "maximum rows (0: default)")
 }
@@ -89,7 +91,18 @@ func (f *filterFlags) filter() (model.Filter, error) {
 	if !from.Before(to) {
 		return model.Filter{}, errors.New("-from must be before -to")
 	}
-	return model.Filter{From: from, To: to, Device: f.device, IP: f.ip, Domain: f.domain, Port: f.port, Proto: f.proto, App: f.app, Dir: f.dir, Multicast: f.multicast, Limit: f.limit}, nil
+	mf := model.Filter{From: from, To: to, Device: f.device, IP: f.ip, Domain: f.domain, Port: f.port, Proto: f.proto, App: f.app, Dir: f.dir, Multicast: f.multicast, Limit: f.limit}
+	if f.asn != "" {
+		if mf.ASN, err = model.ParseASN(f.asn); err != nil {
+			return model.Filter{}, fmt.Errorf("-asn: %w", err)
+		}
+	}
+	if f.country != "" {
+		if mf.Country, err = model.ParseCountry(f.country); err != nil {
+			return model.Filter{}, fmt.Errorf("-cc: %w", err)
+		}
+	}
+	return mf, nil
 }
 
 func envOr(k, def string) string {
