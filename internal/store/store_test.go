@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"net/netip"
 	"path/filepath"
@@ -417,6 +418,87 @@ func TestRetentionAndRollups(t *testing.T) {
 	}
 }
 
+// TestInListUnbounded: inList binds one parameter however many values it
+// holds; one placeholder each fails past SQLite's 32766 variables.
+func TestInListUnbounded(t *testing.T) {
+	st, _, _ := homeStore(t)
+	keys := []string{"192.168.1.23", "www.example.com"}
+	for i := range 40000 {
+		keys = append(keys, fmt.Sprintf("absent-%d", i))
+	}
+	cond, arg := inList("key", keys)
+	var n int
+	if err := st.r.QueryRow(`SELECT count(*) FROM entities WHERE `+cond, arg).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	if n != 2 {
+		t.Errorf("matched %d entities, want 2", n)
+	}
+	cond, arg = inList("key", nil)
+	if err := st.r.QueryRow(`SELECT count(*) FROM entities WHERE `+cond, arg).Scan(&n); err != nil || n != 0 {
+		t.Errorf("empty list: %d, %v", n, err)
+	}
+}
+
+// TestSummaryFilter: the summary's counts follow the filter, as the tables
+// they head do, at both precisions.
+func TestSummaryFilter(t *testing.T) {
+	st, _, _ := homeStore(t)
+	ctx := context.Background()
+	check := func(precision string) {
+		t.Helper()
+		all, err := st.Summary(ctx, win(0, time.Hour))
+		if err != nil {
+			t.Fatal(err)
+		}
+		narrowed := false
+		for _, f := range []model.Filter{
+			{Device: "alice-iphone"},
+			{Device: "Google*"},
+			{Domain: "www.example.com"},
+		} {
+			f.From, f.To = testutil.Base, testutil.Base.Add(time.Hour)
+			sum, err := st.Summary(ctx, f)
+			if err != nil {
+				t.Fatal(err)
+			}
+			// The DNS table reads raw lookups only; past raw retention
+			// the rollup is what is left of them.
+			dns, err := st.DNS(ctx, f)
+			if precision == model.PrecisionHour {
+				dns, err = st.dnsHourly(ctx, f, ms(f.From), ms(f.To))
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if sum.Precision != precision || sum.DNSQueries != len(dns) {
+				t.Errorf("%s %+v: summary says %d lookups (%s), DNS lists %d", precision, f, sum.DNSQueries, sum.Precision, len(dns))
+			}
+			if precision == model.PrecisionExact {
+				flows, err := st.Flows(ctx, f)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if sum.Flows != len(flows) {
+					t.Errorf("%+v: summary says %d connections, Flows lists %d", f, sum.Flows, len(flows))
+				}
+			}
+			if sum.DNSQueries < all.DNSQueries || sum.Flows < all.Flows {
+				narrowed = true
+			}
+		}
+		if !narrowed {
+			t.Errorf("%s: no filter narrowed the summary (%+v)", precision, all)
+		}
+	}
+	check(model.PrecisionExact)
+	st.cfg.Now = func() time.Time { return testutil.Base.Add(30 * 24 * time.Hour) }
+	if _, err := st.Retain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	check(model.PrecisionHour)
+}
+
 func TestReadOnly(t *testing.T) {
 	st, _, _ := homeStore(t)
 	ro, err := OpenReadOnly(st.Path(), Config{Now: st.cfg.Now})
@@ -520,5 +602,76 @@ func TestLLDPRename(t *testing.T) {
 	devs, _ := st.Devices(ctx, model.Filter{From: testutil.Base, To: testutil.Base.Add(time.Hour), Device: mac})
 	if !found || len(devs) != 1 || devs[0].Label != "renamed-switch" {
 		t.Fatalf("neighbor renamed=%v devices=%+v", found, devs)
+	}
+}
+
+// TestRetentionLetsIngestIn: a large retention pass gives ingest the lock
+// between its chunks instead of holding it to the end.
+func TestRetentionLetsIngestIn(t *testing.T) {
+	st, _, events := homeStore(t)
+	ctx := context.Background()
+	// A backlog well past raw retention: many chunks of flows and
+	// connections.
+	const backlog = 12000
+	old := testutil.Base.Add(-60 * 24 * time.Hour).UnixMilli()
+	for _, q := range []string{
+		`INSERT INTO flows (sensor_id, flow_key, proto, src_ip, src_port, dst_ip, dst_port, first_seen, t_start, t_end,
+			bytes_out, bytes_in, pkts_out, pkts_in, client_ip, client_port, remote_ip, remote_port, direction)
+		WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?)
+		SELECT 1, 'old:' || i, 6, '192.168.1.9', i, '93.184.216.34', 443, ?, ?, ?, 1, 1, 1, 1, '192.168.1.9', i, '93.184.216.34', 443, 'out' FROM n`,
+		`INSERT INTO connections (flow_key, sensor_id, proto, client_ip, client_port, remote_ip, remote_port, direction, first_seen, last_seen)
+		WITH RECURSIVE n(i) AS (SELECT 1 UNION ALL SELECT i + 1 FROM n WHERE i < ?)
+		SELECT 'old:' || i, 1, 6, '192.168.1.9', i, '93.184.216.34', 443, 'out', ?, ? FROM n`,
+	} {
+		args := []any{backlog, old, old, old}
+		if strings.Contains(q, "connections") {
+			args = args[:3]
+		}
+		if _, err := st.w.ExecContext(ctx, q, args...); err != nil {
+			t.Fatal(err)
+		}
+	}
+	before, err := st.Flows(ctx, win(0, time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan RetentionResult)
+	start := time.Now()
+	go func() {
+		r, err := st.Retain(ctx)
+		if err != nil {
+			t.Error(err)
+		}
+		done <- r
+	}()
+	// Re-sending ingested events is cheap (they are duplicates) but still
+	// takes the ingest lock. Holding it for the whole pass would make one
+	// of them wait for nearly all of it.
+	var longest time.Duration
+	var r RetentionResult
+loop:
+	for {
+		select {
+		case r = <-done:
+			break loop
+		default:
+		}
+		t0 := time.Now()
+		if _, err := st.Ingest(ctx, "router", "boot1", events[:1]); err != nil {
+			t.Fatal(err)
+		}
+		longest = max(longest, time.Since(t0))
+	}
+	pass := time.Since(start)
+	if r.Flows < 2*backlog {
+		t.Fatalf("retention deleted %d flow rows, want %d", r.Flows, 2*backlog)
+	}
+	if longest > pass/2 {
+		t.Errorf("an ingest waited %s of a %s retention pass: it held the ingest lock", longest, pass)
+	}
+	after, err := st.Flows(ctx, win(0, time.Hour))
+	if err != nil || len(after) != len(before) {
+		t.Errorf("recent flows %d -> %d (%v)", len(before), len(after), err)
 	}
 }

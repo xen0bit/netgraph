@@ -14,12 +14,18 @@ import (
 // own site.
 func Site(name string) string {
 	name = strings.TrimSuffix(strings.ToLower(name), ".")
-	labels := strings.Split(name, ".")
-	for i := 1; i < len(labels); i++ {
-		suffix := strings.Join(labels[i:], ".")
-		if ps, icann := publicsuffix.PublicSuffix(suffix); icann && ps == suffix {
-			return strings.Join(labels[i-1:], ".")
+	// Try each suffix from the longest, slicing the name rather than
+	// splitting it: graphs and anomaly checks ask for thousands of names.
+	start := 0 // where the label before the suffix begins
+	for {
+		dot := strings.IndexByte(name[start:], '.')
+		if dot < 0 {
+			return name
 		}
+		suffix := name[start+dot+1:]
+		if ps, icann := publicsuffix.PublicSuffix(suffix); icann && ps == suffix {
+			return name[start:]
+		}
+		start += dot + 1
 	}
-	return name
 }

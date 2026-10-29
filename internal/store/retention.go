@@ -12,8 +12,9 @@ type RetentionResult struct {
 
 // Retain deletes data past its retention: raw tables after RawRetention,
 // facts and hourly rollups after RollupRetention, and entities nothing
-// refers to any more. Deletes run in chunks so ingest is never blocked for
-// long, and freed pages are returned to the filesystem.
+// refers to any more. Deletes run in chunks that each hold the ingest lock
+// only while they run, so a large backlog does not stall ingest; freed
+// pages are returned to the filesystem.
 func (s *Store) Retain(ctx context.Context) (RetentionResult, error) {
 	var r RetentionResult
 	now := s.cfg.Now()
@@ -42,26 +43,46 @@ func (s *Store) Retain(ctx context.Context) (RetentionResult, error) {
 		// At most four rows per AP, and an AP that never rekeys keeps
 		// its GTK for as long as it runs, so these follow the rollups too.
 		{&r.Handshakes, `DELETE FROM wifi_group_keys WHERE ts < ?`, roll},
-		{&r.Entities, `DELETE FROM entities WHERE rowid IN (SELECT id FROM entities e WHERE e.last_seen < ?
-			AND NOT EXISTS (SELECT 1 FROM facts WHERE src = e.id OR dst = e.id) LIMIT 5000)`, roll},
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	for _, st := range steps {
+	// Each chunk takes the ingest lock for itself, so ingest runs between
+	// them. Deleting a fact ingest still has open is harmless: a fact past
+	// rollup retention is far beyond -fact-gap, so ingest starts a new
+	// period rather than extend it.
+	run := func(n *int64, sql string, arg int64, lock bool) error {
 		for {
 			if err := ctx.Err(); err != nil {
-				return r, err
+				return err
 			}
-			res, err := s.w.ExecContext(ctx, st.sql, st.arg)
+			if lock {
+				s.mu.Lock()
+			}
+			res, err := s.w.ExecContext(ctx, sql, arg)
+			if lock {
+				s.mu.Unlock()
+			}
 			if err != nil {
-				return r, err
+				return err
 			}
-			n, _ := res.RowsAffected()
-			*st.n += n
-			if n < 5000 {
-				break
+			k, _ := res.RowsAffected()
+			*n += k
+			if k < 5000 {
+				return nil
 			}
 		}
+	}
+	for _, st := range steps {
+		if err := run(st.n, st.sql, st.arg, true); err != nil {
+			return r, err
+		}
+	}
+	// Entities are another matter: ingest caches their IDs, so it must not
+	// run between deleting one and dropping the cache. These deletes are
+	// few, since an entity outlives its facts only briefly.
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := run(&r.Entities, `DELETE FROM entities WHERE rowid IN (SELECT id FROM entities e WHERE e.last_seen < ?
+		AND NOT EXISTS (SELECT 1 FROM facts WHERE src = e.id OR dst = e.id) LIMIT 5000)`, roll, false); err != nil {
+		return r, err
 	}
 	if r.Entities > 0 || r.Facts > 0 {
 		// Cached IDs may point at deleted rows.
