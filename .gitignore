@@ -31,3 +31,7 @@ web/src/node_modules/
 
 # make demo
 /demo/
+
+# The ASN table release builds embed (make asn.fetch)
+/internal/asn/ip2asn-combined.tsv.gz
+/internal/asn/ip2asn.date

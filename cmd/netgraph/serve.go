@@ -40,7 +40,7 @@ func runServe(args []string) error {
 	alertLearn := fs.String("alert-learn", "24h", "after the first sensor connects, learn the network this long before alerting on new devices")
 	// Not a systemd credential like the files above: credentials are
 	// capped at about 1 MB together, and the table is several.
-	asnFile := fs.String("asn-file", envOr("NETGRAPH_ASN_FILE", ""), "an iptoasn.com ip2asn-combined.tsv(.gz): name the network and country of remote addresses; reloaded on SIGHUP and when the file changes; $NETGRAPH_ASN_FILE")
+	asnFile := fs.String("asn-file", envOr("NETGRAPH_ASN_FILE", ""), "an iptoasn.com ip2asn-combined.tsv(.gz): name the network and country of remote addresses; reloaded on SIGHUP and when the file changes. Default: the table built into release binaries, if any; none: no table. $NETGRAPH_ASN_FILE")
 	webDir := fs.String("web-dir", "", "serve the web UI from this directory instead of the embedded copy")
 	raw := fs.String("raw-retention", "14d", "keep raw flows, DNS and observations this long")
 	rollup := fs.String("rollup-retention", "180d", "keep hourly rollups and facts this long")
@@ -104,8 +104,24 @@ func runServe(args []string) error {
 		notifier = alert.New(alert.Config{URL: *alertURL, Learn: learnD, Logger: log})
 		onNew = notifier.Notify
 	}
+	// The ASN table: a file given (reloaded when it changes), else the one
+	// built into release binaries, else none.
 	var networks atomic.Pointer[asn.DB]
-	if *asnFile != "" {
+	switch *asnFile {
+	case "none":
+		*asnFile = ""
+	case "":
+		t0 := time.Now()
+		table, date, err := asn.Embedded()
+		switch {
+		case err != nil:
+			log.Error("built-in asn table; running without one", "err", err)
+		case table != nil:
+			networks.Store(table)
+			debug.FreeOSMemory()
+			log.Info("using the built-in asn table; -asn-file for a newer one", "downloaded", date, "ranges", table.Len(), "took", time.Since(t0).Round(time.Millisecond))
+		}
+	default:
 		t0 := time.Now()
 		table, err := asn.Load(*asnFile)
 		if err != nil {
@@ -148,8 +164,10 @@ func runServe(args []string) error {
 	if *wifiKeyFile != "" {
 		go reloadWiFiKeys(ctx, *wifiKeyFile, apiSrv, log)
 	}
-	if *asnFile != "" {
+	if networks.Load() != nil {
 		go enrichASN(ctx, st, log)
+	}
+	if *asnFile != "" {
 		go reloadASN(ctx, *asnFile, &networks, st, log)
 	}
 

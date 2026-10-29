@@ -32,7 +32,7 @@ func runDB(args []string) error {
 	db := fs.String("db", envOr("NETGRAPH_DB", "netgraph.db"), "database file; $NETGRAPH_DB")
 	raw := fs.String("raw-retention", "14d", "retain: keep raw data this long")
 	rollup := fs.String("rollup-retention", "180d", "retain: keep rollups and facts this long")
-	asnFile := fs.String("asn-file", envOr("NETGRAPH_ASN_FILE", ""), "enrich: an iptoasn.com ip2asn-combined.tsv(.gz); $NETGRAPH_ASN_FILE")
+	asnFile := fs.String("asn-file", envOr("NETGRAPH_ASN_FILE", ""), "enrich: an iptoasn.com ip2asn-combined.tsv(.gz) (default: the table built into release binaries); $NETGRAPH_ASN_FILE")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -80,12 +80,15 @@ func runDB(args []string) error {
 			r.Flows, r.DNS, r.Answers, r.Observations, r.Facts, r.Rollups, r.Entities, r.Handshakes)
 		return nil
 	case "enrich":
-		if *asnFile == "" {
-			return errors.New("usage: netgraph db enrich [-db file] -asn-file ip2asn-combined.tsv.gz")
-		}
-		table, err := asn.Load(*asnFile)
-		if err != nil {
+		var table *asn.DB
+		if *asnFile != "" {
+			if table, err = asn.Load(*asnFile); err != nil {
+				return err
+			}
+		} else if table, _, err = asn.Embedded(); err != nil {
 			return err
+		} else if table == nil {
+			return errors.New("this build has no built-in ASN table: usage: netgraph db enrich [-db file] -asn-file ip2asn-combined.tsv.gz")
 		}
 		cfg.ASN = func() *asn.DB { return table }
 		st, err := store.Open(*db, cfg)

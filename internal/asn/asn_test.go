@@ -139,3 +139,21 @@ func FuzzParse(f *testing.F) {
 		}
 	})
 }
+
+// TestEmbedded checks the table a release build carries (-tags embed_asn).
+func TestEmbedded(t *testing.T) {
+	db, date, err := Embedded()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if db == nil {
+		t.Skip("no built-in table: build with -tags embed_asn after make asn.fetch")
+	}
+	t.Logf("%d ranges from %s", db.Len(), date)
+	if date == "" {
+		t.Error("no download date")
+	}
+	if info, _ := db.Lookup(netip.MustParseAddr("1.1.1.1")); info.ASN != 13335 {
+		t.Errorf("Lookup(1.1.1.1) = %+v", info)
+	}
+}

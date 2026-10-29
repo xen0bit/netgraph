@@ -12,8 +12,8 @@ hosts and user agents). With a monitor-mode wireless interface it also sees
 Wi-Fi networks and their clients, and can decrypt open, WEP, WPA and WPA2
 traffic when the keys are supplied. It ships all of it to a netgraph
 server, which keeps it in SQLite as **entities and relationships over
-time**, and, given an ASN table, names the network and country of every
-remote address.
+time**, and names the network and country of every remote address (from
+iptoasn.com's table, built into release binaries).
 
 For any window `t0 → t1` you can ask:
 

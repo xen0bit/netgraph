@@ -6,9 +6,10 @@
 #   /etc/netgraph/tls.crt, tls.key      serve HTTPS
 # Restart (not reload) the service after changing them.
 #
-# To name the networks and countries of remote addresses, download an ASN
-# table outside /etc/netgraph (systemd credentials are capped at about 1 MB,
-# and the unit would not start) and add -asn-file:
+# The packaged server has an ASN table built in (the networks and countries
+# of remote addresses). For a newer one, download it outside /etc/netgraph
+# (systemd credentials are capped at about 1 MB, and the unit would not
+# start) and add -asn-file; -asn-file none turns the table off:
 #   sudo mkdir -p /usr/local/share/netgraph
 #   sudo curl -fsSLo /usr/local/share/netgraph/ip2asn-combined.tsv.gz https://iptoasn.com/data/ip2asn-combined.tsv.gz
 #   NETGRAPH_SERVER_ARGS=-listen :8443 -asn-file /usr/local/share/netgraph/ip2asn-combined.tsv.gz

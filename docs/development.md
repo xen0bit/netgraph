@@ -29,10 +29,18 @@
 
 ```sh
 make build         # bin/netgraph (no embedded UI) and bin/netgraph-sensor
-make build-full    # bin/netgraph with the web UI embedded (needs only Go and gzip)
+make build-full    # bin/netgraph with the web UI and ASN table embedded (needs Go, gzip and curl)
+make asn.fetch     # download the ASN table builds embed, if missing (make asn.update: again)
 make cross         # compile every release target
 make demo          # demo capture, database and server on 127.0.0.1:8443
 ```
+
+Release builds embed two things a plain `go build` or `go install`
+leaves out, each behind a build tag: the web UI (`embed_web`, from
+`web/dist`) and the ASN table (`embed_asn`, from
+`internal/asn/ip2asn-combined.tsv.gz`, which `make asn.fetch` downloads
+and git ignores). `deploy/Dockerfile` embeds the table only when it is
+already in the build context, so the lab never downloads it.
 
 Everything is `CGO_ENABLED=0`. Before adding a dependency, check that
 `make cross` still passes and that the sensor still builds for `mipsle`.

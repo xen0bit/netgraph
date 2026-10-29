@@ -90,10 +90,11 @@ jobs:
           go-version: "1.27"
           cache: true
       - run: make cross
-      - name: Build the web UI and the server that embeds it
+      - name: Build the web UI and ASN table, and the server that embeds them
         run: |
-          make web.build
-          CGO_ENABLED=0 go build -tags embed_web -o /dev/null ./cmd/netgraph
+          make web.build asn.fetch
+          CGO_ENABLED=0 go build -tags embed_web,embed_asn -o /dev/null ./cmd/netgraph
+          go test -tags embed_asn -run TestEmbedded -v ./internal/asn
       - name: Sensor size budget
         run: |
           # A router has a few MB of flash to spare. Fail before that stops

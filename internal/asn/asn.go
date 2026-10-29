@@ -181,6 +181,21 @@ func Load(path string) (*DB, error) {
 	return db, nil
 }
 
+// Embedded parses the table built into this binary, and returns the day
+// it was downloaded. Release builds carry one (the embed_asn build tag,
+// with the file `make asn.fetch` downloads); other builds return nil.
+func Embedded() (*DB, string, error) {
+	b, date := embeddedTable()
+	if len(b) == 0 {
+		return nil, "", nil
+	}
+	db, err := Parse(bytes.NewReader(b))
+	if err != nil {
+		return nil, "", fmt.Errorf("built-in table: %w", err)
+	}
+	return db, date, nil
+}
+
 // Len is the number of routed ranges.
 func (db *DB) Len() int {
 	if db == nil {

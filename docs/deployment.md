@@ -56,7 +56,7 @@ netgraph serve -db /var/lib/netgraph/netgraph.db -listen :8443
 | `-rollup-retention` | `180d` | keep hourly rollups and facts |
 | `-exact-max` | `48h` | longer windows are answered from hourly rollups |
 | `-fact-gap` | `1h` | silence after which a relationship starts a new period |
-| `-asn-file` | `$NETGRAPH_ASN_FILE` | an ASN table: the network and country of remote addresses ([networks](#networks-and-countries)) |
+| `-asn-file` | `$NETGRAPH_ASN_FILE`; release builds: built in | an ASN table: the network and country of remote addresses ([networks](#networks-and-countries)); `none` for no table |
 | `-alert-webhook` | `$NETGRAPH_ALERT_WEBHOOK` | POST a JSON alert when a new device joins ([alerts](#new-device-alerts)) |
 | `-alert-learn` | `24h` | learn the network this long after the first sensor connects before alerting |
 | `-web-dir` | | serve the UI from a directory instead of the embedded copy |
@@ -95,7 +95,17 @@ as `AS24940 HETZNER-AS · DE` instead of bare addresses, the graph draws
 them one node per network, and queries filter with `asn:` and `cc:`
 ([usage](usage.md#choosing-a-window)). The table is
 [iptoasn.com](https://iptoasn.com)'s `ip2asn-combined.tsv.gz` (IPv4 and
-IPv6, public domain under the PDDL, updated hourly); the server never fetches it itself.
+IPv6, public domain under the PDDL, updated hourly). The server never
+fetches it itself.
+
+**Release binaries, packages and images have one built in**, downloaded
+when the release was built: nothing to set up. It costs about 9 MB of
+binary, 30 MB of memory and a third of a second at start; the log says
+`using the built-in asn table` with the day it was downloaded.
+`-asn-file none` turns it off.
+
+**A newer table**, or one for a build without it (`go install`, `go
+build`), is a file and a flag:
 
 ```sh
 sudo mkdir -p /usr/local/share/netgraph
@@ -103,9 +113,9 @@ sudo curl -fsSLo /usr/local/share/netgraph/ip2asn-combined.tsv.gz https://iptoas
 netgraph serve -asn-file /usr/local/share/netgraph/ip2asn-combined.tsv.gz ...
 ```
 
-It costs about 30 MB of memory and a third of a second to load. The
-server reloads it when the file changes (it checks every 5 minutes) or on
-`SIGHUP`, so a weekly timer is enough to keep it fresh:
+A file replaces the built-in table. The server reloads it when it changes
+(it checks every 5 minutes) or on `SIGHUP`, so a weekly timer keeps it
+fresh:
 
 ```ini
 # /etc/systemd/system/netgraph-asn.service
@@ -122,16 +132,17 @@ Persistent=true
 WantedBy=timers.target
 ```
 
-Under the packaged unit, keep the table **out of `/etc/netgraph`**: the unit
+Under the packaged unit, keep the file **out of `/etc/netgraph`**: the unit
 hands that directory to the server as systemd credentials, which are capped
 at about 1 MB in all, and a larger file stops the unit from starting. Pass
 `-asn-file` in `server.conf` instead. In Docker, mount the file read-only
 and pass the flag.
 
 Connections stored before a table was loaded (or by a server without one)
-are looked up when it loads; `netgraph db enrich -asn-file FILE` does the
-same for a database offline. The networks' names are kept in the database,
-so `netgraph query` reading the file shows them without the table.
+are looked up when it loads; `netgraph db enrich` does the same for a
+database offline, with the built-in table or `-asn-file`. The networks'
+names are kept in the database, so `netgraph query` reading the file shows
+them without the table.
 
 ### New-device alerts
 

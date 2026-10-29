@@ -24,6 +24,9 @@ before:
     # The web UI (static files + WASM) is embedded in netgraph, so it has
     # to exist before the build. Needs only Go and gzip.
     - make web.build
+    # So is the network (AS) table: downloaded from iptoasn.com at release
+    # time, so each release carries a current one. Needs curl.
+    - make asn.fetch
 
 builds:
   - id: netgraph-sensor
@@ -52,8 +55,9 @@ builds:
     binary: netgraph
     main: ./cmd/netgraph
     # embed_web bakes web/dist into the binary: an installed netgraph has
-    # no source tree to serve the UI from.
-    tags: [embed_web]
+    # no source tree to serve the UI from. embed_asn bakes in the ASN table
+    # (make asn.fetch), so released servers name networks without setup.
+    tags: [embed_web, embed_asn]
     env:
       - CGO_ENABLED=0
     goos: [linux, darwin, windows]
