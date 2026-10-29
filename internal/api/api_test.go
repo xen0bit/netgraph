@@ -112,6 +112,16 @@ func TestEndToEnd(t *testing.T) {
 	if _, err := c.Entity(ctx, "domain:nope.example", window); err == nil || !strings.Contains(err.Error(), "not found") {
 		t.Fatalf("missing entity: %v", err)
 	}
+	found, err := c.Search(ctx, "alice", 5)
+	if err != nil || len(found) == 0 || found[0].ID != "device:3c:22:fb:01:02:03" || found[0].Label != "alice-iphone" {
+		t.Fatalf("search: %v %+v", err, found)
+	}
+	if found, err := c.Search(ctx, "x", 5); err != nil || found == nil || len(found) != 0 {
+		t.Fatalf("short search: %v %#v", err, found)
+	}
+	if _, err := apiclient.NewClient(srv.URL, "").Search(ctx, "alice", 5); err == nil || !strings.Contains(err.Error(), "401") {
+		t.Errorf("search without a token: %v", err)
+	}
 	ts, err := c.Timeseries(ctx, window, 5*time.Minute)
 	if err != nil || len(ts.Buckets) != 12 || ts.StepMS != 300_000 {
 		t.Fatalf("timeseries: %v %+v", err, ts)

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -330,4 +331,63 @@ func summarizeObservation(typ, data string) string {
 		add("", "suffix")
 	}
 	return strings.Join(parts, " ")
+}
+
+// searchKinds are the entities Search finds, in the order it lists them.
+var searchKinds = []string{model.KindDevice, model.KindIP, model.KindASN, model.KindDomain}
+
+// Search finds entities by key or name: devices by MAC, name or label,
+// addresses, DNS names and networks. Exact keys come first, then keys
+// starting with q, then names containing it; devices before the rest, the
+// most recently seen first. A query of fewer than two characters finds
+// nothing. "kind:key" searches one kind.
+func (s *Store) Search(ctx context.Context, q string, limit int) ([]model.SearchResult, error) {
+	out := []model.SearchResult{}
+	q = strings.ToLower(strings.TrimSpace(q))
+	kinds := searchKinds
+	if kind, key, ok := model.SplitEntityID(q); ok && slices.Contains(searchKinds, kind) {
+		kinds, q = []string{kind}, key
+	}
+	if len(q) < 2 || len(q) > 256 {
+		return out, nil
+	}
+	if limit <= 0 || limit > 100 {
+		limit = 20
+	}
+	like := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(q)
+	order := "CASE kind"
+	for i, k := range searchKinds {
+		order += fmt.Sprintf(" WHEN '%s' THEN %d", k, i)
+	}
+	order += " END"
+	marks := strings.TrimSuffix(strings.Repeat("?,", len(kinds)), ",")
+	args := []any{}
+	for _, k := range kinds {
+		args = append(args, k)
+	}
+	args = append(args, like, like, like, q, like, limit)
+	rows, err := s.r.QueryContext(ctx, `SELECT kind, key, label, last_seen, attrs FROM entities
+		WHERE kind IN (`+marks+`) AND (lower(key) LIKE ? || '%' ESCAPE '\' OR lower(label) LIKE '%' || ? || '%' ESCAPE '\'
+			OR (kind = 'device' AND json_valid(attrs) AND lower(coalesce(json_extract(attrs, '$.auto_label'), '')) LIKE '%' || ? || '%' ESCAPE '\'))
+		ORDER BY lower(key) = ? DESC, lower(key) LIKE ? || '%' ESCAPE '\' DESC, `+order+`, last_seen DESC LIMIT ?`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var r model.SearchResult
+		var attrs string
+		if err := rows.Scan(&r.Kind, &r.Key, &r.Label, &r.LastSeen, &attrs); err != nil {
+			return nil, err
+		}
+		r.ID = model.EntityID(r.Kind, r.Key)
+		if r.Kind == model.KindDevice {
+			var a map[string]string
+			_ = json.Unmarshal([]byte(attrs), &a)
+			r.Label = deviceLabel(r.Key, r.Label, a)
+		}
+		r.Label = cmp.Or(r.Label, r.Key)
+		out = append(out, r)
+	}
+	return out, rows.Err()
 }

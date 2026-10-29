@@ -36,6 +36,7 @@ Times in responses are unix milliseconds.
 | `GET /api/v1/wifi` | `[{bssid, ssid, security, channel, clients, first_seen, last_seen}]`, from monitor-mode sensors |
 | `GET /api/v1/live` | server-sent events: `event: ingest` with `[{type, ts, detail}]` per batch |
 | `PUT /api/v1/devices/{mac}/label` | names a device by hand: body `{"label": "Living room TV"}` (JSON required; at most 64 printable characters), `{"label": ""}` restores the automatic name. `204`, or `400`/`404`. Read token |
+| `GET /api/v1/search?q=alice&limit=20` | `[{id, kind, key, label, last_seen}]`: devices (by MAC, name or label), addresses, DNS names and networks whose key starts with `q` or whose name contains it; exact keys first, then devices, then the most recently seen. `q` needs two characters; `kind:q` (`device:3c:22`) searches one kind. `limit` is at most 100 (default 20). Read token |
 | `GET /api/v1/anomalies` | the window's [anomalies](concepts.md#anomalies), most severe first: `{from, to, since, learning, anomalies: [{kind, severity, ts, device, device_name, entity, summary, evidence}]}`. Read token |
 | `GET /metrics` | Prometheus text: ingest counters, each sensor's last reported stats (packets, kernel drops, queued and dropped events, ...), entities by kind, database size, alert outcomes. Read token |
 | `GET /api/v1/version`, `/healthz` | `{version, commit}`; no token needed |

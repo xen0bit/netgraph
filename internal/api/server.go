@@ -96,6 +96,7 @@ func New(cfg Config) *Server {
 	read("/api/v1/sensors", s.sensors)
 	read("/api/v1/wifi", s.wifi)
 	read("/api/v1/anomalies", s.anomalies)
+	read("/api/v1/search", s.search)
 	read("/api/v1/live", s.live)
 	read("/metrics", s.metrics)
 	s.mux.Handle("PUT /api/v1/devices/{mac}/label", s.requireRead(http.HandlerFunc(s.setLabel)))
@@ -346,6 +347,17 @@ func (s *Server) entity(w http.ResponseWriter, r *http.Request) {
 	answer(s, w, r, func(ctx context.Context, f model.Filter) (*model.EntityDetail, error) {
 		return s.cfg.Store.Entity(ctx, id, f)
 	})
+}
+
+func (s *Server) search(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	n, _ := strconv.Atoi(q.Get("limit"))
+	res, err := s.cfg.Store.Search(r.Context(), q.Get("q"), n)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, res)
 }
 
 func (s *Server) graph(w http.ResponseWriter, r *http.Request) {

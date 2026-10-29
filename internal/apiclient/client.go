@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -160,6 +161,11 @@ func (c *Client) GraphFormat(ctx context.Context, f model.Filter, o model.GraphO
 		q.Set("theme", theme)
 	}
 	return c.Get(ctx, "/api/v1/graph", q)
+}
+
+func (c *Client) Search(ctx context.Context, q string, limit int) ([]model.SearchResult, error) {
+	var v []model.SearchResult
+	return v, c.getJSON(ctx, "/api/v1/search", url.Values{"q": {q}, "limit": {strconv.Itoa(limit)}}, &v)
 }
 
 func (c *Client) Entity(ctx context.Context, id string, f model.Filter) (*model.EntityDetail, error) {

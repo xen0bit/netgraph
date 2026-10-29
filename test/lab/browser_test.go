@@ -162,6 +162,58 @@ func checkWebUI(t *testing.T, devtools, ui, token, shotDir string, expect []stri
 			t.Errorf("%s tab is empty", tab)
 		}
 	}
+	// Sort the connections by what the device sent, export them as CSV
+	// (captured from the blob the page downloads), find the laptop by
+	// name, and reopen its details from a link.
+	var sortHead, hash, csv, found, deep string
+	err = chromedp.Run(ctx,
+		chromedp.Click(`.tabs button[data-tab="flows"]`, chromedp.ByQuery),
+		chromedp.WaitVisible(`#t-flows tbody tr[data-i]`, chromedp.ByQuery),
+		chromedp.Click(`#t-flows thead button.sort[data-col="8"]`, chromedp.ByQuery),
+		chromedp.Text(`#t-flows thead th[aria-sort="descending"]`, &sortHead, chromedp.ByQuery),
+		chromedp.Evaluate(`location.hash`, &hash),
+		chromedp.Evaluate(`window.__csv = ""; { const create = URL.createObjectURL; URL.createObjectURL = (b) => { b.text().then((t) => { window.__csv = t; }); return create(b); }; } 0`, nil),
+		chromedp.Click(`#tt-flows [data-csv]`, chromedp.ByQuery),
+		chromedp.Poll(`window.__csv.length > 0`, nil, chromedp.WithPollingTimeout(10*time.Second)),
+		chromedp.Evaluate(`window.__csv`, &csv),
+		shot("flows-sorted"),
+		chromedp.SendKeys(`#search`, "lab-lap", chromedp.ByQuery),
+		chromedp.WaitVisible(`#search-results li[data-i]`, chromedp.ByQuery),
+		chromedp.Text(`#search-results li[data-i]`, &found, chromedp.ByQuery),
+		shot("search"),
+	)
+	if err != nil {
+		t.Fatalf("sort, CSV and search: %v", err)
+	}
+	if !strings.HasPrefix(sortHead, "Sent") || !strings.Contains(hash, "sort=flows.8.desc") {
+		t.Errorf("sorted by %q, hash %q", sortHead, hash)
+	}
+	if lines := strings.Split(strings.TrimSpace(csv), "\r\n"); len(lines) < 2 || !strings.HasPrefix(lines[0], "key,proto,client_ip") {
+		t.Errorf("CSV: %.200q", csv)
+	}
+	if !strings.Contains(found, "lab-laptop") {
+		t.Errorf("search found %q", found)
+	}
+	err = chromedp.Run(ctx,
+		chromedp.SendKeys(`#search`, "\r", chromedp.ByQuery),
+		chromedp.WaitVisible(`#panel h2`, chromedp.ByQuery),
+		chromedp.Evaluate(`location.hash`, &hash),
+	)
+	if err != nil || !strings.Contains(hash, "open=device") {
+		t.Fatalf("search result: %v, hash %q", err, hash)
+	}
+	err = chromedp.Run(ctx,
+		chromedp.Evaluate(`document.querySelector("#panel").hidden = true; document.querySelector("#panel h2").textContent = ""`, nil),
+		chromedp.Navigate(fmt.Sprintf("%s/#from=%d&to=%d&tab=devices&%s", ui, now-2*3600*1000, now+60*1000, hash[strings.Index(hash, "open="):])),
+		chromedp.Reload(),
+		chromedp.WaitVisible(`#panel h2`, chromedp.ByQuery),
+		chromedp.Poll(`document.querySelector("#panel h2").textContent.length > 0`, nil, chromedp.WithPollingTimeout(20*time.Second)),
+		chromedp.Text(`#panel h2`, &deep, chromedp.ByQuery),
+	)
+	if err != nil || !strings.Contains(deep, "lab-laptop") {
+		t.Errorf("a link with open= showed %q: %v", deep, err)
+	}
+
 	// The lab has no history: the anomalies tab draws its table and says
 	// it is learning.
 	var learning string
