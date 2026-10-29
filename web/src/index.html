@@ -34,7 +34,7 @@
 
   <section class="filters">
     <input id="filter" type="search" spellcheck="false" autocomplete="off"
-           placeholder="Filter: device:alice-*  domain:*.example.com  ip:10.0.0.0/8  port:443  dir:in  proto:udp  app:quic">
+           placeholder="Filter: device:alice-*  domain:*.example.com  ip:10.0.0.0/8  port:443  dir:in  asn:13335  cc:DE  app:quic">
     <div id="summary" class="summary" aria-live="polite"></div>
   </section>
 
@@ -56,6 +56,7 @@
         <label title="Draw DNS lookups, and lookups that led to no connection"><input type="checkbox" id="g-dns" checked> Lookups</label>
         <label title="One node per registrable domain: time.com for www.time.com, auth.time.com, …"><input type="checkbox" id="g-sites" checked> Sites</label>
         <label title="Outline what medium and high anomalies are about"><input type="checkbox" id="g-anomalies" checked> Anomalies</label>
+        <label title="One node per network (AS) for addresses whose network the server knows: visitors from outside, unnamed destinations"><input type="checkbox" id="g-networks" checked> Networks</label>
         <label><input type="checkbox" id="g-identity"> Identity</label>
         <label title="Draw each device's busiest N destinations and N clients; the rest become one node each (-1: all)">Top <input type="number" id="g-top" min="-1" max="500" value="15"></label>
         <label>Layout <select id="g-layout"><option value="dagre">dagre (in browser)</option><option value="elk">elk (server)</option></select></label>
@@ -72,6 +73,7 @@
         <span><span class="sw dev"></span>device here</span>
         <span><span class="sw oval name"></span>name or site</span>
         <span><span class="sw addr"></span>address</span>
+        <span><span class="sw net"></span>network (AS)</span>
         <span><span class="sw dashed rest"></span>left out by Top N</span>
       </div>
     </section>

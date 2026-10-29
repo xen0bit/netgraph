@@ -11,11 +11,14 @@ import (
 	"net/url"
 	"os"
 	"os/signal"
+	"runtime/debug"
+	"sync/atomic"
 	"syscall"
 	"time"
 
 	"github.com/xen0bit/netgraph/internal/alert"
 	"github.com/xen0bit/netgraph/internal/api"
+	"github.com/xen0bit/netgraph/internal/asn"
 	"github.com/xen0bit/netgraph/internal/buildinfo"
 	"github.com/xen0bit/netgraph/internal/model"
 	"github.com/xen0bit/netgraph/internal/store"
@@ -35,6 +38,9 @@ func runServe(args []string) error {
 	wifiKeyFile := fs.String("wifi-key-file", envOr("NETGRAPH_WIFI_KEY_FILE", etcCredential("wifi.keys")), "WPA/WPA2 passphrases, PMKs and WEP keys served to sensors for Wi-Fi decryption; $NETGRAPH_WIFI_KEY_FILE; under the systemd unit, /etc/netgraph/wifi.keys")
 	alertURL := fs.String("alert-webhook", envOr("NETGRAPH_ALERT_WEBHOOK", ""), "POST a JSON alert here when a new device joins the network; $NETGRAPH_ALERT_WEBHOOK")
 	alertLearn := fs.String("alert-learn", "24h", "after the first sensor connects, learn the network this long before alerting on new devices")
+	// Not a systemd credential like the files above: credentials are
+	// capped at about 1 MB together, and the table is several.
+	asnFile := fs.String("asn-file", envOr("NETGRAPH_ASN_FILE", ""), "an iptoasn.com ip2asn-combined.tsv(.gz): name the network and country of remote addresses; reloaded on SIGHUP and when the file changes; $NETGRAPH_ASN_FILE")
 	webDir := fs.String("web-dir", "", "serve the web UI from this directory instead of the embedded copy")
 	raw := fs.String("raw-retention", "14d", "keep raw flows, DNS and observations this long")
 	rollup := fs.String("rollup-retention", "180d", "keep hourly rollups and facts this long")
@@ -98,7 +104,19 @@ func runServe(args []string) error {
 		notifier = alert.New(alert.Config{URL: *alertURL, Learn: learnD, Logger: log})
 		onNew = notifier.Notify
 	}
-	st, err := store.Open(*db, store.Config{RawRetention: rawD, RollupRetention: rollD, FactGap: gapD, ExactMax: exactD, Logger: log, OnNewDevice: onNew})
+	var networks atomic.Pointer[asn.DB]
+	if *asnFile != "" {
+		t0 := time.Now()
+		table, err := asn.Load(*asnFile)
+		if err != nil {
+			return fmt.Errorf("-asn-file: %w", err)
+		}
+		networks.Store(table)
+		debug.FreeOSMemory() // parsing left several times the table's size behind
+		log.Info("loaded asn table", "file", *asnFile, "ranges", table.Len(), "took", time.Since(t0).Round(time.Millisecond))
+	}
+	st, err := store.Open(*db, store.Config{RawRetention: rawD, RollupRetention: rollD, FactGap: gapD, ExactMax: exactD, Logger: log, OnNewDevice: onNew,
+		ASN: networks.Load})
 	if err != nil {
 		return err
 	}
@@ -129,6 +147,10 @@ func runServe(args []string) error {
 	}
 	if *wifiKeyFile != "" {
 		go reloadWiFiKeys(ctx, *wifiKeyFile, apiSrv, log)
+	}
+	if *asnFile != "" {
+		go enrichASN(ctx, st, log)
+		go reloadASN(ctx, *asnFile, &networks, st, log)
 	}
 
 	ln, err := net.Listen("tcp", *listen)
@@ -193,5 +215,64 @@ func reloadWiFiKeys(ctx context.Context, path string, srv *api.Server, log *slog
 			srv.SetWiFi(sec)
 			log.Info("reloaded wifi keys", "networks", len(sec.PMKs))
 		}
+	}
+}
+
+// enrichASN looks up the network of remote ends stored while no ASN table
+// was loaded.
+func enrichASN(ctx context.Context, st *store.Store, log *slog.Logger) {
+	t0 := time.Now()
+	n, err := st.EnrichASN(ctx)
+	if err != nil {
+		if ctx.Err() == nil {
+			log.Error("look up networks", "err", err)
+		}
+		return
+	}
+	if n > 0 {
+		log.Info("looked up networks", "rows", n, "took", time.Since(t0).Round(time.Millisecond))
+	}
+}
+
+// asnCheck is how often the server looks for a newer ASN file.
+const asnCheck = 5 * time.Minute
+
+// reloadASN re-reads the ASN table on SIGHUP, or when the file's
+// modification time changes (a timer replaced it). A file that fails to
+// parse is logged and the table already loaded stays in use.
+func reloadASN(ctx context.Context, path string, networks *atomic.Pointer[asn.DB], st *store.Store, log *slog.Logger) {
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
+	tick := time.NewTicker(asnCheck)
+	defer tick.Stop()
+	mtime := func() time.Time {
+		fi, err := os.Stat(path)
+		if err != nil {
+			return time.Time{}
+		}
+		return fi.ModTime()
+	}
+	loaded := mtime()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-hup:
+		case <-tick.C:
+			if m := mtime(); m.IsZero() || m.Equal(loaded) {
+				continue
+			}
+		}
+		loaded = mtime()
+		table, err := asn.Load(path)
+		if err != nil {
+			log.Error("reload asn table; keeping the previous one", "file", path, "err", err)
+			continue
+		}
+		networks.Store(table)
+		debug.FreeOSMemory()
+		log.Info("reloaded asn table", "ranges", table.Len())
+		enrichASN(ctx, st, log)
 	}
 }

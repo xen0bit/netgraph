@@ -73,6 +73,14 @@ func (s *Store) Entity(ctx context.Context, id string, f model.Filter) (*model.E
 	case model.KindDomain:
 		// Exact name rather than a substring.
 		wf.Domain, wd.Domain = key, key
+	case model.KindASN:
+		// Connections with the network's addresses; lookups do not say
+		// which network answered.
+		n, err := model.ParseASN(key)
+		if err != nil {
+			return nil, err
+		}
+		wf.ASN, wd.Limit = n, -1
 	default:
 		wf.Limit, wd.Limit = -1, -1
 	}
@@ -83,8 +91,10 @@ func (s *Store) Entity(ctx context.Context, id string, f model.Filter) (*model.E
 		if kind == model.KindDomain {
 			d.Flows = filterFlows(d.Flows, func(fl model.Flow) bool { return fl.Name == key || fl.QName == key })
 		}
-		if d.DNS, err = s.DNS(ctx, wd); err != nil {
-			return nil, err
+		if wd.Limit > 0 {
+			if d.DNS, err = s.DNS(ctx, wd); err != nil {
+				return nil, err
+			}
 		}
 		if kind == model.KindDomain {
 			d.DNS = filterDNS(d.DNS, func(q model.DNSQuery) bool { return q.QName == key })

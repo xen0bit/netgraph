@@ -234,6 +234,12 @@ func TestParseFilter(t *testing.T) {
 	if _, err := parseFilter("bogus:1"); err == nil {
 		t.Fatal("unknown key accepted")
 	}
+	if f, err := parseFilter("asn:AS13335 cc:de"); err != nil || f.ASN != 13335 || f.Country != "DE" || filterString(f) != "asn:13335 cc:DE" {
+		t.Errorf("network filter: %+v %v", f, err)
+	}
+	if _, err := parseFilter("asn:x"); err == nil {
+		t.Error("asn:x accepted")
+	}
 	if _, err := parseFilter("port:x"); err == nil {
 		t.Fatal("bad port accepted")
 	}

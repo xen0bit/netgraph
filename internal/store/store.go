@@ -21,6 +21,8 @@ import (
 	"time"
 
 	_ "modernc.org/sqlite" // registers the "sqlite" driver
+
+	"github.com/xen0bit/netgraph/internal/asn"
 )
 
 //go:embed migrations/*.sql
@@ -48,6 +50,10 @@ type Config struct {
 	// device that used an address on the LAN for the first time. It runs
 	// on the ingest path, so it should only hand the event off.
 	OnNewDevice func(NewDevice)
+	// ASN, when set, returns the current ASN table (nil when none is
+	// loaded). Ingest records each remote end's network with it, and
+	// EnrichASN fills in what was stored without one.
+	ASN func() *asn.DB
 	// Now is the clock; tests set it.
 	Now func() time.Time
 }
@@ -70,6 +76,9 @@ func (c *Config) defaults() {
 	}
 	if c.Now == nil {
 		c.Now = time.Now
+	}
+	if c.ASN == nil {
+		c.ASN = func() *asn.DB { return nil }
 	}
 }
 

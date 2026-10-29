@@ -5,4 +5,12 @@
 #   /etc/netgraph/wifi.keys             WPA2 passphrases for Wi-Fi sensors (root-only)
 #   /etc/netgraph/tls.crt, tls.key      serve HTTPS
 # Restart (not reload) the service after changing them.
+#
+# To name the networks and countries of remote addresses, download an ASN
+# table outside /etc/netgraph (systemd credentials are capped at about 1 MB,
+# and the unit would not start) and add -asn-file:
+#   sudo mkdir -p /usr/local/share/netgraph
+#   sudo curl -fsSLo /usr/local/share/netgraph/ip2asn-combined.tsv.gz https://iptoasn.com/data/ip2asn-combined.tsv.gz
+#   NETGRAPH_SERVER_ARGS=-listen :8443 -asn-file /usr/local/share/netgraph/ip2asn-combined.tsv.gz
+# The server reloads it by itself when the file changes.
 NETGRAPH_SERVER_ARGS=-listen :8443

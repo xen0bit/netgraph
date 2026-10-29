@@ -393,6 +393,16 @@ func Build(in Input, o model.GraphOptions) *model.Graph {
 			ips := strings.Split(a, ",")
 			slices.SortFunc(ips, compareAddr)
 			n.Attrs["addresses"] = strings.Join(ips, ",")
+			if n.Kind == model.KindASN {
+				// "DE · 14 addresses"
+				n.Sub = fmt.Sprintf("%d addresses", len(ips))
+				if len(ips) == 1 {
+					n.Sub = ips[0]
+				}
+				if cc := n.Attrs["country"]; cc != "" {
+					n.Sub = cc + " · " + n.Sub
+				}
+			}
 		}
 		g.Nodes = append(g.Nodes, *n)
 	}
@@ -439,7 +449,7 @@ const ClientsPrefix = "clients:"
 // for an inbound connection the client it came from.
 func (b *builder) destination(fl model.Flow) string {
 	if fl.Inbound() {
-		return model.EntityID(model.KindIP, fl.RemoteIP)
+		return b.addrID(fl)
 	}
 	if fl.Direction == model.DirLocal {
 		// Device to device on the LAN: point at the other device when one
@@ -451,6 +461,15 @@ func (b *builder) destination(fl model.Flow) string {
 	}
 	if b.o.Collapse && fl.Name != "" {
 		return b.nameID(fl.Name)
+	}
+	return b.addrID(fl)
+}
+
+// addrID is the node a connection's remote address is drawn as: its own,
+// or with Networks its network's.
+func (b *builder) addrID(fl model.Flow) string {
+	if b.o.Networks && fl.ASN != 0 {
+		return model.EntityID(model.KindASN, strconv.FormatUint(uint64(fl.ASN), 10))
 	}
 	return model.EntityID(model.KindIP, fl.RemoteIP)
 }
@@ -685,10 +704,21 @@ func (b *builder) connect(src, dst string, fl model.Flow) {
 		b.addAddr(dst, model.EntityID(model.KindIP, fl.RemoteIP))
 	case model.KindDomain:
 		b.addAddr(dst, model.EntityID(model.KindIP, fl.RemoteIP))
+	case model.KindASN:
+		b.addAddr(dst, model.EntityID(model.KindIP, fl.RemoteIP))
+		n.Label = network(fl.ASN, fl.ASOrg)
+		setAttr(n, "country", fl.Country)
 	}
 	if kind == model.KindIP {
 		if a, err := netip.ParseAddr(key); err == nil && (a.IsPrivate() || a.IsLinkLocalUnicast()) {
 			n.Local = true
+		}
+		// The address's network, when it is not drawn as one.
+		if fl.ASN != 0 && key == fl.RemoteIP {
+			setAttr(n, "asn", strconv.FormatUint(uint64(fl.ASN), 10))
+			setAttr(n, "as_org", fl.ASOrg)
+			setAttr(n, "country", fl.Country)
+			n.Sub = strings.TrimSuffix(network(fl.ASN, "")+" · "+fl.Country, " · ")
 		}
 	}
 	e := b.edge(from, to, model.RelConnects)
@@ -801,4 +831,24 @@ func firstNonEmpty(ss ...string) string {
 		}
 	}
 	return ""
+}
+
+// network names an autonomous system: "AS13335 CLOUDFLARENET", or
+// "AS13335" when its organisation is unknown.
+func network(asn uint32, org string) string {
+	s := "AS" + strconv.FormatUint(uint64(asn), 10)
+	if org != "" {
+		s += " " + org
+	}
+	return s
+}
+
+func setAttr(n *model.Node, k, v string) {
+	if v == "" {
+		return
+	}
+	if n.Attrs == nil {
+		n.Attrs = map[string]string{}
+	}
+	n.Attrs[k] = v
 }

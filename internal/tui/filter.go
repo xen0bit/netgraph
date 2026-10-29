@@ -50,10 +50,22 @@ func parseFilter(s string) (model.Filter, error) {
 				return f, fmt.Errorf("dir: %q is not out, in, local or external", v)
 			}
 			f.Dir = v
+		case "asn", "as":
+			n, err := model.ParseASN(v)
+			if err != nil {
+				return f, fmt.Errorf("asn: %w", err)
+			}
+			f.ASN = n
+		case "cc", "country":
+			c, err := model.ParseCountry(v)
+			if err != nil {
+				return f, fmt.Errorf("cc: %w", err)
+			}
+			f.Country = c
 		case "multicast":
 			f.Multicast = v == "1" || v == "true" || v == "yes"
 		default:
-			return f, fmt.Errorf("unknown filter %q (device, ip, domain, port, proto, app, dir, multicast)", k)
+			return f, fmt.Errorf("unknown filter %q (device, ip, domain, port, proto, app, dir, asn, cc, multicast)", k)
 		}
 	}
 	return f, nil
@@ -76,6 +88,10 @@ func filterString(f model.Filter) string {
 	add("proto", f.Proto)
 	add("app", f.App)
 	add("dir", f.Dir)
+	if f.ASN != 0 {
+		add("asn", strconv.FormatUint(uint64(f.ASN), 10))
+	}
+	add("cc", f.Country)
 	if f.Multicast {
 		add("multicast", "1")
 	}

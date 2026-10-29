@@ -15,6 +15,7 @@ Times in responses are unix milliseconds.
 | `domain` | DNS name / SNI / HTTP host glob |
 | `port`, `proto`, `app` | the server's port (the service, whichever end is the device), `tcp`/`udp`/number, application |
 | `dir` | `out` (a device here connected out), `in` (opened from outside to a device here), `local` or `external` |
+| `asn`, `cc` | the remote end's network (`13335` or `AS13335`) and country (`DE`), from the server's [ASN table](deployment.md#networks-and-countries) |
 | `multicast` | `1` to include multicast and broadcast |
 | `limit` | maximum rows |
 
@@ -24,7 +25,7 @@ Times in responses are unix milliseconds.
 |---|---|
 | `GET /api/v1/summary` | `{devices, flows, inbound, peak_connections, dns_queries, domains, remote_ips, bytes_out, bytes_in, precision, ...}`; bytes are what devices here sent and received |
 | `GET /api/v1/devices` | `[{id, mac, label, user_label, auto_label, vendor, vendor_short, randomized, role, ips, hostnames, services, serves, fingerprints, user_agents, flows, inbound, dns_queries, bytes_out, bytes_in, remotes, active_from, active_to, first_seen, last_seen}]`; `serves` lists the ports clients connected to (`443/tcp`), `inbound` how many connections came in from outside |
-| `GET /api/v1/flows` | `[{key, proto, client_ip, client_port, server_ip, server_port, device, device_name, device_mac, remote_ip, remote_port, peer_device, peer_name, direction, app, name, sni, http_host, qname, alpn, ja4, user_agent, first_seen, last_seen, state, closed, end_reason, bytes_out, bytes_in, pkts_out, pkts_in}]`, busiest first (see [Flows](#flows)) |
+| `GET /api/v1/flows` | `[{key, proto, client_ip, client_port, server_ip, server_port, device, device_name, device_mac, remote_ip, remote_port, peer_device, peer_name, direction, app, name, sni, http_host, qname, alpn, ja4, user_agent, asn, as_org, country, first_seen, last_seen, state, closed, end_reason, bytes_out, bytes_in, pkts_out, pkts_in}]`, busiest first (see [Flows](#flows)) |
 | `GET /api/v1/dns` | `[{ts, client_ip, device, device_name, server, qname, qtype, rcode, latency_ms, answers: [{name, type, data, ttl, expires}]}]`, newest first |
 | `GET /api/v1/facts` | `[{rel, src, src_label, dst, dst_label, first_seen, last_seen, count, source, attrs}]` |
 | `GET /api/v1/timeseries?step=5m` | `{step, precision, buckets: [{ts, bytes_out, bytes_in, flows_new, dns_queries, devices}]}` |
@@ -41,9 +42,12 @@ Times in responses are unix milliseconds.
 
 Graph options: `collapse=0|1` (default 1), `dns=0|1` (1), `sites=0|1` (1),
 `anomalies=0|1` (1; outline what medium and high anomalies are about),
+`networks=0|1` (1; one `asn:<number>` node per network for clients from
+outside and unnamed destinations, when the server has an ASN table),
 `identity=0|1` (0), `top=N` (15; `-1` for all). `GET /api/v1/entity` also
 answers for a graph's `site:<registrable domain>` nodes: the connections,
-lookups and facts of every name under it.
+lookups and facts of every name under it, and for `asn:<number>` (a
+network's connections in the window).
 
 ```sh
 curl -s -H "Authorization: Bearer $NETGRAPH_READ_TOKEN" \
@@ -62,7 +66,9 @@ connection, `name` is the name the client asked for (its SNI or Host),
 which is the device's own; its `ja4` and `user_agent` are the client's, and
 are recorded as facts about the client's address. `peer_device` and
 `peer_name` name the server when it is a device here too. Rows from hourly
-rollups keep only the server's port.
+rollups keep only the server's port. `asn`, `as_org` and `country` describe
+the remote end's network when the server has an ASN table; they are absent
+for local ends and addresses no network announces.
 
 In graphs, every `connects` edge points from client to server, and its
 `bytes_out` is what the client sent (the edge's "up"). An inbound client is

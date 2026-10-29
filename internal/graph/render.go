@@ -36,6 +36,7 @@ var palette = map[string][2]string{
 	model.KindLLDP:        {"#fef3c7", "#b45309"},
 	model.KindSSID:        {"#e0f2fe", "#0369a1"},
 	model.KindSite:        {"#dcfce7", "#15803d"},
+	model.KindASN:         {"#ecfeff", "#0e7490"},
 	model.KindOther:       {"#f9fafb", "#9ca3af"},
 }
 
@@ -52,6 +53,7 @@ var darkPalette = map[string][2]string{
 	model.KindLLDP:        {"#78350f", "#fcd34d"},
 	model.KindSSID:        {"#075985", "#7dd3fc"},
 	model.KindSite:        {"#14532d", "#86efac"},
+	model.KindASN:         {"#164e63", "#67e8f9"},
 	model.KindOther:       {"#1f2937", "#9ca3af"},
 }
 
@@ -298,6 +300,9 @@ func nodeLabel(n model.Node, ascii bool) string {
 	if ascii {
 		// The text renderer cannot draw multi-line labels; keep one line.
 		if n.Kind == model.KindDevice && n.Sub != "" {
+			return n.Label + " (" + strings.ReplaceAll(n.Sub, " · ", ", ") + ")"
+		}
+		if n.Kind == model.KindASN && n.Sub != "" {
 			return n.Label + " (" + strings.ReplaceAll(n.Sub, " · ", ", ") + ")"
 		}
 		if names := strings.Split(n.Attrs["names"], ","); n.Kind == model.KindSite && len(names) > 1 {

@@ -43,6 +43,10 @@ type Filter struct {
 	Proto  string // tcp, udp, icmp, or a protocol number
 	App    string // tls, quic, http, dns, ...
 	Dir    string // out, in, local or external
+	// The remote end's network (autonomous system number) and country
+	// (ISO 3166 alpha-2), from the server's ASN table.
+	ASN     uint32
+	Country string
 
 	Multicast bool // include multicast/broadcast traffic
 	Limit     int  // maximum rows; 0 means the endpoint's default
@@ -147,20 +151,40 @@ type Flow struct {
 	ALPN       string `json:"alpn,omitempty"`
 	JA4        string `json:"ja4,omitempty"`
 	UserAgent  string `json:"user_agent,omitempty"`
-	FirstSeen  int64  `json:"first_seen"` // ms; when the connection opened
-	LastSeen   int64  `json:"last_seen"`  // ms; its last record
-	State      string `json:"state"`
-	Closed     bool   `json:"closed"` // it ended inside the window
-	EndReason  string `json:"end_reason,omitempty"`
-	BytesOut   uint64 `json:"bytes_out"` // inside the window
-	BytesIn    uint64 `json:"bytes_in"`
-	PktsOut    uint64 `json:"pkts_out"`
-	PktsIn     uint64 `json:"pkts_in"`
+	// The remote end's network, when the server has an ASN table.
+	ASN       uint32 `json:"asn,omitempty"`
+	ASOrg     string `json:"as_org,omitempty"`
+	Country   string `json:"country,omitempty"`
+	FirstSeen int64  `json:"first_seen"` // ms; when the connection opened
+	LastSeen  int64  `json:"last_seen"`  // ms; its last record
+	State     string `json:"state"`
+	Closed    bool   `json:"closed"` // it ended inside the window
+	EndReason string `json:"end_reason,omitempty"`
+	BytesOut  uint64 `json:"bytes_out"` // inside the window
+	BytesIn   uint64 `json:"bytes_in"`
+	PktsOut   uint64 `json:"pkts_out"`
+	PktsIn    uint64 `json:"pkts_in"`
 }
 
 // Inbound reports whether the connection was opened from outside to the
 // device.
 func (f Flow) Inbound() bool { return f.Direction == DirIn }
+
+// Network names the remote end's network: "AS13335 CLOUDFLARENET · US",
+// or "" when the server has no ASN table.
+func (f Flow) Network() string {
+	if f.ASN == 0 {
+		return ""
+	}
+	s := "AS" + strconv.FormatUint(uint64(f.ASN), 10)
+	if f.ASOrg != "" {
+		s += " " + f.ASOrg
+	}
+	if f.Country != "" {
+		s += " · " + f.Country
+	}
+	return s
+}
 
 // LocalIP is the device's end of the connection.
 func (f Flow) LocalIP() string {
@@ -280,6 +304,9 @@ const (
 	KindUPnP        = "upnp"
 	KindLLDP        = "lldp"
 	KindSSID        = "ssid"
+	// An autonomous system, keyed by its number: the network a remote
+	// address belongs to (label: its organisation; attrs: country).
+	KindASN = "asn"
 	// Graph only: the names under one registrable domain (Sites), and the
 	// destinations of one device that Top N summarised.
 	KindSite  = "site"
@@ -331,10 +358,15 @@ type GraphOptions struct {
 	Sites bool `json:"sites"`
 	// Anomalies marks the nodes that the window's anomalies are about.
 	Anomalies bool `json:"anomalies"`
+	// Networks draws remote addresses with a known network (the server's
+	// ASN table) as one node per network: a web server's visitors as
+	// "AS24940 HETZNER-AS · DE", not an address each. Named destinations
+	// stay names.
+	Networks bool `json:"networks"`
 }
 
 // DefaultGraphOptions is what the UIs start from.
-var DefaultGraphOptions = GraphOptions{Collapse: true, TopN: 15, DNS: true, Sites: true, Anomalies: true}
+var DefaultGraphOptions = GraphOptions{Collapse: true, TopN: 15, DNS: true, Sites: true, Anomalies: true, Networks: true}
 
 // Values encodes graph options as query parameters.
 func (o GraphOptions) Values() map[string]string {
@@ -345,7 +377,7 @@ func (o GraphOptions) Values() map[string]string {
 		return "0"
 	}
 	return map[string]string{"collapse": b(o.Collapse), "identity": b(o.Identity), "dns": b(o.DNS), "sites": b(o.Sites),
-		"anomalies": b(o.Anomalies), "top": strconv.Itoa(o.TopN)}
+		"anomalies": b(o.Anomalies), "networks": b(o.Networks), "top": strconv.Itoa(o.TopN)}
 }
 
 // ParseGraphOptions decodes query parameters over DefaultGraphOptions.
@@ -365,6 +397,7 @@ func ParseGraphOptions(q url.Values) GraphOptions {
 	o.DNS = flag("dns", o.DNS)
 	o.Sites = flag("sites", o.Sites)
 	o.Anomalies = flag("anomalies", o.Anomalies)
+	o.Networks = flag("networks", o.Networks)
 	if n, err := strconv.Atoi(q.Get("top")); err == nil {
 		o.TopN = n
 	}
@@ -532,6 +565,10 @@ func (f Filter) Values() url.Values {
 	set("proto", f.Proto)
 	set("app", f.App)
 	set("dir", f.Dir)
+	set("cc", f.Country)
+	if f.ASN != 0 {
+		v.Set("asn", strconv.FormatUint(uint64(f.ASN), 10))
+	}
 	if f.Port != 0 {
 		v.Set("port", strconv.Itoa(f.Port))
 	}
@@ -571,6 +608,16 @@ func ParseFilter(v url.Values, now time.Time) (Filter, error) {
 			return f, fmt.Errorf("port: %w", err)
 		}
 	}
+	if s := v.Get("asn"); s != "" {
+		if f.ASN, err = ParseASN(s); err != nil {
+			return f, fmt.Errorf("asn: %w", err)
+		}
+	}
+	if s := v.Get("cc"); s != "" {
+		if f.Country, err = ParseCountry(s); err != nil {
+			return f, fmt.Errorf("cc: %w", err)
+		}
+	}
 	f.Multicast = v.Get("multicast") == "1" || v.Get("multicast") == "true"
 	if s := v.Get("limit"); s != "" {
 		if f.Limit, err = strconv.Atoi(s); err != nil {
@@ -578,6 +625,28 @@ func ParseFilter(v url.Values, now time.Time) (Filter, error) {
 		}
 	}
 	return f, nil
+}
+
+// ParseASN parses an autonomous system number, "13335" or "AS13335".
+func ParseASN(s string) (uint32, error) {
+	s = strings.TrimSpace(s)
+	if len(s) > 2 && strings.EqualFold(s[:2], "as") {
+		s = s[2:]
+	}
+	n, err := strconv.ParseUint(s, 10, 32)
+	if err != nil || n == 0 {
+		return 0, fmt.Errorf("%q is not an AS number", s)
+	}
+	return uint32(n), nil
+}
+
+// ParseCountry parses a two-letter country code, in either case.
+func ParseCountry(s string) (string, error) {
+	s = strings.ToUpper(strings.TrimSpace(s))
+	if len(s) != 2 || s[0] < 'A' || s[0] > 'Z' || s[1] < 'A' || s[1] > 'Z' {
+		return "", fmt.Errorf("%q is not a two-letter country code", s)
+	}
+	return s, nil
 }
 
 // ParseTime parses an absolute or relative time:

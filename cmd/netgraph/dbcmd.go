@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/xen0bit/netgraph/internal/asn"
 	"github.com/xen0bit/netgraph/internal/model"
 	"github.com/xen0bit/netgraph/internal/store"
 )
@@ -18,6 +19,7 @@ commands:
   backup FILE      write a consistent copy of the database (safe while serving)
   retain           apply retention now (the server does this hourly)
   vacuum           rebuild the file to reclaim all free space (stop the server first)
+  enrich           look up the network of remote ends stored without one (-asn-file; the server does this when it loads one)
 `
 
 func runDB(args []string) error {
@@ -30,6 +32,7 @@ func runDB(args []string) error {
 	db := fs.String("db", envOr("NETGRAPH_DB", "netgraph.db"), "database file; $NETGRAPH_DB")
 	raw := fs.String("raw-retention", "14d", "retain: keep raw data this long")
 	rollup := fs.String("rollup-retention", "180d", "retain: keep rollups and facts this long")
+	asnFile := fs.String("asn-file", envOr("NETGRAPH_ASN_FILE", ""), "enrich: an iptoasn.com ip2asn-combined.tsv(.gz); $NETGRAPH_ASN_FILE")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -75,6 +78,26 @@ func runDB(args []string) error {
 		}
 		fmt.Fprintf(os.Stderr, "deleted: %d flow records, %d lookups, %d answers, %d observations, %d facts, %d rollup rows, %d entities, %d Wi-Fi handshakes\n",
 			r.Flows, r.DNS, r.Answers, r.Observations, r.Facts, r.Rollups, r.Entities, r.Handshakes)
+		return nil
+	case "enrich":
+		if *asnFile == "" {
+			return errors.New("usage: netgraph db enrich [-db file] -asn-file ip2asn-combined.tsv.gz")
+		}
+		table, err := asn.Load(*asnFile)
+		if err != nil {
+			return err
+		}
+		cfg.ASN = func() *asn.DB { return table }
+		st, err := store.Open(*db, cfg)
+		if err != nil {
+			return err
+		}
+		defer st.Close()
+		n, err := st.EnrichASN(context.Background())
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "looked up the network of %d rows\n", n)
 		return nil
 	case "vacuum":
 		st, err := store.Open(*db, cfg)

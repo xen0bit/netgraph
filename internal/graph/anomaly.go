@@ -72,7 +72,7 @@ func about(n *model.Node, id string) bool {
 			return site == key
 		}
 	case model.KindIP:
-		if n.Kind == model.KindDomain || n.Kind == model.KindSite {
+		if n.Kind == model.KindDomain || n.Kind == model.KindSite || n.Kind == model.KindASN {
 			return slices.Contains(strings.Split(n.Attrs["addresses"], ","), key)
 		}
 	}
