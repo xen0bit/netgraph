@@ -50,6 +50,30 @@ func TestBeacon(t *testing.T) {
 	}
 }
 
+func TestSurge(t *testing.T) {
+	week := make([]float64, 48)
+	for i := range week {
+		week[i] = float64(100 + 10*i) // 100 .. 570 connections an hour
+	}
+	for _, c := range []struct {
+		rate        float64
+		hours       []float64
+		surge, high bool
+	}{
+		{900, week, false, false},        // under the floor
+		{2000, week, false, false},       // over the floor, under 4x the peak
+		{2400, week, true, false},        // 4x the peak
+		{6000, week, true, false},        // 10x the peak, under the high floor
+		{60000, week, true, true},        // both
+		{60000, week[:10], false, false}, // too little history
+	} {
+		surge, high, _ := Surge(c.rate, c.hours)
+		if surge != c.surge || high != c.high {
+			t.Errorf("Surge(%v, %d hours) = %v %v, want %v %v", c.rate, len(c.hours), surge, high, c.surge, c.high)
+		}
+	}
+}
+
 func TestSpike(t *testing.T) {
 	week := make([]float64, 48)
 	for i := range week {
