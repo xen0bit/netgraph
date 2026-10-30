@@ -214,6 +214,8 @@ Checks that need no history:
 | `rogue_ap` | access points broadcast one network name with different security | high when one is open or WEP and another protected (an evil twin); low otherwise (WPA2 next to WPA3 is common on mesh and 6 GHz radios) |
 | `scan` | an address outside tries at least 10 ports on a device, most of them probes that never became a session (refused, unanswered, or half-open); or one port on at least 10 addresses here | low: a server on the internet is scanned all day. More than 10 scanners of one device are one finding, with the networks most of them came from |
 | `brute_force` | an address outside opens at least 50 short sessions (under 10 s) to a login service on a device: SSH, Telnet, FTP, RDP, VNC, mail, databases. Web logins look like any page load, so they are not counted | medium, high from 500; low for 500 or more from at least 20 addresses with fewer each |
+| `arp_conflict` | two devices held one address at the same time for five minutes or more (a static misconfiguration or ARP spoofing, not an ordinary DHCP move) | medium; low when one MAC is private |
+| `rogue_dhcp` | a DHCP OFFER or ACK came from an address that is not the router or a sensor interface. Clients handed a different gateway or resolver are the damage | medium; high when no device here holds the server's address |
 
 Checks that compare with history need a day of it: until the first sensor
 has reported for 24 hours the report says `learning` and they are skipped,
@@ -259,7 +261,9 @@ the sensor fetches from the server and holds only in memory:
   decrypts CCMP or TKIP data frames.
 - **WPA3/SAE, OWE and 802.1X** cannot be followed from the air alone. They
   are parsed and reported as networks, and can be decrypted only when a PMK
-  is supplied (`pmk <ssid> <hex>` in the server's key file).
+  is supplied (`pmk <ssid> <hex>` in the server's key file). With that PMK,
+  a captured 4-way handshake derives the PTK and GCMP data frames decrypt
+  like CCMP ones.
 
 Decrypted data frames are rebuilt as Ethernet and enter the normal flow,
 DNS, TLS and HTTP pipeline, so a Wi-Fi capture produces the same connection
@@ -320,16 +324,18 @@ extensions ioctl, so it works with mac80211 monitor interfaces and not with
 - **Randomised MACs** make a phone a new device on each network or after
   a reset. Its DHCP hostname often still names it.
 - **IPv4 fragments** after the first are not counted.
-- **DNS over TCP** is decoded only when a whole message fits in one
-  segment, which covers ordinary lookups but not zone transfers.
+- **DNS over TCP** is reassembled per connection and handles messages split
+  across segments; a single DNS message is still bounded at 64 KiB, so a
+  zone transfer is not followed indefinitely.
 - **WPA3/SAE, OWE and 802.1X** Wi-Fi has no passively derivable PMK; without
-  an explicitly supplied PMK, their data frames stay encrypted.
+  an explicitly supplied PMK, their data frames stay encrypted. When a PMK
+  is supplied, GCMP (the WPA3 data cipher) is decrypted like CCMP.
 - **Wi-Fi group keys** come from a message 3 or group rekey that some
   sensor saw. A network whose GTK no sensor has seen since netgraph started
   (no client joined and the AP has not rekeyed) keeps its broadcasts
-  encrypted until one does. GCMP ciphers (some WPA3 suites) are not
-  implemented yet; CCMP and TKIP are.
-- **Fragmented 802.11 frames** are not reassembled; those data frames are
-  counted but not decoded. (Fragmentation is rare on modern networks.)
+  encrypted until one does. GCMP, CCMP and TKIP group keys are supported.
+- **Fragmented 802.11 frames** are reassembled per transmitter, sequence
+  number and traffic identifier; a gap drops the partial frame rather than
+  decoding shifted bytes.
 - **Wi-Fi on other channels** is missed while the monitor interface is
   hopping. A busy network also loses frames during the hop itself.

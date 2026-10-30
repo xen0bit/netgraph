@@ -38,6 +38,7 @@ func runServe(args []string) error {
 	wifiKeyFile := fs.String("wifi-key-file", envOr("NETGRAPH_WIFI_KEY_FILE", etcCredential("wifi.keys")), "WPA/WPA2 passphrases, PMKs and WEP keys served to sensors for Wi-Fi decryption; $NETGRAPH_WIFI_KEY_FILE; under the systemd unit, /etc/netgraph/wifi.keys")
 	alertURL := fs.String("alert-webhook", envOr("NETGRAPH_ALERT_WEBHOOK", ""), "POST a JSON alert here when a new device joins the network; $NETGRAPH_ALERT_WEBHOOK")
 	alertLearn := fs.String("alert-learn", "24h", "after the first sensor connects, learn the network this long before alerting on new devices")
+	alertAnomalies := fs.String("alert-anomalies", "", "also POST anomalies at or above this severity: low, medium or high (default off)")
 	// Not a systemd credential like the files above: credentials are
 	// capped at about 1 MB together, and the table is several.
 	asnFile := fs.String("asn-file", envOr("NETGRAPH_ASN_FILE", ""), "an iptoasn.com ip2asn-combined.tsv(.gz): name the network and country of remote addresses; reloaded on SIGHUP and when the file changes. Default: the table built into release binaries, if any; none: no table. $NETGRAPH_ASN_FILE")
@@ -97,11 +98,17 @@ func runServe(args []string) error {
 	}
 	var notifier *alert.Notifier
 	var onNew func(store.NewDevice)
+	if *alertAnomalies != "" && model.SeverityRank(*alertAnomalies) == 0 {
+		return fmt.Errorf("-alert-anomalies: want low, medium or high")
+	}
+	if *alertAnomalies != "" && *alertURL == "" {
+		return errors.New("-alert-anomalies needs -alert-webhook")
+	}
 	if *alertURL != "" {
 		if u, err := url.Parse(*alertURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			return fmt.Errorf("-alert-webhook: want an http(s) URL")
 		}
-		notifier = alert.New(alert.Config{URL: *alertURL, Learn: learnD, Logger: log})
+		notifier = alert.New(alert.Config{URL: *alertURL, Learn: learnD, AnomalyMin: *alertAnomalies, Logger: log})
 		onNew = notifier.Notify
 	}
 	// The ASN table: a file given (reloaded when it changes), else the one
@@ -160,6 +167,10 @@ func runServe(args []string) error {
 		notifier.SetSince(st.FirstSensorSeen)
 		go notifier.Run(ctx)
 		log.Info("new-device alerts on", "learn", learnD)
+		if *alertAnomalies != "" {
+			go watchAnomalies(ctx, st, notifier, log)
+			log.Info("anomaly alerts on", "minimum", *alertAnomalies)
+		}
 	}
 	if *wifiKeyFile != "" {
 		go reloadWiFiKeys(ctx, *wifiKeyFile, apiSrv, log)
@@ -211,6 +222,30 @@ func runServe(args []string) error {
 	sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return srv.Shutdown(sctx)
+}
+
+// watchAnomalies checks the last hour every five minutes and hands new
+// findings to the notifier, which applies its own cooldown.
+func watchAnomalies(ctx context.Context, st *store.Store, n *alert.Notifier, log *slog.Logger) {
+	t := time.NewTicker(5 * time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-t.C:
+			rep, err := st.Anomalies(ctx, model.Filter{From: now.Add(-time.Hour), To: now})
+			if err != nil {
+				if ctx.Err() == nil {
+					log.Error("scan anomalies for alerts", "err", err)
+				}
+				continue
+			}
+			for _, a := range rep.Anomalies {
+				n.NotifyAnomaly(a)
+			}
+		}
+	}
 }
 
 // reloadWiFiKeys re-reads the Wi-Fi key file on SIGHUP, so adding or

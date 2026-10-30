@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xen0bit/netgraph/internal/model"
 	"github.com/xen0bit/netgraph/internal/store"
 )
 
@@ -67,6 +68,36 @@ func TestDeliverAndRetry(t *testing.T) {
 	p := r.got[0]
 	want := "New device on the network: alice-iphone (192.168.1.23, 3c:22:fb:01:02:03, Apple, Inc.)"
 	if p.Event != "new_device" || p.Text != want || p.Content != want || p.Device.MAC != "3c:22:fb:01:02:03" {
+		t.Fatalf("payload = %+v", p)
+	}
+}
+
+func TestAnomalyAlertAndCooldown(t *testing.T) {
+	r := &receiver{done: make(chan struct{}, 4)}
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+	n := New(Config{URL: srv.URL, AnomalyMin: model.SeverityMedium, AnomalyCooldown: time.Hour})
+	n.backoff = time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go n.Run(ctx)
+	a := model.Anomaly{Kind: model.AnomalyScan, Severity: model.SeverityMedium, Device: "device:aa", Summary: "scan"}
+	n.NotifyAnomaly(a)
+	select {
+	case <-r.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("anomaly alert not delivered")
+	}
+	n.NotifyAnomaly(a)
+	select {
+	case <-r.done:
+		t.Fatal("duplicate anomaly delivered during cooldown")
+	case <-time.After(50 * time.Millisecond):
+	}
+	r.mu.Lock()
+	p := r.got[0]
+	r.mu.Unlock()
+	if p.Event != "anomaly" || p.Anomaly == nil || p.Device != nil {
 		t.Fatalf("payload = %+v", p)
 	}
 }

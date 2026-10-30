@@ -15,10 +15,12 @@ import (
 	"log/slog"
 	"net/http"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 	"unicode"
 
+	"github.com/xen0bit/netgraph/internal/model"
 	"github.com/xen0bit/netgraph/internal/store"
 )
 
@@ -38,26 +40,41 @@ type Config struct {
 	// Queue bounds alerts waiting to be posted (default 256).
 	Queue  int
 	Logger *slog.Logger
+	// AnomalyMin is the least severity posted by NotifyAnomaly: low,
+	// medium, high. Empty disables anomaly alerts.
+	AnomalyMin string
+	// AnomalyCooldown suppresses a repeat of the same finding for this
+	// long (default 1h).
+	AnomalyCooldown time.Duration
 }
 
-// Payload is the JSON posted for one new device.
+// Payload is the JSON posted for one new device or anomaly.
 type Payload struct {
-	Event   string          `json:"event"` // "new_device"
-	Text    string          `json:"text"`
-	Content string          `json:"content"`
-	Device  store.NewDevice `json:"device"`
+	Event   string           `json:"event"` // "new_device" or "anomaly"
+	Text    string           `json:"text"`
+	Content string           `json:"content"`
+	Device  *store.NewDevice `json:"device,omitempty"`
+	Anomaly *model.Anomaly   `json:"anomaly,omitempty"`
 	// AllowedMentions stops Discord from turning text into pings.
 	AllowedMentions struct {
 		Parse []string `json:"parse"`
 	} `json:"allowed_mentions"`
 }
 
+type notice struct {
+	device  *store.NewDevice
+	anomaly *model.Anomaly
+}
+
 // Notifier delivers alerts. Notify is safe for concurrent use.
 type Notifier struct {
 	cfg     Config
 	log     *slog.Logger
-	queue   chan store.NewDevice
+	queue   chan notice
 	backoff time.Duration // first retry delay; tests shorten it
+
+	mu       sync.Mutex
+	cooldown map[string]time.Time // anomaly key -> last posted
 
 	sent, failed, dropped, learning atomic.Uint64
 }
@@ -83,7 +100,11 @@ func New(cfg Config) *Notifier {
 	if cfg.Logger == nil {
 		cfg.Logger = slog.Default()
 	}
-	return &Notifier{cfg: cfg, log: cfg.Logger, queue: make(chan store.NewDevice, cfg.Queue), backoff: time.Second}
+	if cfg.AnomalyCooldown <= 0 {
+		cfg.AnomalyCooldown = time.Hour
+	}
+	return &Notifier{cfg: cfg, log: cfg.Logger, queue: make(chan notice, cfg.Queue),
+		cooldown: map[string]time.Time{}, backoff: time.Second}
 }
 
 // SetSince sets Config.Since, for when the store is opened after the
@@ -94,10 +115,39 @@ func (n *Notifier) SetSince(f func(context.Context) (time.Time, error)) { n.cfg.
 // Notify enqueues an alert without blocking. It is store.Config.OnNewDevice.
 func (n *Notifier) Notify(d store.NewDevice) {
 	select {
-	case n.queue <- d:
+	case n.queue <- notice{device: &d}:
 	default:
 		n.dropped.Add(1)
 		n.log.Warn("alert queue full; dropping new-device alert", "mac", d.MAC)
+	}
+}
+
+// NotifyAnomaly enqueues an anomaly finding at or above AnomalyMin, with a
+// cooldown per finding so a condition that persists in every window does not
+// page once a minute.
+func (n *Notifier) NotifyAnomaly(a model.Anomaly) {
+	if n.cfg.AnomalyMin == "" || model.SeverityRank(a.Severity) < model.SeverityRank(n.cfg.AnomalyMin) {
+		return
+	}
+	key := a.Kind + "|" + a.Device + "|" + a.Entity
+	now := time.Now()
+	n.mu.Lock()
+	last, ok := n.cooldown[key]
+	if ok && now.Sub(last) < n.cfg.AnomalyCooldown {
+		n.mu.Unlock()
+		return
+	}
+	n.cooldown[key] = now
+	if len(n.cooldown) > 10000 {
+		clear(n.cooldown)
+		n.cooldown[key] = now
+	}
+	n.mu.Unlock()
+	select {
+	case n.queue <- notice{anomaly: &a}:
+	default:
+		n.dropped.Add(1)
+		n.log.Warn("alert queue full; dropping anomaly alert", "kind", a.Kind, "summary", a.Summary)
 	}
 }
 
@@ -107,13 +157,18 @@ func (n *Notifier) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
-		case d := <-n.queue:
-			if n.inLearning(ctx, d.TS) {
-				n.learning.Add(1)
-				n.log.Debug("new device during learning period; not alerting", "mac", d.MAC, "label", d.Label)
-				continue
+		case m := <-n.queue:
+			switch {
+			case m.device != nil:
+				if n.inLearning(ctx, m.device.TS) {
+					n.learning.Add(1)
+					n.log.Debug("new device during learning period; not alerting", "mac", m.device.MAC, "label", m.device.Label)
+					continue
+				}
+				n.deliver(ctx, NewPayload(*m.device), "new device", m.device.MAC)
+			case m.anomaly != nil:
+				n.deliver(ctx, NewAnomalyPayload(*m.anomaly), "anomaly", m.anomaly.Summary)
 			}
-			n.deliver(ctx, d)
 		}
 	}
 }
@@ -129,8 +184,8 @@ func (n *Notifier) inLearning(ctx context.Context, ts time.Time) bool {
 	return ts.Before(since.Add(n.cfg.Learn))
 }
 
-func (n *Notifier) deliver(ctx context.Context, d store.NewDevice) {
-	body, err := json.Marshal(NewPayload(d))
+func (n *Notifier) deliver(ctx context.Context, p Payload, what, detail string) {
+	body, err := json.Marshal(p)
 	if err != nil {
 		return
 	}
@@ -139,12 +194,12 @@ func (n *Notifier) deliver(ctx context.Context, d store.NewDevice) {
 		err := n.post(ctx, body)
 		if err == nil {
 			n.sent.Add(1)
-			n.log.Info("sent new-device alert", "mac", d.MAC, "label", d.Label)
+			n.log.Info("sent alert", "event", p.Event, "detail", detail)
 			return
 		}
 		if attempt == 4 || ctx.Err() != nil {
 			n.failed.Add(1)
-			n.log.Warn("new-device alert not delivered", "mac", d.MAC, "err", err)
+			n.log.Warn("alert not delivered", "event", what, "detail", detail, "err", err)
 			return
 		}
 		select {
@@ -191,7 +246,22 @@ func NewPayload(d store.NewDevice) Payload {
 		fmt.Fprintf(&b, " (%s)", strings.Join(detail, ", "))
 	}
 	text := b.String()
-	p := Payload{Event: "new_device", Text: text, Content: text, Device: d}
+	p := Payload{Event: "new_device", Text: text, Content: text, Device: &d}
+	p.AllowedMentions.Parse = []string{}
+	return p
+}
+
+// NewAnomalyPayload builds the webhook body for one anomaly finding.
+func NewAnomalyPayload(a model.Anomaly) Payload {
+	sev := a.Severity
+	if sev != "" {
+		sev = strings.ToUpper(sev[:1]) + sev[1:]
+	}
+	text := fmt.Sprintf("%s anomaly: %s", sev, safeText(a.Summary))
+	if a.DeviceName != "" {
+		text += fmt.Sprintf(" (%s)", safeText(a.DeviceName))
+	}
+	p := Payload{Event: "anomaly", Text: text, Content: text, Anomaly: &a}
 	p.AllowedMentions.Parse = []string{}
 	return p
 }
