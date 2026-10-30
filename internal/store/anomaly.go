@@ -46,6 +46,12 @@ type anomalyDevice struct {
 // A device filter keeps that device's anomalies; other filters are ignored.
 func (s *Store) Anomalies(ctx context.Context, f model.Filter) (*model.AnomalyReport, error) {
 	from, to := s.window(f)
+	key := fmt.Sprintf("%d|%d|%s", from, to, f.Device)
+	s.anomMu.Lock()
+	defer s.anomMu.Unlock()
+	if s.anomRep != nil && s.anomKey == key && s.cfg.Now().Sub(s.anomAt) < 15*time.Second {
+		return s.anomRep, nil
+	}
 	rep := &model.AnomalyReport{FromMS: from, ToMS: to, Anomalies: []model.Anomaly{}}
 	since, err := s.FirstSensorSeen(ctx)
 	if err != nil {
@@ -57,7 +63,7 @@ func (s *Store) Anomalies(ctx context.Context, f model.Filter) (*model.AnomalyRe
 	history := rep.SinceMS != 0 && from-rep.SinceMS >= AnomalyHistory.Milliseconds()
 	rep.Learning = !history
 	a := &anomalies{s: s, from: from, to: to, since: rep.SinceMS, devs: map[int64]*anomalyDevice{}}
-	checks := []func(context.Context) error{a.newDevices, a.beacons, a.dns, a.accessPoints, a.scans, a.bruteForce}
+	checks := []func(context.Context) error{a.newDevices, a.beacons, a.dns, a.accessPoints, a.scans, a.bruteForce, a.arpConflicts, a.rogueDHCP}
 	if history {
 		checks = append(checks, a.newDestinations, a.uploadSpikes, a.newServices, a.inboundSurges)
 	}
@@ -89,6 +95,7 @@ func (s *Store) Anomalies(ctx context.Context, f model.Filter) (*model.AnomalyRe
 		return cmp.Or(cmp.Compare(x.TS, y.TS), cmp.Compare(x.Kind, y.Kind), cmp.Compare(x.Device, y.Device), cmp.Compare(x.Entity, y.Entity))
 	})
 	rep.Anomalies = append(rep.Anomalies, out...)
+	s.anomKey, s.anomAt, s.anomRep = key, s.cfg.Now(), rep
 	return rep, nil
 }
 

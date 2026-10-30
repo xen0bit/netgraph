@@ -53,6 +53,7 @@ func (s *Store) Ingest(ctx context.Context, sensor, boot string, events []wire.E
 	}
 	s.sub.publish(live)
 	s.mu.Unlock()
+	s.invalidateAnomalies()
 	if s.cfg.OnNewDevice != nil {
 		for _, d := range res.NewDevices {
 			s.cfg.OnNewDevice(d)

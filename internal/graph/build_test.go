@@ -355,3 +355,10 @@ func TestBuildNetworks(t *testing.T) {
 		t.Errorf("d2 lacks the address's network:\n%s", d2)
 	}
 }
+
+func TestBuildCarriesTruncation(t *testing.T) {
+	g := Build(Input{Truncated: true}, model.DefaultGraphOptions)
+	if !g.Truncated {
+		t.Fatal("input truncation was lost")
+	}
+}

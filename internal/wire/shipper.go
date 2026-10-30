@@ -46,6 +46,8 @@ type Shipper struct {
 	log    *slog.Logger
 
 	mu         sync.Mutex
+	sealMu     sync.Mutex // keeps sealed batches in sequence order
+	sendMu     sync.Mutex // one sender at a time (Run and an explicit Flush)
 	seq        uint64
 	pending    []Event
 	spool      []batch
@@ -159,6 +161,11 @@ func (s *Shipper) Stats() ShipperStats {
 
 // seal encodes the pending events into a batch on the spool.
 func (s *Shipper) seal() {
+	// Encoding and appending must stay in one order: two concurrent seals
+	// that took pending events A then B must not spool B before A, or the
+	// server would skip A as a duplicate of B's higher sequence numbers.
+	s.sealMu.Lock()
+	defer s.sealMu.Unlock()
 	s.mu.Lock()
 	events := s.pending
 	s.pending = nil
@@ -248,6 +255,8 @@ func (s *Shipper) drain() {
 }
 
 func (s *Shipper) sendAll(ctx context.Context) error {
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
 	for {
 		s.mu.Lock()
 		if len(s.spool) == 0 {

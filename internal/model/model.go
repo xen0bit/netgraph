@@ -61,6 +61,7 @@ type Filter struct {
 
 	Multicast bool // include multicast/broadcast traffic
 	Limit     int  // maximum rows; 0 means the endpoint's default
+	Offset    int  // rows to skip, for paging
 }
 
 // Precision tells how exactly a result honours the window edges.
@@ -163,18 +164,19 @@ type Flow struct {
 	JA4        string `json:"ja4,omitempty"`
 	UserAgent  string `json:"user_agent,omitempty"`
 	// The remote end's network, when the server has an ASN table.
-	ASN       uint32 `json:"asn,omitempty"`
-	ASOrg     string `json:"as_org,omitempty"`
-	Country   string `json:"country,omitempty"`
-	FirstSeen int64  `json:"first_seen"` // ms; when the connection opened
-	LastSeen  int64  `json:"last_seen"`  // ms; its last record
-	State     string `json:"state"`
-	Closed    bool   `json:"closed"` // it ended inside the window
-	EndReason string `json:"end_reason,omitempty"`
-	BytesOut  uint64 `json:"bytes_out"` // inside the window
-	BytesIn   uint64 `json:"bytes_in"`
-	PktsOut   uint64 `json:"pkts_out"`
-	PktsIn    uint64 `json:"pkts_in"`
+	ASN         uint32 `json:"asn,omitempty"`
+	ASOrg       string `json:"as_org,omitempty"`
+	Country     string `json:"country,omitempty"`
+	FirstSeen   int64  `json:"first_seen"` // ms; when the connection opened
+	LastSeen    int64  `json:"last_seen"`  // ms; its last record
+	State       string `json:"state"`
+	Closed      bool   `json:"closed"` // it ended inside the window
+	EndReason   string `json:"end_reason,omitempty"`
+	BytesOut    uint64 `json:"bytes_out"` // inside the window
+	BytesIn     uint64 `json:"bytes_in"`
+	PktsOut     uint64 `json:"pkts_out"`
+	PktsIn      uint64 `json:"pkts_in"`
+	Connections int    `json:"connections,omitempty"` // rows from hourly rollups, which keep no packet counts
 }
 
 // Inbound reports whether the connection was opened from outside to the
@@ -254,6 +256,7 @@ type DNSQuery struct {
 	QType      string      `json:"qtype"`
 	RCode      string      `json:"rcode"`
 	LatencyMS  float64     `json:"latency_ms,omitempty"`
+	Count      int         `json:"count,omitempty"` // lookups this row stands for (hourly rollups)
 	Answers    []DNSAnswer `json:"answers,omitempty"`
 }
 
@@ -502,6 +505,8 @@ const (
 	AnomalyBruteForce     = "brute_force"     // many short sessions to a login service from outside
 	AnomalyNewService     = "new_service"     // a device here started serving a port to clients outside
 	AnomalyInboundSurge   = "inbound_surge"   // far more connections from outside than in any recent hour
+	AnomalyARPConflict    = "arp_conflict"    // two devices held one address at the same time
+	AnomalyRogueDHCP      = "rogue_dhcp"      // a DHCP server that is not the router answered on the LAN
 )
 
 // Anomaly severities, least to most.
@@ -593,6 +598,9 @@ func (f Filter) Values() url.Values {
 	if f.Limit != 0 {
 		v.Set("limit", strconv.Itoa(f.Limit))
 	}
+	if f.Offset != 0 {
+		v.Set("offset", strconv.Itoa(f.Offset))
+	}
 	return v
 }
 
@@ -637,6 +645,11 @@ func ParseFilter(v url.Values, now time.Time) (Filter, error) {
 	if s := v.Get("limit"); s != "" {
 		if f.Limit, err = strconv.Atoi(s); err != nil {
 			return f, fmt.Errorf("limit: %w", err)
+		}
+	}
+	if s := v.Get("offset"); s != "" {
+		if f.Offset, err = strconv.Atoi(s); err != nil || f.Offset < 0 {
+			return f, fmt.Errorf("offset: %q is not a non-negative number", s)
 		}
 	}
 	return f, nil

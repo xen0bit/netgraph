@@ -107,6 +107,55 @@ func TestShipperRetriesInOrder(t *testing.T) {
 	}
 }
 
+// Concurrent emitters must not let a later sealed batch overtake an earlier
+// one: the server skips a batch whose sequence numbers are below the last
+// one it stored.
+func TestShipperConcurrentEmitKeepsOrder(t *testing.T) {
+	var mu sync.Mutex
+	var got []uint64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		evs, err := Decode(body)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		for _, e := range evs {
+			got = append(got, e.Seq)
+		}
+		mu.Unlock()
+	}))
+	defer srv.Close()
+	s := NewShipper(ShipperConfig{URL: srv.URL, Sensor: "s1", MaxEvents: 7, FlushInterval: time.Millisecond})
+	var wg sync.WaitGroup
+	for range 32 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for range 20 {
+				s.Emit(Event{Type: TypeFlow, TS: time.Now(), Flow: &Flow{ID: 1}})
+			}
+		}()
+	}
+	wg.Wait()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := s.Flush(ctx); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(got) != 640 {
+		t.Fatalf("delivered %d events, want 640", len(got))
+	}
+	for i, seq := range got {
+		if seq != uint64(i+1) {
+			t.Fatalf("event %d has seq %d", i, seq)
+		}
+	}
+}
+
 func TestShipperSpoolBound(t *testing.T) {
 	s := NewShipper(ShipperConfig{URL: "http://127.0.0.1:1", MaxEvents: 5, SpoolBytes: 1})
 	for _, ev := range sampleEvents(50) {
