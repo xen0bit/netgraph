@@ -113,12 +113,15 @@ func lessFirst(a, b []byte) ([]byte, []byte) {
 type PTK struct {
 	KCK  []byte
 	KEK  []byte
-	TK   []byte // 16 bytes for CCMP, 32 for TKIP
+	TK   []byte // 16 bytes for CCMP/GCMP-128, 32 for TKIP/GCMP-256
 	TKIP bool
+	GCMP bool
 }
 
-func splitPTK(ptk []byte, tkip bool) *PTK {
-	return &PTK{KCK: ptk[0:16], KEK: ptk[16:32], TK: ptk[32:], TKIP: tkip}
+func splitPTK(ptk []byte, tkip bool) *PTK { return splitPTKCipher(ptk, tkip, false) }
+
+func splitPTKCipher(ptk []byte, tkip, gcmp bool) *PTK {
+	return &PTK{KCK: ptk[0:16], KEK: ptk[16:32], TK: ptk[32:], TKIP: tkip, GCMP: gcmp}
 }
 
 // EAPOLKey is one 802.1X EAPOL-Key message. Raw aliases the frame and is
@@ -570,10 +573,6 @@ func (k *Keyring) ProcessEAPOL(f *Frame, msg *EAPOLKey) HandshakeInfo {
 	if ssid == "" || len(anonce) != 32 || len(snonce) != 32 {
 		return info
 	}
-	if sec.UsesGCMP() {
-		info.Err = errUnsupportedKey
-		return info
-	}
 	pmk := k.pmkFor(ssid)
 	if len(pmk) != 32 {
 		// No passphrase/PMK: the frame is still useful as an
@@ -581,8 +580,9 @@ func (k *Keyring) ProcessEAPOL(f *Frame, msg *EAPOLKey) HandshakeInfo {
 		return info
 	}
 	tkip := msg.Version() == 1
+	gcmp := msg.Version() == 3 || sec.UsesGCMP()
 	bits := 384
-	if tkip {
+	if tkip || len(msg.KeyData) > 0 && msg.KeyLength == 32 {
 		bits = 512
 	}
 	ptk, err := DerivePTK(pmk, ap, sta, anonce, snonce, bits)
@@ -590,7 +590,7 @@ func (k *Keyring) ProcessEAPOL(f *Frame, msg *EAPOLKey) HandshakeInfo {
 		info.Err = err
 		return info
 	}
-	split := splitPTK(ptk, tkip)
+	split := splitPTKCipher(ptk, tkip, gcmp)
 	switch info.Message {
 	case 2, 3, 4:
 		ok, err := msg.VerifyMIC(split.KCK)
@@ -650,6 +650,7 @@ func (k *Keyring) LoadHandshake(bssid, sta, ssid string, anonce, snonce []byte, 
 		return false, nil
 	}
 	tkip := keyVersion == 1
+	gcmp := keyVersion == 3
 	bits := 384
 	if tkip {
 		bits = 512
@@ -658,7 +659,7 @@ func (k *Keyring) LoadHandshake(bssid, sta, ssid string, anonce, snonce []byte, 
 	if err != nil {
 		return false, err
 	}
-	k.install(key, src, splitPTK(ptk, tkip))
+	k.install(key, src, splitPTKCipher(ptk, tkip, gcmp))
 	return true, nil
 }
 
@@ -712,6 +713,10 @@ func (k *Keyring) Decrypt(f *Frame) ([]byte, string, error) {
 				out, err := tkipDecrypt(f.rawHeader(), body, gk.tk, true)
 				return out, "TKIP", err
 			}
+			if gk.gcmp {
+				out, err := gcmpDecrypt(f.rawHeader(), body, gk.tk)
+				return out, "GCMP", err
+			}
 			out, err := ccmpDecrypt(f.rawHeader(), body, gk.tk)
 			return out, "CCMP", err
 		}
@@ -731,6 +736,10 @@ func (k *Keyring) Decrypt(f *Frame) ([]byte, string, error) {
 			if ptk.TKIP {
 				out, err := tkipDecrypt(f.rawHeader(), body, ptk.TK, f.FromDS && !f.ToDS)
 				return out, "TKIP", err
+			}
+			if ptk.GCMP {
+				out, err := gcmpDecrypt(f.rawHeader(), body, ptk.TK)
+				return out, "GCMP", err
 			}
 			out, err := ccmpDecrypt(f.rawHeader(), body, ptk.TK)
 			return out, "CCMP", err

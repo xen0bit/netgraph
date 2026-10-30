@@ -18,6 +18,7 @@ import (
 	"github.com/xen0bit/netgraph/internal/testutil"
 	"github.com/xen0bit/netgraph/internal/wifi"
 	"github.com/xen0bit/netgraph/internal/wire"
+	"golang.org/x/net/dns/dnsmessage"
 )
 
 // A monitor-mode frame goes to the Wi-Fi decoder instead of the Ethernet
@@ -242,6 +243,62 @@ func TestReplayHome(t *testing.T) {
 
 // Replaying twice gives identical events: replay depends on packet time
 // alone, never the wall clock.
+func TestDNSOverTCPReassembly(t *testing.T) {
+	var out collector
+	p := NewProcessor(Config{}, &out)
+	b := dnsmessage.NewBuilder(nil, dnsmessage.Header{Response: true, ID: 7})
+	if err := b.StartQuestions(); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Question(dnsmessage.Question{Name: dnsmessage.MustNewName("split.example."), Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.StartAnswers(); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.AResource(dnsmessage.ResourceHeader{Name: dnsmessage.MustNewName("split.example."), Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET, TTL: 60},
+		dnsmessage.AResource{A: testutil.ExampleIP.As4()}); err != nil {
+		t.Fatal(err)
+	}
+	msg, err := b.Finish()
+	if err != nil {
+		t.Fatal(err)
+	}
+	payload := make([]byte, 2+len(msg))
+	binary.BigEndian.PutUint16(payload, uint16(len(msg)))
+	copy(payload[2:], msg)
+	mk := func(seq uint32, part []byte) []byte {
+		eth := make([]byte, 14)
+		copy(eth[0:6], []byte{0x3c, 0x22, 0xfb, 0x01, 0x02, 0x03})
+		copy(eth[6:12], []byte{0xaa, 0xbb, 0xcc, 0x00, 0x00, 0x01})
+		binary.BigEndian.PutUint16(eth[12:], 0x0800)
+		ip := make([]byte, 20)
+		ip[0] = 0x45
+		binary.BigEndian.PutUint16(ip[2:], uint16(20+20+len(part)))
+		ip[8], ip[9] = 64, 6
+		copy(ip[12:16], testutil.Router.IP.AsSlice())
+		copy(ip[16:20], testutil.Phone.IP.AsSlice())
+		tcp := make([]byte, 20)
+		binary.BigEndian.PutUint16(tcp[0:], 53)
+		binary.BigEndian.PutUint16(tcp[2:], 40000)
+		binary.BigEndian.PutUint32(tcp[4:], seq)
+		tcp[12] = 0x50
+		tcp[13] = 0x18
+		return append(append(append(eth, ip...), tcp...), part...)
+	}
+	p.Handle(testutil.Base, mk(1000, payload[:5]), capture.LinkEthernet)
+	p.Handle(testutil.Base.Add(time.Millisecond), mk(1005, payload[5:]), capture.LinkEthernet)
+	var got *wire.DNS
+	for _, e := range out.of(wire.TypeDNS) {
+		if e.DNS != nil && e.DNS.QName == "split.example" {
+			got = e.DNS
+		}
+	}
+	if got == nil || len(got.Answers) != 1 || got.RCode != "NOERROR" {
+		t.Fatalf("dns event = %+v", got)
+	}
+}
+
 func TestReplayDeterministic(t *testing.T) {
 	a, _ := replayHome(t)
 	b, _ := replayHome(t)

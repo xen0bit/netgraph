@@ -49,6 +49,8 @@ type Frame struct {
 	Retry         bool
 	Order         bool
 	QoS           bool
+	MoreFrag      bool
+	FragNumber    uint8
 
 	Addr1, Addr2, Addr3, Addr4 net.HardwareAddr
 	Src, Dst, BSSID            net.HardwareAddr
@@ -89,6 +91,7 @@ func Parse(b []byte) (*Frame, error) {
 		ToDS:      fc&0x0100 != 0,
 		FromDS:    fc&0x0200 != 0,
 		Retry:     fc&0x0800 != 0,
+		MoreFrag:  fc&0x0400 != 0,
 		Protected: fc&0x4000 != 0,
 		Order:     fc&0x8000 != 0,
 		QoS:       uint8(fc>>2)&0x3 == TypeData && uint8(fc>>4)&0x8 != 0,
@@ -114,7 +117,9 @@ func Parse(b []byte) (*Frame, error) {
 		}
 	}
 	if len(b) >= 24 {
-		f.Seq = (binary.LittleEndian.Uint16(b[22:]) >> 4) & 0xfff
+		sc := binary.LittleEndian.Uint16(b[22:])
+		f.Seq = (sc >> 4) & 0xfff
+		f.FragNumber = uint8(sc & 0xf)
 	}
 	f.mapAddresses()
 	if f.Type != TypeManagement {
