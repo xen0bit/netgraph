@@ -6,10 +6,12 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/hex"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"testing/fstest"
@@ -171,9 +173,50 @@ func TestAuth(t *testing.T) {
 	if resp, err := http.Get(srv.URL + "/healthz"); err != nil || resp.StatusCode != 200 {
 		t.Errorf("healthz: %v", err)
 	}
+	// A query-string token is only for EventSource's live stream.
+	resp, err = http.Get(srv.URL + "/api/v1/summary?token=rd-tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("query token outside live: %s", resp.Status)
+	}
+	// An unknown API path is a JSON 404, not the web UI's index.
+	resp, err = http.Get(srv.URL + "/api/v1/nope")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusNotFound || !strings.Contains(resp.Header.Get("Content-Type"), "application/json") {
+		t.Errorf("unknown API path: %s %s", resp.Status, resp.Header.Get("Content-Type"))
+	}
 	// A bad window is a 400.
 	if _, err := apiclient.NewClient(srv.URL, "rd-tok").Devices(ctx, model.Filter{From: window.To, To: window.From}); err == nil || !strings.Contains(err.Error(), "400") {
 		t.Errorf("reversed window: %v", err)
+	}
+}
+
+func TestExport(t *testing.T) {
+	srv, _ := serve(t, nil)
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/export?kind=flows&from="+
+		strconv.FormatInt(window.From.UnixMilli(), 10)+"&to="+strconv.FormatInt(window.To.UnixMilli(), 10), nil)
+	req.Header.Set("Authorization", "Bearer rd-tok")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || !strings.HasPrefix(resp.Header.Get("Content-Type"), "text/csv") {
+		t.Fatalf("export: %s %s", resp.Status, body)
+	}
+	lines := strings.Split(strings.TrimSpace(string(body)), "\n")
+	if len(lines) < 2 || !strings.HasPrefix(lines[0], "key,proto,client_ip") {
+		t.Fatalf("csv: %.300q", body)
+	}
+	if !strings.Contains(lines[1], ",") {
+		t.Fatalf("csv row: %q", lines[1])
 	}
 }
 
@@ -298,13 +341,10 @@ func TestWiFiKeys(t *testing.T) {
 	if len(got.GroupKeys) != 1 || got.GroupKeys[0].KeyData != gk.KeyData || !got.GroupKeys[0].TS.Equal(testutil.Base) {
 		t.Errorf("group keys = %+v", got.GroupKeys)
 	}
-	// With no ingest token (-no-auth) the nonces are still shared, but no key.
-	got, err = fetch(Config{}, "")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got.PMKs) != 0 || len(got.WEP) != 0 || len(got.Handshakes) != 1 {
-		t.Errorf("unauthenticated server served keys: %+v", got)
+	// With no ingest token (-no-auth) there is no credential to check, so
+	// the endpoint serves nothing at all, not even the nonces.
+	if _, err := fetch(Config{}, ""); err == nil || !strings.Contains(err.Error(), "403") {
+		t.Fatalf("unauthenticated server served wifi sync records: %v", err)
 	}
 }
 

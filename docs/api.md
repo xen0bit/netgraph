@@ -2,8 +2,10 @@
 
 All query endpoints are `GET`, return JSON, and take the window and
 filter as parameters. When the server has a read token, send it as
-`Authorization: Bearer <token>` (or `?token=` for the live stream).
-Times in responses are unix milliseconds.
+`Authorization: Bearer <token>`. The live stream is the one exception:
+`EventSource` cannot set headers, so it also accepts `?token=`. Query
+tokens elsewhere are rejected, since they leak into logs and Referer
+headers. Times in responses are unix milliseconds.
 
 ## Window and filter parameters
 
@@ -18,6 +20,7 @@ Times in responses are unix milliseconds.
 | `asn`, `cc` | the remote end's network (`13335` or `AS13335`) and country (`DE`), from the server's [ASN table](deployment.md#networks-and-countries) |
 | `multicast` | `1` to include multicast and broadcast |
 | `limit` | maximum rows |
+| `offset` | rows to skip, for paging (`limit` + `offset`) |
 
 ## Endpoints
 
@@ -37,6 +40,7 @@ Times in responses are unix milliseconds.
 | `GET /api/v1/live` | server-sent events: `event: ingest` with `[{type, ts, detail}]` per batch |
 | `PUT /api/v1/devices/{mac}/label` | names a device by hand: body `{"label": "Living room TV"}` (JSON required; at most 64 printable characters), `{"label": ""}` restores the automatic name. `204`, or `400`/`404`. Read token |
 | `GET /api/v1/search?q=alice&limit=20` | `[{id, kind, key, label, last_seen}]`: devices (by MAC, name or label), addresses, DNS names and networks whose key starts with `q` or whose name contains it; exact keys first, then devices, then the most recently seen. `q` needs two characters; `kind:q` (`device:3c:22`) searches one kind. `limit` is at most 100 (default 20). Read token |
+| `GET /api/v1/export?kind=flows` | CSV of every field the API returns for that table (`devices`, `flows`, `dns`, `facts`, `anomalies`, `wifi`). It uses the same window and filters and streams the rows, so it is not limited to what the browser loaded. Read token |
 | `GET /api/v1/anomalies` | the window's [anomalies](concepts.md#anomalies), most severe first: `{from, to, since, learning, anomalies: [{kind, severity, ts, device, device_name, entity, summary, evidence}]}`. Read token |
 | `GET /metrics` | Prometheus text: ingest counters, each sensor's last reported stats (packets, kernel drops, queued and dropped events, ...), entities by kind, database size, alert outcomes. Read token |
 | `GET /api/v1/version`, `/healthz` | `{version, commit}`; no token needed |
@@ -61,6 +65,9 @@ A flow is one connection. `client_*` is the end that opened it and
 `server_*` the end that accepted it. `device` is the device here it belongs
 to, and `remote_*` the other end: the server, unless `direction` is `in`
 (someone outside connected to a server here), when it is the client.
+Rows from hourly rollups set `connections` to the number of connections the
+row stands for; they keep no packet counts, so `pkts_out` and `pkts_in` are
+zero.
 `bytes_out`/`pkts_out` are what the device sent, `bytes_in`/`pkts_in` what
 it received, whichever end opened the connection. For an inbound
 connection, `name` is the name the client asked for (its SNI or Host),
@@ -136,4 +143,6 @@ sensors call it automatically on startup and every minute. The response is
   without waiting for a rekey.
 
 `pmks` and `wep` are empty unless the server has a key file **and** an
-ingest token; a server started with `-no-auth` never serves keys.
+ingest token. A server started with `-no-auth` has no credential to check,
+so it refuses this endpoint entirely: it serves neither keys nor the
+handshake/group-key sync records.

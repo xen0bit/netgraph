@@ -113,10 +113,16 @@ function params(extra = {}) {
 let token = localStorage.getItem("netgraph.token") || "";
 
 async function api(path, extra = {}, raw = false) {
+  let retried = false;
   for (;;) {
     const headers = token ? { Authorization: `Bearer ${token}` } : {};
     const resp = await fetch(`/api/v1/${path}?${params(extra)}`, { headers });
-    if (resp.status === 401) { await askToken(); continue; }
+    if (resp.status === 401) {
+      if (retried) throw new Error(`${path}: read token required`);
+      retried = true;
+      if (!await askToken()) throw new Error(`${path}: read token required`);
+      continue;
+    }
     if (!resp.ok) {
       let msg = resp.statusText;
       try { msg = (await resp.json()).error || msg; } catch { /* not JSON */ }
@@ -129,11 +135,17 @@ async function api(path, extra = {}, raw = false) {
 // send writes JSON (a JSON body makes a cross-site request need a CORS
 // preflight, which the server never grants).
 async function send(method, path, body) {
+  let retried = false;
   for (;;) {
     const headers = { "Content-Type": "application/json" };
     if (token) headers.Authorization = `Bearer ${token}`;
     const resp = await fetch(`/api/v1/${path}`, { method, headers, body: JSON.stringify(body) });
-    if (resp.status === 401) { await askToken(); continue; }
+    if (resp.status === 401) {
+      if (retried) throw new Error("read token required");
+      retried = true;
+      if (!await askToken()) throw new Error("read token required");
+      continue;
+    }
     if (!resp.ok) {
       let msg = resp.statusText;
       try { msg = (await resp.json()).error || msg; } catch { /* not JSON */ }
@@ -143,17 +155,33 @@ async function send(method, path, body) {
   }
 }
 
+// askToken shares one dialog across the parallel requests refresh() starts.
+// Without this, three 401s call showModal() on an already-open dialog.
+let tokenPrompt = null;
 function askToken() {
+  if (tokenPrompt) return tokenPrompt;
   const dlg = $("#token-dialog");
-  return new Promise((resolve) => {
-    dlg.addEventListener("close", () => {
-      token = $("#token-input").value.trim();
-      try { localStorage.setItem("netgraph.token", token); } catch { /* private mode */ }
-      engine?.call("configure", { base: location.origin, token }).catch(() => {});
-      resolve();
-    }, { once: true });
-    dlg.showModal();
+  const input = $("#token-input");
+  tokenPrompt = new Promise((resolve) => {
+    const done = () => {
+      dlg.removeEventListener("close", done);
+      const cancel = dlg.returnValue === "cancel";
+      const v = input.value.trim();
+      if (!cancel && v) {
+        token = v;
+        try { localStorage.setItem("netgraph.token", token); } catch { /* private mode */ }
+        engine?.call("configure", { base: location.origin, token }).catch(() => {});
+        if (state.live) openLive();
+      }
+      tokenPrompt = null;
+      resolve(cancel ? "" : token);
+    };
+    dlg.addEventListener("close", done);
+    input.value = "";
+    dlg.returnValue = "";
+    if (!dlg.open) dlg.showModal();
   });
+  return tokenPrompt;
 }
 
 // --- status -------------------------------------------------------------------
@@ -215,11 +243,13 @@ async function refresh() {
   await renderTab(seq);
 }
 
+const tablePath = { devices: "devices", flows: "flows", dns: "dns", facts: "facts", wifi: "wifi", sensors: "sensors", anomalies: "anomalies" };
+
 async function renderTab(seq) {
   const t = state.tab;
   try {
     if (t === "graph") return await renderGraph(seq);
-    const path = { devices: "devices", flows: "flows", dns: "dns", facts: "facts", wifi: "wifi", sensors: "sensors", anomalies: "anomalies" }[t];
+    const path = tablePath[t];
     let rows = await track(api(path, state.limits[t] ? { limit: state.limits[t] } : {}));
     if (seq !== refreshSeq) return;
     if (t === "anomalies") {
@@ -397,7 +427,8 @@ const tables = {
     cols: ["Time", "Device", "Type", "Name", "Result", "ms", "Answers (TTL)"],
     num: [5],
     row: (q) => [
-      clock(q.ts), esc(q.device_name || q.client_ip), esc(q.qtype), esc(q.qname),
+      clock(q.ts), esc(q.device_name || q.client_ip), esc(q.qtype),
+      esc(q.qname) + (q.count > 1 ? ` <span class="muted">×${q.count}</span>` : ""),
       q.rcode === "NOERROR" ? esc(q.rcode) : badge(q.rcode, "err"),
       q.latency_ms ? q.latency_ms.toFixed(1) : "",
       `<span class="mono">${(q.answers || []).map((a) => `${esc(a.data)} (${a.ttl}s)`).join("<br>")}</span>`,
@@ -520,6 +551,28 @@ function toCSV(rows) {
   return [cols.join(","), ...rows.map((r) => cols.map((k) => csvCell(k, r[k])).join(","))].join("\r\n") + "\r\n";
 }
 
+async function loadMore(t) {
+  const [def, max] = limits[t] || [];
+  const asked = state.limits[t] || def;
+  if (!def || asked >= max) return;
+  const next = Math.min(asked * 2, max);
+  const offset = (state.data[t] || []).length;
+  try {
+    const add = await track(api(tablePath[t], { limit: next - asked, offset }));
+    if (!Array.isArray(add) || add.length === 0) return;
+    state.limits[t] = next;
+    state.data[t] = [...(state.data[t] || []), ...add];
+    renderTable(t);
+  } catch { /* status shows it */ }
+}
+
+function exportAll(t) {
+  if (!tablePath[t] || t === "sensors") return;
+  return track(api("export", { kind: t }, true)).then((text) => {
+    download(`netgraph-${t}-${fileStamp()}.csv`, text, "text/csv");
+  }).catch(() => {});
+}
+
 function renderTable(t) {
   const spec = tables[t];
   const all = state.data[t] || [];
@@ -547,9 +600,12 @@ function renderTable(t) {
     (capped ? ` · the first ${asked}${so ? "; sorting covers these only" : ""}` : "");
   const more = tools.querySelector("[data-more]");
   more.hidden = !capped || asked >= max;
-  more.onclick = () => { state.limits[t] = Math.min(asked * 2, max); refresh(); };
+  more.onclick = () => loadMore(t);
   tools.querySelector("[data-csv]").disabled = !rows.length;
   tools.querySelector("[data-csv]").onclick = () => download(`netgraph-${t}-${fileStamp()}.csv`, toCSV(rows), "text/csv");
+  const exportBtn = tools.querySelector("[data-export]");
+  exportBtn.hidden = !tablePath[t] || t === "sensors";
+  exportBtn.onclick = () => exportAll(t);
   el.onclick = (e) => {
     const b = e.target.closest("thead button.sort");
     if (b) sortBy(t, Number(b.dataset.col));
@@ -579,6 +635,7 @@ function tableTools(t, table) {
     tools.id = `tt-${t}`;
     tools.className = "table-tools";
     tools.innerHTML = `<span class="count"></span><button data-more hidden>Load more</button><span class="spacer"></span>
+      <button data-export title="Download every row in this window, every field, as CSV">All CSV</button>
       <button data-csv title="Download these rows, every field, as CSV">CSV</button>`;
     table.before(tools);
   }
@@ -695,6 +752,7 @@ function fileStamp() {
 // --- entity panel -------------------------------------------------------------------
 
 async function openEntity(id, { anomaly } = {}) {
+  if (!id) return;
   const panel = $("#panel");
   panel.hidden = false;
   state.open = id;
@@ -819,6 +877,14 @@ function openRest(id) {
 let source = null;
 let liveTimer = null;
 let pending = null;
+function openLive() {
+  source?.close();
+  source = new EventSource(`/api/v1/live?token=${encodeURIComponent(token)}`);
+  source.addEventListener("ingest", () => {
+    // Batches arrive every couple of seconds; refresh at most that often.
+    if (!pending) pending = setTimeout(() => { pending = null; refresh(); }, 2000);
+  });
+}
 function setLive(on) {
   state.live = on;
   source?.close();
@@ -832,11 +898,7 @@ function setLive(on) {
     renderWindow();
     return;
   }
-  source = new EventSource(`/api/v1/live?token=${encodeURIComponent(token)}`);
-  source.addEventListener("ingest", () => {
-    // Batches arrive every couple of seconds; refresh at most that often.
-    if (!pending) pending = setTimeout(() => { pending = null; refresh(); }, 2000);
-  });
+  openLive();
   liveTimer = setInterval(refresh, 30_000);
   refresh();
 }

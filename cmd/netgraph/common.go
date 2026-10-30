@@ -58,7 +58,7 @@ type filterFlags struct {
 	from, to                  string
 	device, ip, domain, proto string
 	app, dir, asn, country    string
-	port, limit               int
+	port, limit, offset       int
 	multicast                 bool
 }
 
@@ -76,6 +76,7 @@ func (f *filterFlags) register(fs *flag.FlagSet) {
 	fs.StringVar(&f.country, "cc", "", "the remote end's country: a two-letter code; needs the server's -asn-file")
 	fs.BoolVar(&f.multicast, "multicast", false, "include multicast and broadcast traffic")
 	fs.IntVar(&f.limit, "limit", 0, "maximum rows (0: default)")
+	fs.IntVar(&f.offset, "offset", 0, "rows to skip, for paging")
 }
 
 func (f *filterFlags) filter() (model.Filter, error) {
@@ -91,7 +92,7 @@ func (f *filterFlags) filter() (model.Filter, error) {
 	if !from.Before(to) {
 		return model.Filter{}, errors.New("-from must be before -to")
 	}
-	mf := model.Filter{From: from, To: to, Device: f.device, IP: f.ip, Domain: f.domain, Port: f.port, Proto: f.proto, App: f.app, Dir: f.dir, Multicast: f.multicast, Limit: f.limit}
+	mf := model.Filter{From: from, To: to, Device: f.device, IP: f.ip, Domain: f.domain, Port: f.port, Proto: f.proto, App: f.app, Dir: f.dir, Multicast: f.multicast, Limit: f.limit, Offset: f.offset}
 	if f.asn != "" {
 		if mf.ASN, err = model.ParseASN(f.asn); err != nil {
 			return model.Filter{}, fmt.Errorf("-asn: %w", err)
