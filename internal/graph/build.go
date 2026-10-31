@@ -31,6 +31,8 @@ type Input struct {
 	// the graph shows it as one "N more destinations" node. RestIn is the
 	// same for the clients that connected in to a device.
 	Rest, RestIn map[string]Rest
+	// Truncated says the input itself was capped, not just Top N.
+	Truncated bool
 }
 
 // Rest summarises destinations a graph does not draw one by one.
@@ -84,7 +86,7 @@ func Build(in Input, o model.GraphOptions) *model.Graph {
 	}
 	b := &builder{in: in, o: o, nodes: map[string]*model.Node{}, edges: map[string]*model.Edge{}, spans: map[string][][2]int64{},
 		names: map[string]map[string]bool{}, addrs: map[string]map[string]bool{}}
-	g := &model.Graph{FromMS: in.FromMS, ToMS: in.ToMS, Precision: in.Precision}
+	g := &model.Graph{FromMS: in.FromMS, ToMS: in.ToMS, Precision: in.Precision, Truncated: in.Truncated}
 
 	devices := map[string]*model.Device{}
 	owners := map[string][]string{} // local address -> devices that had it
@@ -252,7 +254,7 @@ func Build(in Input, o model.GraphOptions) *model.Graph {
 			b.sourceNode(src, devices)
 			b.nameNode(q.QName)
 			e := b.edge(src, dom, model.RelQueried)
-			e.Count++
+			e.Count += max(q.Count, 1)
 			if q.RCode != "NOERROR" {
 				if e.Attrs == nil {
 					e.Attrs = map[string]string{}
@@ -755,8 +757,8 @@ func (b *builder) connect(src, dst string, fl model.Flow) {
 // conns is how many connections a flow stands for: one, or for a row of
 // hourly rollups the count it carries in PktsOut.
 func (b *builder) conns(fl model.Flow) int {
-	if b.in.Precision == model.PrecisionHour {
-		return int(max(fl.PktsOut, 1))
+	if fl.Connections > 0 {
+		return fl.Connections
 	}
 	return 1
 }

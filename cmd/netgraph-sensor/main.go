@@ -60,6 +60,11 @@ func main() {
 			fmt.Fprintln(os.Stderr, "netgraph-sensor:", err)
 			os.Exit(1)
 		}
+	case "check":
+		if err := check(os.Args[2:]); err != nil {
+			fmt.Fprintln(os.Stderr, "netgraph-sensor:", err)
+			os.Exit(1)
+		}
 	default:
 		fmt.Fprintf(os.Stderr, "netgraph-sensor: unknown command %q\n\n", os.Args[1])
 		usage()
@@ -72,6 +77,7 @@ func usage() {
 
 commands:
   run        capture and ship events to a netgraph server
+  check      diagnose an interface, permissions and server connection
   version    print version information
 
 Run 'netgraph-sensor run -h' for run's flags.

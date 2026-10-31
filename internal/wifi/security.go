@@ -55,7 +55,7 @@ func (s Security) UsesTKIP() bool {
 	return false
 }
 
-// UsesGCMP reports a cipher netgraph does not decrypt yet.
+// UsesGCMP reports GCMP, the WPA3 data cipher.
 func (s Security) UsesGCMP() bool {
 	for _, c := range s.Pairwise {
 		if strings.HasPrefix(c, "GCMP") {

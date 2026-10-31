@@ -81,6 +81,33 @@ func TestProcessorHandshakeEvent(t *testing.T) {
 	}
 }
 
+func TestProcessorReassemblesFragments(t *testing.T) {
+	p, _ := collectEvents()
+	ap := []byte{0xaa, 0xbb, 0xcc, 0x00, 0x00, 0x07}
+	sta := []byte{0x3c, 0x22, 0xfb, 0x01, 0x02, 0x08}
+	dst := []byte{0x00, 0x11, 0x22, 0x33, 0x44, 0x55}
+	llc := mustHex(t, "aaaa0300000008004500001c00000000401100000a0000010a000002")
+	mk := func(frag int, more bool, part []byte) []byte {
+		fc := uint16(0x0108)
+		if more {
+			fc |= 0x0400
+		}
+		b := frameBytes(fc, ap, sta, dst, string(part), nil)
+		binary.LittleEndian.PutUint16(b[22:], uint16(0x1230|frag))
+		return b
+	}
+	var got []byte
+	p.cfg.Data = func(_ time.Time, b []byte) { got = append([]byte(nil), b...) }
+	p.Handle(time.Now(), mk(0, true, llc[:10]), false)
+	if got != nil {
+		t.Fatal("first fragment was emitted")
+	}
+	p.Handle(time.Now(), mk(1, false, llc[10:]), false)
+	if len(got) != 14+20 {
+		t.Fatalf("reassembled Ethernet = %x", got)
+	}
+}
+
 func TestProcessorConcurrent(t *testing.T) {
 	p, _ := collectEvents()
 	ap := []byte{0xaa, 0xbb, 0xcc, 0x00, 0x00, 0x04}

@@ -23,6 +23,7 @@ import (
 	_ "modernc.org/sqlite" // registers the "sqlite" driver
 
 	"github.com/xen0bit/netgraph/internal/asn"
+	"github.com/xen0bit/netgraph/internal/model"
 )
 
 //go:embed migrations/*.sql
@@ -95,18 +96,46 @@ type Store struct {
 
 	nets *localNets
 	sub  *broker
+
+	anomMu  sync.Mutex
+	anomKey string
+	anomAt  time.Time
+	anomRep *model.AnomalyReport
 }
 
 func dsn(path string, readOnly bool) string {
+	return dsnMode(path, readOnly, readOnly)
+}
+
+// dsnMode is dsn with explicit query_only control. A backup source is opened
+// read-only without query_only: VACUUM INTO reads the source but creates a
+// new file, which query_only would refuse.
+func dsnMode(path string, readOnly, queryOnly bool) string {
 	q := url.Values{}
 	for _, p := range []string{"busy_timeout(10000)", "journal_mode(WAL)", "synchronous(NORMAL)", "foreign_keys(0)", "cache_size(-16000)", "temp_store(MEMORY)"} {
 		q.Add("_pragma", p)
 	}
-	if readOnly {
+	if queryOnly {
 		q.Add("_pragma", "query_only(1)")
 	}
 	q.Set("_txlock", "immediate")
 	return "file:" + path + "?" + q.Encode()
+}
+
+// schemaVersion is the migration version this binary expects.
+func schemaVersion() int {
+	entries, err := fs.ReadDir(migrations, "migrations")
+	if err != nil {
+		return 0
+	}
+	v := 0
+	for _, e := range entries {
+		n, err := strconv.Atoi(strings.SplitN(e.Name(), "_", 2)[0])
+		if err == nil && n > v {
+			v = n
+		}
+	}
+	return v
 }
 
 // Open opens or creates the database at path and migrates it.
@@ -161,9 +190,39 @@ func OpenReadOnly(path string, cfg Config) (*Store, error) {
 		r.Close()
 		return nil, fmt.Errorf("%s: not a netgraph database (run `netgraph serve` or `netgraph db migrate` first)", path)
 	}
+	if want := schemaVersion(); v != want {
+		r.Close()
+		if v < want {
+			return nil, fmt.Errorf("%s: database schema is version %d, this binary needs %d (run `netgraph db migrate -db %s`)", path, v, want, path)
+		}
+		return nil, fmt.Errorf("%s: database schema is version %d, newer than this binary's %d (upgrade netgraph)", path, v, want)
+	}
 	if err := s.loadSensors(context.Background()); err != nil {
 		r.Close()
 		return nil, err
+	}
+	return s, nil
+}
+
+// OpenBackup opens an existing database for an online backup. It is
+// read-only but permits VACUUM INTO, which query_only would refuse, and it
+// deliberately does not require the current schema version: an old database
+// can still be backed up before it is migrated.
+func OpenBackup(path string, cfg Config) (*Store, error) {
+	cfg.defaults()
+	r, err := sql.Open("sqlite", dsnMode(path, true, false))
+	if err != nil {
+		return nil, err
+	}
+	s := &Store{cfg: cfg, path: path, r: r, log: cfg.Logger, nets: newLocalNets(), sub: newBroker()}
+	var v int
+	if err := r.QueryRow("PRAGMA user_version").Scan(&v); err != nil {
+		r.Close()
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	if v == 0 {
+		r.Close()
+		return nil, fmt.Errorf("%s: not a netgraph database", path)
 	}
 	return s, nil
 }
@@ -185,6 +244,15 @@ func (s *Store) Close() error {
 
 // Path is the database file.
 func (s *Store) Path() string { return s.path }
+
+// invalidateAnomalies drops the short-lived anomaly report cache. New data
+// or a retention pass can change what a window finds.
+func (s *Store) invalidateAnomalies() {
+	s.anomMu.Lock()
+	s.anomRep = nil
+	s.anomKey = ""
+	s.anomMu.Unlock()
+}
 
 func (s *Store) migrate(ctx context.Context) error {
 	var version int

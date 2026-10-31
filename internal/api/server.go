@@ -97,7 +97,8 @@ func New(cfg Config) *Server {
 	read("/api/v1/wifi", s.wifi)
 	read("/api/v1/anomalies", s.anomalies)
 	read("/api/v1/search", s.search)
-	read("/api/v1/live", s.live)
+	read("/api/v1/export", s.export)
+	s.mux.Handle("GET /api/v1/live", s.requireLive(http.HandlerFunc(s.live)))
 	read("/metrics", s.metrics)
 	s.mux.Handle("PUT /api/v1/devices/{mac}/label", s.requireRead(http.HandlerFunc(s.setLabel)))
 	s.mux.HandleFunc("GET /", s.web)
@@ -110,6 +111,13 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func tokenOK(r *http.Request, want string) bool {
+	return tokenOKQuery(r, want, false)
+}
+
+// tokenOKQuery checks the bearer header and, when allowQuery is true, the
+// token parameter EventSource needs. Query tokens leak into access logs and
+// Referer headers, so only the live stream accepts one.
+func tokenOKQuery(r *http.Request, want string, allowQuery bool) bool {
 	if want == "" {
 		return true
 	}
@@ -117,9 +125,7 @@ func tokenOK(r *http.Request, want string) bool {
 	if got == r.Header.Get("Authorization") {
 		got = ""
 	}
-	if got == "" {
-		// EventSource cannot set headers; the live feed takes the token
-		// as a parameter.
+	if got == "" && allowQuery {
 		got = r.URL.Query().Get("token")
 	}
 	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
@@ -128,6 +134,17 @@ func tokenOK(r *http.Request, want string) bool {
 func (s *Server) requireRead(h http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if !tokenOK(r, s.cfg.ReadToken) {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="netgraph"`)
+			httpError(w, http.StatusUnauthorized, errors.New("missing or wrong read token"))
+			return
+		}
+		h(w, r)
+	})
+}
+
+func (s *Server) requireLive(h http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !tokenOKQuery(r, s.cfg.ReadToken, true) {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="netgraph"`)
 			httpError(w, http.StatusUnauthorized, errors.New("missing or wrong read token"))
 			return
@@ -275,6 +292,13 @@ func (s *Server) anomalies(w http.ResponseWriter, r *http.Request) {
 // restart, or learn keys another sensor found. It is authorised with the ingest token (the sensor's own
 // credential), and keys are never served without one.
 func (s *Server) wifiKeys(w http.ResponseWriter, r *http.Request) {
+	if s.cfg.IngestToken == "" {
+		// With -no-auth this endpoint has no credential to check, so it
+		// must not hand out even the non-secret handshake/group-key sync
+		// records. Sensors need an ingest token to sync Wi-Fi keys.
+		httpError(w, http.StatusForbidden, errors.New("wifi keys require an ingest token"))
+		return
+	}
 	if !tokenOK(r, s.cfg.IngestToken) {
 		httpError(w, http.StatusUnauthorized, errors.New("missing or wrong ingest token"))
 		return
@@ -435,6 +459,10 @@ const noWebPage = `<!doctype html><meta charset="utf-8"><title>netgraph</title>
 <code>-tags embed_web</code>, or run <code>netgraph serve -web-dir web/dist</code>. The API is at <code>/api/v1/</code>.</p>`
 
 func (s *Server) web(w http.ResponseWriter, r *http.Request) {
+	if r.URL.Path == "/api" || strings.HasPrefix(r.URL.Path, "/api/") {
+		httpError(w, http.StatusNotFound, errors.New("unknown API endpoint"))
+		return
+	}
 	if s.cfg.Web == nil {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		io.WriteString(w, noWebPage)

@@ -84,6 +84,22 @@ func (n *localNets) forwarded(mac string, a netip.Addr) bool {
 	return router
 }
 
+// ownAddress reports whether a is an address held by one of the sensors'
+// capture interfaces: the router itself, not a second DHCP server.
+func (n *localNets) ownAddress(a netip.Addr) bool {
+	a = a.Unmap()
+	n.mu.RLock()
+	defer n.mu.RUnlock()
+	for _, macs := range n.own {
+		for _, addrs := range macs {
+			if slices.Contains(addrs, a) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 func (n *localNets) isLocal(a netip.Addr) bool {
 	if !a.IsValid() {
 		return false

@@ -66,10 +66,11 @@ Wireshark 4.6 computed. `go run ./internal/testutil/genpcap out.pcap`
 writes the scenario for manual use.
 
 `internal/wifi` pins AES-CCM against RFC 3610 packet vector #1 and the WPA
-PMK against the 802.11i passphrase vector, then checks CCMP/TKIP/WEP
-round-trips and a complete EAPOL 4-way handshake. `make fuzz` covers the
-radiotap/802.11 parsers; a panic on a malformed frame is a bug, not an
-expected drop.
+PMK against the 802.11i passphrase vector, then checks CCMP/GCMP/TKIP/WEP
+round-trips, fragmented-MSDU reassembly and a complete EAPOL 4-way
+handshake. `make fuzz` covers the radiotap/802.11 parsers; a panic on a
+malformed frame is a bug, not an expected drop. The sensor tests also split
+a DNS-over-TCP message across segments to pin the stream reassembler.
 
 ### The Docker lab
 

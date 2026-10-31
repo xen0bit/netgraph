@@ -57,9 +57,10 @@ type Processor struct {
 	rdns  *rdns.Lookup
 	wifi  *wifi.Processor
 
-	mu      sync.Mutex
-	pending map[dnsKey]pendingQuery
-	seen    map[uint64]time.Time
+	mu         sync.Mutex
+	pending    map[dnsKey]pendingQuery
+	seen       map[uint64]time.Time
+	tcpStreams map[tcpKey]*tcpStream
 
 	packets, bytes, decodeErrors, pendingDropped atomic.Uint64
 }
@@ -76,6 +77,16 @@ type pendingQuery struct {
 	qname string
 	qtype string
 	cmac  string
+}
+
+type tcpKey struct {
+	src, dst netip.AddrPort
+}
+
+type tcpStream struct {
+	buf  []byte
+	next uint32
+	last time.Time
 }
 
 // NewProcessor returns a processor emitting to out.
@@ -98,7 +109,8 @@ func NewProcessor(cfg Config, out wire.Emitter) *Processor {
 	if cfg.IsLocal == nil {
 		cfg.IsLocal = LocalAddr
 	}
-	p := &Processor{cfg: cfg, out: out, log: cfg.Logger, rdns: cfg.RDNS, wifi: cfg.WiFi, pending: map[dnsKey]pendingQuery{}, seen: map[uint64]time.Time{}}
+	p := &Processor{cfg: cfg, out: out, log: cfg.Logger, rdns: cfg.RDNS, wifi: cfg.WiFi, pending: map[dnsKey]pendingQuery{},
+		seen: map[uint64]time.Time{}, tcpStreams: map[tcpKey]*tcpStream{}}
 	if p.wifi != nil {
 		p.wifi.SetData(func(ts time.Time, eth []byte) {
 			// A decrypted 802.11 data frame is an Ethernet frame: the
@@ -262,17 +274,57 @@ func (p *Processor) udp(ts time.Time, f *frame, mac string) {
 	}
 }
 
-// tcpDNS handles DNS over TCP when a whole length-prefixed message fits in
-// the segment, which covers the common case of short queries and answers.
+// tcpDNS reassembles the byte stream on a TCP/53 connection, so a message
+// split across segments (or several messages in one segment) is decoded.
+// Gaps and retransmissions are handled by trimming or resetting the stream;
+// a DNS message is at most 65535 bytes.
 func (p *Processor) tcpDNS(ts time.Time, f *frame, mac string) {
+	if len(f.payload) == 0 {
+		return
+	}
+	key := tcpKey{src: netip.AddrPortFrom(f.src, f.sport), dst: netip.AddrPortFrom(f.dst, f.dport)}
+	p.mu.Lock()
+	st := p.tcpStreams[key]
+	if st == nil {
+		st = &tcpStream{next: f.seq}
+		p.tcpStreams[key] = st
+	}
 	b := f.payload
-	for len(b) >= 2 {
-		l := int(binary.BigEndian.Uint16(b))
-		if 2+l > len(b) {
+	if d := int32(f.seq - st.next); d < 0 {
+		if int(-d) >= len(b) {
+			p.mu.Unlock()
 			return
 		}
-		p.dnsMessage(ts, f, mac, b[2:2+l], flow.ProtoTCP)
-		b = b[2+l:]
+		b = b[-d:]
+	} else if d > 0 {
+		// A gap would poison every later message: start over at this
+		// segment rather than decoding shifted bytes.
+		st.buf = st.buf[:0]
+		st.next = f.seq
+	}
+	st.buf = append(st.buf, b...)
+	st.next += uint32(len(b))
+	st.last = ts
+	if len(st.buf) > 128<<10 || len(p.tcpStreams) > 1024 {
+		delete(p.tcpStreams, key)
+		p.mu.Unlock()
+		return
+	}
+	var msgs [][]byte
+	for len(st.buf) >= 2 {
+		l := int(binary.BigEndian.Uint16(st.buf))
+		if l == 0 || 2+l > len(st.buf) {
+			break
+		}
+		msgs = append(msgs, append([]byte(nil), st.buf[2:2+l]...))
+		st.buf = st.buf[2+l:]
+	}
+	if len(st.buf) == 0 {
+		delete(p.tcpStreams, key)
+	}
+	p.mu.Unlock()
+	for _, msg := range msgs {
+		p.dnsMessage(ts, f, mac, msg, flow.ProtoTCP)
 	}
 }
 
@@ -377,6 +429,9 @@ func (p *Processor) dedupeFor(ts time.Time, ttl time.Duration, ev wire.Event, pa
 // dedupe cleanup. Live capture calls it every second with the wall clock;
 // file replay calls it with packet time.
 func (p *Processor) Tick(now time.Time) {
+	if p.wifi != nil {
+		p.wifi.Tick(now)
+	}
 	p.flows.Expire(now)
 	var timedOut []wire.Event
 	p.mu.Lock()
@@ -392,6 +447,11 @@ func (p *Processor) Tick(now time.Time) {
 	for k, t := range p.seen {
 		if now.Sub(t) >= 2*max(p.cfg.Dedupe, p.cfg.BindingTTL) {
 			delete(p.seen, k)
+		}
+	}
+	for k, st := range p.tcpStreams {
+		if now.Sub(st.last) >= 2*time.Minute {
+			delete(p.tcpStreams, k)
 		}
 	}
 	p.mu.Unlock()

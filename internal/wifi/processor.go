@@ -42,11 +42,25 @@ type Config struct {
 // concurrent use, because a sensor may capture several monitor interfaces at
 // once.
 type Processor struct {
-	mu   sync.Mutex
-	cfg  Config
-	keys *Keyring
-	log  *slog.Logger
-	seen map[uint64]time.Time
+	mu    sync.Mutex
+	cfg   Config
+	keys  *Keyring
+	log   *slog.Logger
+	seen  map[uint64]time.Time
+	frags map[fragKey]*fragState
+}
+
+type fragKey struct {
+	src, dst, bssid string
+	seq             uint16
+}
+
+type fragState struct {
+	first *Frame
+	parts [][]byte
+	next  uint8
+	total int
+	last  time.Time
 }
 
 // NewProcessor returns a processor. A nil Keyring means no network can be
@@ -61,7 +75,7 @@ func NewProcessor(cfg Config) *Processor {
 	if cfg.Dedupe <= 0 {
 		cfg.Dedupe = 10 * time.Minute
 	}
-	return &Processor{cfg: cfg, keys: cfg.Keys, log: cfg.Logger, seen: map[uint64]time.Time{}}
+	return &Processor{cfg: cfg, keys: cfg.Keys, log: cfg.Logger, seen: map[uint64]time.Time{}, frags: map[fragKey]*fragState{}}
 }
 
 // Keys returns the keyring the processor uses.
@@ -70,6 +84,23 @@ func (p *Processor) Keys() *Keyring { return p.keys }
 // SetData installs the callback for decapsulated Ethernet frames. It lets a
 // sensor create its Wi-Fi processor before its IP processor.
 func (p *Processor) SetData(fn func(time.Time, []byte)) { p.cfg.Data = fn }
+
+// Tick drops fragment states that went quiet, so a partial frame from an
+// interrupted transmission does not stay around forever.
+func (p *Processor) Tick(now time.Time) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for k, st := range p.frags {
+		if now.Sub(st.last) > 2*time.Second {
+			delete(p.frags, k)
+		}
+	}
+	for k, t := range p.seen {
+		if now.Sub(t) > 2*p.cfg.Dedupe {
+			delete(p.seen, k)
+		}
+	}
+}
 
 // Handle processes one captured frame. radiotap says whether data starts
 // with a radiotap header (monitor mode) or the bare 802.11 frame.
@@ -177,6 +208,10 @@ func (p *Processor) data(ts time.Time, f *Frame) {
 		}
 		llc = plain
 	}
+	if f.MoreFrag || f.FragNumber != 0 {
+		p.fragment(ts, f, llc)
+		return
+	}
 	if !f.AMSDU() {
 		p.msdu(ts, f, f.Dst, f.Src, llc)
 		return
@@ -192,6 +227,53 @@ func (p *Processor) data(ts time.Time, f *Frame) {
 	}
 	for _, sf := range subs {
 		p.msdu(ts, f, sf.dst, sf.src, sf.llc)
+	}
+}
+
+// fragment reassembles a fragmented MSDU. Each fragment (including each
+// protected fragment) has already been decrypted; the pieces are joined
+// before SNAP/LLC handling. A gap drops the partial frame rather than
+// handing the network a corrupted packet.
+func (p *Processor) fragment(ts time.Time, f *Frame, llc []byte) {
+	p.pruneFrags(ts)
+	key := fragKey{src: f.Src.String(), dst: f.Dst.String(), bssid: f.BSSID.String(), seq: f.Seq}
+	st := p.frags[key]
+	if f.FragNumber == 0 || st == nil {
+		cp := *f
+		st = &fragState{first: &cp, next: 0}
+		p.frags[key] = st
+	}
+	if f.FragNumber != st.next {
+		delete(p.frags, key)
+		return
+	}
+	st.parts = append(st.parts, append([]byte(nil), llc...))
+	st.total += len(llc)
+	st.next++
+	st.last = ts
+	if f.MoreFrag {
+		if st.total > 64<<10 || len(st.parts) > 32 {
+			delete(p.frags, key)
+		}
+		return
+	}
+	joined := make([]byte, 0, st.total)
+	for _, part := range st.parts {
+		joined = append(joined, part...)
+	}
+	base := *st.first
+	delete(p.frags, key)
+	p.msdu(ts, &base, base.Dst, base.Src, joined)
+}
+
+func (p *Processor) pruneFrags(ts time.Time) {
+	if len(p.frags) < 1024 {
+		return
+	}
+	for k, st := range p.frags {
+		if ts.Sub(st.last) > 2*time.Second || len(st.parts) > 32 {
+			delete(p.frags, k)
+		}
 	}
 }
 

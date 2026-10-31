@@ -31,6 +31,7 @@ Filters narrow any query:
 | `-dir` | `out` (devices connecting out), `in` (connections from outside to a server here), `local`, `external` |
 | `-asn`, `-cc` | the remote end's network (`13335` or `AS13335`) and country (`DE`); needs the server's [ASN table](deployment.md#networks-and-countries) |
 | `-multicast` | include multicast and broadcast traffic (hidden by default) |
+| `-limit`, `-offset` | page a result: at most `limit` rows, skipping `offset` |
 
 ## The CLI
 
@@ -89,7 +90,10 @@ TIME                 DEVICE           TYPE  NAME               RCODE     MS    A
 | `label MAC NAME...`, `label -clear MAC` | name a device by hand; it overrides DHCP, mDNS and every other source until cleared. With `-server` it goes through the API; without, it writes the database file (stop the server first) |
 | `import FILE.pcap...` | ingest captures directly (re-importing a file is a no-op) |
 | `db migrate`/`backup`/`retain`/`vacuum` | maintenance |
+| `db purge BEFORE` | delete everything older than `BEFORE` now, whatever the retention settings |
+| `db forget MAC` | remove one device and everything attributed to it (connections, lookups, facts, rollups, Wi-Fi sync records) |
 | `db enrich -asn-file FILE` | look up the network of connections stored without an [ASN table](deployment.md#networks-and-countries) |
+| `netgraph-sensor check` | preflight an interface, `CAP_NET_RAW`, link type and server authentication |
 
 Add `-o json` or `-o csv` to any `query` for scripts.
 
@@ -177,10 +181,11 @@ page asks for it once and keeps it in the browser.
   sensors. Click a row for details, and a column's header to sort by it
   (again to reverse, a third time for the table's own order). Connections,
   lookups and facts stop at the API's default number of rows (1000, 500
-  and 2000); the bar above the table says so and **Load more** doubles it.
-  **CSV** downloads the rows as shown, every field the API returns, with
-  times in ISO 8601; text that a spreadsheet would run as a formula is
-  prefixed with `'`. The Wi-Fi table lists only networks reported by a
+  and 2000); the bar above the table says so and **Load more** fetches the
+  next page and appends it. **CSV** downloads the rows as shown and **All
+  CSV** streams every matching row in the window, every field the API
+  returns, with times in ISO 8601; text that a spreadsheet would run as a
+  formula is prefixed with `'`. The Wi-Fi table lists only networks reported by a
   monitor-mode sensor; it stays empty on an Ethernet-only deployment.
 - **Links:** the address bar holds the window, filter, tab, graph options,
   a table's sort and the details that are open, so a copied link shows the

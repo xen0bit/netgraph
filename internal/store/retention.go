@@ -94,6 +94,7 @@ func (s *Store) Retain(ctx context.Context) (RetentionResult, error) {
 	if _, err := s.w.ExecContext(ctx, `PRAGMA incremental_vacuum`); err != nil {
 		return r, err
 	}
+	s.invalidateAnomalies()
 	return r, nil
 }
 

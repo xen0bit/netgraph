@@ -57,15 +57,19 @@ netgraph serve -db /var/lib/netgraph/netgraph.db -listen :8443
 | `-exact-max` | `48h` | longer windows are answered from hourly rollups |
 | `-fact-gap` | `1h` | silence after which a relationship starts a new period |
 | `-asn-file` | `$NETGRAPH_ASN_FILE`; release builds: built in | an ASN table: the network and country of remote addresses ([networks](#networks-and-countries)); `none` for no table |
-| `-alert-webhook` | `$NETGRAPH_ALERT_WEBHOOK` | POST a JSON alert when a new device joins ([alerts](#new-device-alerts)) |
-| `-alert-learn` | `24h` | learn the network this long after the first sensor connects before alerting |
+| `-alert-webhook` | `$NETGRAPH_ALERT_WEBHOOK` | POST a JSON alert when a new device joins, and optionally for anomalies ([alerts](#new-device-alerts)) |
+| `-alert-learn` | `24h` | learn the network this long after the first sensor connects before alerting on new devices |
+| `-alert-anomalies` | | also POST anomalies at or above this severity: `low`, `medium` or `high`; repeats of one finding are cooled down for an hour |
 | `-web-dir` | | serve the UI from a directory instead of the embedded copy |
 
 "unit:" defaults apply under the packaged systemd unit, which hands the
 server the files in `/etc/netgraph` ([Linux with systemd](#linux-with-systemd)).
 
 Retention runs hourly. Back up a live database with `netgraph db backup
--db netgraph.db backup.db`.
+-db netgraph.db backup.db`; for a disk emergency, `netgraph db purge
+'2026-10-01'` drops everything older than that time without changing the
+retention settings. `netgraph db forget MAC` removes one device and all of
+its history.
 
 ### Monitoring
 
@@ -171,6 +175,12 @@ markup (`<!channel>`) and control characters neutralised; `device` carries
 the raw values. Delivery is retried three times with backoff; alerts are
 not stored, so ones queued when the server stops are lost.
 
+With `-alert-anomalies medium` (or `low`/`high`) the same webhook also gets
+an `event: "anomaly"` payload, with the finding in `anomaly` and the same
+inert one-line `text`. The notifier checks the last hour every five minutes
+and cools down a repeated finding for an hour, so a persistent scan does
+not page continuously.
+
 **Sizing.** Storage depends on how many connections the network makes. A
 busy synthetic home (40 devices, 120k connections a day) needs about
 280 MB of raw data per day. Typical homes are a fraction of that. With the
@@ -203,6 +213,11 @@ netgraph-sensor run -iface br-lan -server https://netgraph.lan:8443 -token-file 
 | `-rdns-timeout`, `-rdns-workers`, `-rdns-ttl` | `2s`, `4`, `1h` | lookup bound, concurrency and answer cache |
 | `-wifi-hop`, `-wifi-channels`, `-wifi-dwell` | off, common 2.4/5 GHz, `250ms` | channel hopping on monitor interfaces |
 | `-wifi-data` | off | emit one event per data frame (noisy; management and handshakes are always reported) |
+
+Before starting a sensor, `netgraph-sensor check -iface br-lan -server
+https://netgraph.lan:8443 -token-file ...` resolves the interface, opens it
+with `CAP_NET_RAW`, prints the kernel link type (including monitor mode),
+checks `/healthz`, and verifies that the ingest token can fetch Wi-Fi keys.
 
 Capturing needs `CAP_NET_RAW`. Run as root, use the systemd unit
 (below), or grant the capability once:

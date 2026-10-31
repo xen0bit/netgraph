@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/xen0bit/netgraph/internal/asn"
 	"github.com/xen0bit/netgraph/internal/model"
@@ -18,6 +19,8 @@ commands:
   migrate          create or upgrade the database schema
   backup FILE      write a consistent copy of the database (safe while serving)
   retain           apply retention now (the server does this hourly)
+  purge BEFORE     delete all data older than BEFORE (same time forms as queries)
+  forget MAC       remove one device and everything attributed to it
   vacuum           rebuild the file to reclaim all free space (stop the server first)
   enrich           look up the network of remote ends stored without one (-asn-file; the server does this when it loads one)
 `
@@ -56,7 +59,7 @@ func runDB(args []string) error {
 		if fs.NArg() != 1 {
 			return errors.New("usage: netgraph db backup [-db file] DEST")
 		}
-		st, err := store.OpenReadOnly(*db, cfg)
+		st, err := store.OpenBackup(*db, cfg)
 		if err != nil {
 			return err
 		}
@@ -78,6 +81,42 @@ func runDB(args []string) error {
 		}
 		fmt.Fprintf(os.Stderr, "deleted: %d flow records, %d lookups, %d answers, %d observations, %d facts, %d rollup rows, %d entities, %d Wi-Fi handshakes\n",
 			r.Flows, r.DNS, r.Answers, r.Observations, r.Facts, r.Rollups, r.Entities, r.Handshakes)
+		return nil
+	case "purge":
+		if fs.NArg() != 1 {
+			return errors.New("usage: netgraph db purge [-db file] BEFORE")
+		}
+		before, err := model.ParseTime(fs.Arg(0), time.Now())
+		if err != nil {
+			return fmt.Errorf("before: %w", err)
+		}
+		st, err := store.Open(*db, cfg)
+		if err != nil {
+			return err
+		}
+		defer st.Close()
+		r, err := st.PurgeBefore(context.Background(), before)
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "deleted: %d flow records, %d connections, %d lookups, %d answers, %d observations, %d facts, %d rollup rows, %d entities, %d Wi-Fi records\n",
+			r.Flows, r.Connections, r.DNS, r.Answers, r.Observations, r.Facts, r.Rollups, r.Entities, r.Handshakes)
+		return nil
+	case "forget":
+		if fs.NArg() != 1 {
+			return errors.New("usage: netgraph db forget [-db file] MAC")
+		}
+		st, err := store.Open(*db, cfg)
+		if err != nil {
+			return err
+		}
+		defer st.Close()
+		r, err := st.ForgetDevice(context.Background(), fs.Arg(0))
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "forgot %s: %d connections, %d flow records, %d lookups, %d observations, %d facts, %d rollup rows, %d Wi-Fi records\n",
+			r.Device, r.Connections, r.Flows, r.DNS, r.Observations, r.Facts, r.Rollups, r.Handshakes+r.Groups)
 		return nil
 	case "enrich":
 		var table *asn.DB
