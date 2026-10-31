@@ -19,6 +19,8 @@ type Runner struct {
 	Processor *Processor
 	Out       wire.Emitter
 	Hello     wire.Hello
+	// HelloFunc, when set, rebuilds Hello for a periodic or post-reopen event.
+	HelloFunc func() wire.Hello
 	// ShipperStats, when set, is folded into stats events.
 	ShipperStats func() wire.ShipperStats
 
@@ -80,6 +82,13 @@ loop:
 				r.emitHello(now)
 				lastHello = now
 			}
+		}
+	}
+	// A reconnecting source may be waiting to reopen; wake it before
+	// cancelling the readers so shutdown is prompt.
+	for _, s := range sources {
+		if i, ok := s.(interface{ Interrupt() }); ok {
+			i.Interrupt()
 		}
 	}
 	cancel()
@@ -147,7 +156,16 @@ func (r *Runner) RunFile(ctx context.Context, s capture.Source) error {
 
 func (r *Runner) emitHello(ts time.Time) {
 	h := r.Hello
+	if r.HelloFunc != nil {
+		h = r.HelloFunc()
+	}
 	r.Out.Emit(wire.Event{Type: wire.TypeHello, TS: ts, Hello: &h})
+}
+
+// RefreshHello emits a new hello immediately, after a capture source was
+// reopened and its addresses may have changed.
+func (r *Runner) RefreshHello() {
+	r.emitHello(time.Now())
 }
 
 func (r *Runner) emitStats(ts time.Time) {

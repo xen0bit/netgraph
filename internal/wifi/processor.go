@@ -56,11 +56,15 @@ type fragKey struct {
 }
 
 type fragState struct {
-	first *Frame
-	parts [][]byte
-	next  uint8
-	total int
-	last  time.Time
+	first        *Frame
+	parts        [][]byte
+	pending      map[uint8][]byte
+	next         uint8
+	end          uint8
+	haveEnd      bool
+	total        int
+	pendingBytes int
+	last         time.Time
 }
 
 // NewProcessor returns a processor. A nil Keyring means no network can be
@@ -212,6 +216,11 @@ func (p *Processor) data(ts time.Time, f *Frame) {
 		p.fragment(ts, f, llc)
 		return
 	}
+	p.payload(ts, f, llc)
+}
+
+// payload handles a complete LLC payload, which may be an A-MSDU aggregate.
+func (p *Processor) payload(ts time.Time, f *Frame, llc []byte) {
 	if !f.AMSDU() {
 		p.msdu(ts, f, f.Dst, f.Src, llc)
 		return
@@ -238,23 +247,55 @@ func (p *Processor) fragment(ts time.Time, f *Frame, llc []byte) {
 	p.pruneFrags(ts)
 	key := fragKey{src: f.Src.String(), dst: f.Dst.String(), bssid: f.BSSID.String(), seq: f.Seq}
 	st := p.frags[key]
-	if f.FragNumber == 0 || st == nil {
-		cp := *f
-		st = &fragState{first: &cp, next: 0}
+	if st == nil {
+		st = &fragState{first: nil, pending: map[uint8][]byte{}}
 		p.frags[key] = st
 	}
-	if f.FragNumber != st.next {
+	st.last = ts
+	if f.FragNumber == 0 {
+		cp := *f
+		st.first = &cp
+	}
+	if f.FragNumber < st.next {
+		return // duplicate of a fragment already joined
+	}
+	if f.FragNumber > st.next {
+		if _, ok := st.pending[f.FragNumber]; !ok {
+			st.pending[f.FragNumber] = append([]byte(nil), llc...)
+			st.pendingBytes += len(llc)
+		}
+		if !f.MoreFrag {
+			st.end, st.haveEnd = f.FragNumber, true
+		}
+		if len(st.pending) > 32 || st.pendingBytes+st.total > 64<<10 {
+			delete(p.frags, key)
+		}
+		return
+	}
+	// The next expected fragment arrived; append it and any successors
+	// that were waiting for the gap.
+	st.parts = append(st.parts, append([]byte(nil), llc...))
+	st.total += len(llc)
+	if !f.MoreFrag {
+		st.end, st.haveEnd = f.FragNumber, true
+	}
+	st.next++
+	for {
+		part, ok := st.pending[st.next]
+		if !ok {
+			break
+		}
+		delete(st.pending, st.next)
+		st.pendingBytes -= len(part)
+		st.parts = append(st.parts, part)
+		st.total += len(part)
+		st.next++
+	}
+	if st.total > 64<<10 || len(st.parts) > 32 {
 		delete(p.frags, key)
 		return
 	}
-	st.parts = append(st.parts, append([]byte(nil), llc...))
-	st.total += len(llc)
-	st.next++
-	st.last = ts
-	if f.MoreFrag {
-		if st.total > 64<<10 || len(st.parts) > 32 {
-			delete(p.frags, key)
-		}
+	if !st.haveEnd || st.next <= st.end {
 		return
 	}
 	joined := make([]byte, 0, st.total)
@@ -263,7 +304,7 @@ func (p *Processor) fragment(ts time.Time, f *Frame, llc []byte) {
 	}
 	base := *st.first
 	delete(p.frags, key)
-	p.msdu(ts, &base, base.Dst, base.Src, joined)
+	p.payload(ts, &base, joined)
 }
 
 func (p *Processor) pruneFrags(ts time.Time) {

@@ -156,3 +156,103 @@ func radiotap(freq int, signal int, flags byte, frame []byte) []byte {
 	rt[14] = byte(int8(signal))
 	return append(rt, frame...)
 }
+
+func TestProcessorEncryptedFragments(t *testing.T) {
+	const ap, sta = "aa:bb:cc:00:00:01", "3c:22:fb:01:02:03"
+	k := NewKeyring()
+	if err := k.AddPassphrase("home", "correct horse battery"); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := k.LoadHandshake(ap, sta, "home", bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32), 2); err != nil || !ok {
+		t.Fatalf("LoadHandshake: %v %v", ok, err)
+	}
+	var got [][]byte
+	p := NewProcessor(Config{Keys: k, Data: func(_ time.Time, eth []byte) { got = append(got, append([]byte(nil), eth...)) }})
+	llc := mustHex(t, "aaaa0300000008004500001c00000000401100000a0000010a000002")
+	tk := k.ptk(ap, sta).TK
+	mk := func(frag int, more bool, part []byte) []byte {
+		h := dataHeader(0x4188, false, true)
+		if more {
+			h[1] |= 0x04 // More Fragments
+		}
+		h[22] = byte(0x30 | frag)
+		body, err := ccmpSeal(h, part, tk, uint64(10+frag))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return append(append([]byte(nil), h...), body...)
+	}
+	p.Handle(time.Unix(0, 0), mk(0, true, llc[:11]), false)
+	if len(got) != 0 {
+		t.Fatal("first encrypted fragment was emitted")
+	}
+	p.Handle(time.Unix(0, 0), mk(1, false, llc[11:]), false)
+	if len(got) != 1 || len(got[0]) != 14+20 {
+		t.Fatalf("reassembled encrypted Ethernet = %x", got)
+	}
+}
+
+func TestProcessorFragmentedAMSDU(t *testing.T) {
+	const ap, sta = "aa:bb:cc:00:00:01", "3c:22:fb:01:02:03"
+	k := NewKeyring()
+	if err := k.AddPassphrase("home", "correct horse battery"); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := k.LoadHandshake(ap, sta, "home", bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32), 2); err != nil || !ok {
+		t.Fatalf("LoadHandshake: %v %v", ok, err)
+	}
+	var got [][]byte
+	p := NewProcessor(Config{Keys: k, Data: func(_ time.Time, eth []byte) { got = append(got, append([]byte(nil), eth...)) }})
+	staMAC := []byte{0x3c, 0x22, 0xfb, 0x01, 0x02, 0x03}
+	gw := []byte{0x00, 0x11, 0x22, 0x33, 0x44, 0x55}
+	printer := []byte{0x00, 0x11, 0x22, 0x33, 0x44, 0x77}
+	ipv4 := append([]byte{0xaa, 0xaa, 0x03, 0, 0, 0, 0x08, 0x00}, make([]byte, 21)...)
+	ipv6 := append([]byte{0xaa, 0xaa, 0x03, 0, 0, 0, 0x86, 0xdd}, make([]byte, 40)...)
+	plain := amsdu([3][]byte{gw, staMAC, ipv4}, [3][]byte{printer, staMAC, ipv6})
+	tk := k.ptk(ap, sta).TK
+	mk := func(frag int, more bool, part []byte) []byte {
+		h := dataHeader(0x4188, false, true)
+		h[24] = 0x80 // A-MSDU present
+		if more {
+			h[1] |= 0x04
+		}
+		h[22] = byte(0x30 | frag)
+		body, err := ccmpSeal(h, part, tk, uint64(20+frag))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return append(append([]byte(nil), h...), body...)
+	}
+	p.Handle(time.Unix(0, 0), mk(0, true, plain[:20]), false)
+	p.Handle(time.Unix(0, 0), mk(1, false, plain[20:]), false)
+	if len(got) != 2 {
+		t.Fatalf("got %d Ethernet frames, want 2", len(got))
+	}
+}
+
+func TestProcessorOutOfOrderFragments(t *testing.T) {
+	p, _ := collectEvents()
+	ap := []byte{0xaa, 0xbb, 0xcc, 0x00, 0x00, 0x09}
+	sta := []byte{0x3c, 0x22, 0xfb, 0x01, 0x02, 0x09}
+	dst := []byte{0x00, 0x11, 0x22, 0x33, 0x44, 0x55}
+	llc := mustHex(t, "aaaa0300000008004500001c00000000401100000a0000010a000002")
+	mk := func(frag int, more bool, part []byte) []byte {
+		fc := uint16(0x0108)
+		if more {
+			fc |= 0x0400
+		}
+		b := frameBytes(fc, ap, sta, dst, string(part), nil)
+		binary.LittleEndian.PutUint16(b[22:], uint16(0x1240|frag))
+		return b
+	}
+	var got []byte
+	p.cfg.Data = func(_ time.Time, b []byte) { got = append([]byte(nil), b...) }
+	p.Handle(time.Now(), mk(1, false, llc[10:]), false)
+	if got != nil {
+		t.Fatal("final fragment emitted before the first")
+	}
+	p.Handle(time.Now(), mk(0, true, llc[:10]), false)
+	if len(got) != 14+20 {
+		t.Fatalf("out-of-order reassembly = %x", got)
+	}
+}

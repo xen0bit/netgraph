@@ -167,10 +167,17 @@ func run(args []string) error {
 			names = append(names, n)
 		}
 	}
-	hello := wire.Hello{
-		Name: *name, Version: buildinfo.Version, OS: runtime.GOOS, Arch: runtime.GOARCH,
-		Interfaces: sensor.InterfaceInfo(names), ActiveTimeout: *active,
+	liveNames := append([]string(nil), names...)
+	var namesMu sync.Mutex
+	buildHello := func() wire.Hello {
+		namesMu.Lock()
+		defer namesMu.Unlock()
+		return wire.Hello{
+			Name: *name, Version: buildinfo.Version, OS: runtime.GOOS, Arch: runtime.GOARCH,
+			Interfaces: sensor.InterfaceInfo(liveNames), ActiveTimeout: *active,
+		}
 	}
+	hello := buildHello()
 
 	// Wi-Fi keys come from the server (below) and live only in memory.
 	// Without them, management frames and handshakes are still decoded and
@@ -199,7 +206,7 @@ func run(args []string) error {
 		Logger: log, Ignore: ignore,
 		RDNS: reverse, IsLocal: sensor.LocalChecker(hello.Interfaces), WiFi: wifiProc,
 	}, out)
-	r := &sensor.Runner{Processor: proc, Out: out, Hello: hello}
+	r := &sensor.Runner{Processor: proc, Out: out, Hello: hello, HelloFunc: buildHello}
 
 	var shipDone chan struct{}
 	shipCtx, cancelShip := context.WithCancel(context.Background())
@@ -244,16 +251,33 @@ func run(args []string) error {
 		err = r.RunFile(ctx, src)
 	} else {
 		var sources []capture.Source
-		for _, n := range names {
-			src, oerr := capture.OpenLive(capture.LiveConfig{Interface: strings.TrimSpace(n), RingBytes: *ringMB << 20, Promiscuous: *promisc})
+		openOne := func(spec string) (capture.Source, error) {
+			n, err := sensor.ResolveInterface(strings.TrimSpace(spec))
+			if err != nil {
+				return nil, err
+			}
+			return capture.OpenLive(capture.LiveConfig{Interface: n, RingBytes: *ringMB << 20, Promiscuous: *promisc})
+		}
+		for _, spec := range strings.Split(*ifaces, ",") {
+			src, oerr := openOne(spec)
 			if oerr != nil {
 				for _, s := range sources {
 					s.Close()
 				}
 				return oerr
 			}
-			sources = append(sources, src)
-			log.Info("capturing", "iface", n, "link", linkName(src.LinkType()))
+			idx := len(sources)
+			reconnect := capture.NewReconnect(src, func() (capture.Source, error) { return openOne(spec) }, log)
+			reconnect.OnReopen = func() {
+				namesMu.Lock()
+				if idx < len(liveNames) {
+					liveNames[idx] = reconnect.Name()
+				}
+				namesMu.Unlock()
+				r.RefreshHello()
+			}
+			sources = append(sources, reconnect)
+			log.Info("capturing", "iface", reconnect.Name(), "link", linkName(reconnect.LinkType()))
 		}
 		hopCtx, stopHop := context.WithCancel(ctx)
 		defer stopHop()
