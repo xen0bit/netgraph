@@ -80,18 +80,22 @@ func (s *Store) Retain(ctx context.Context) (RetentionResult, error) {
 	// run between deleting one and dropping the cache. These deletes are
 	// few, since an entity outlives its facts only briefly.
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	if err := run(&r.Entities, `DELETE FROM entities WHERE rowid IN (SELECT id FROM entities e WHERE e.last_seen < ?
 		AND NOT EXISTS (SELECT 1 FROM facts WHERE src = e.id OR dst = e.id) LIMIT 5000)`, roll, false); err != nil {
+		s.mu.Unlock()
 		return r, err
 	}
 	if r.Entities > 0 || r.Facts > 0 {
 		// Cached IDs may point at deleted rows.
 		s.ing = newIngester(s)
 		if err := s.ing.warm(ctx); err != nil {
+			s.mu.Unlock()
 			return r, err
 		}
 	}
+	s.mu.Unlock()
+	// Reclaiming pages can take seconds. Do it without the ingest lock, or
+	// a large database makes one ingest wait for most of the pass.
 	if _, err := s.w.ExecContext(ctx, `PRAGMA incremental_vacuum`); err != nil {
 		return r, err
 	}
