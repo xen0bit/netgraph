@@ -60,16 +60,22 @@ netgraph serve -db /var/lib/netgraph/netgraph.db -listen :8443
 | `-alert-webhook` | `$NETGRAPH_ALERT_WEBHOOK` | POST a JSON alert when a new device joins, and optionally for anomalies ([alerts](#new-device-alerts)) |
 | `-alert-learn` | `24h` | learn the network this long after the first sensor connects before alerting on new devices |
 | `-alert-anomalies` | | also POST anomalies at or above this severity: `low`, `medium` or `high`; repeats of one finding are cooled down for an hour |
+| `-alert-anomaly-kinds` | | comma-separated finding kinds to alert on, such as `scan,rogue_dhcp`; empty means all |
+| `-max-db-mb` | | emergency database ceiling in MiB; when crossed, old raw rows (then rollups only with `-trim-rollups`) are deleted |
+| `-trim-rollups` | off | allow the disk guard to delete the oldest hourly rollups too |
 | `-web-dir` | | serve the UI from a directory instead of the embedded copy |
 
 "unit:" defaults apply under the packaged systemd unit, which hands the
 server the files in `/etc/netgraph` ([Linux with systemd](#linux-with-systemd)).
 
 Retention runs hourly. Back up a live database with `netgraph db backup
--db netgraph.db backup.db`; for a disk emergency, `netgraph db purge
-'2026-10-01'` drops everything older than that time without changing the
-retention settings. `netgraph db forget MAC` removes one device and all of
-its history.
+-db netgraph.db backup.db`; the copy is written beside the destination and
+renamed only after `PRAGMA integrity_check`, so an interrupted backup never
+leaves a plausible partial file. `-force` replaces an existing destination;
+`db migrate -backup FILE` copies the old schema before upgrading. For a disk
+emergency, `netgraph db purge '2026-10-01'` drops everything older than that
+time without changing the retention settings, and `db forget MAC` removes
+one device and all of its history; both accept `-dry-run`.
 
 ### Monitoring
 
@@ -177,9 +183,19 @@ not stored, so ones queued when the server stops are lost.
 
 With `-alert-anomalies medium` (or `low`/`high`) the same webhook also gets
 an `event: "anomaly"` payload, with the finding in `anomaly` and the same
-inert one-line `text`. The notifier checks the last hour every five minutes
-and cools down a repeated finding for an hour, so a persistent scan does
-not page continuously.
+inert one-line `text`. `-alert-anomaly-kinds scan,rogue_dhcp` narrows it to
+those kinds. The notifier checks the last hour every five minutes and cools
+down a repeated finding for an hour, so a persistent scan does not page
+continuously. A mute set from the web UI or `POST /api/v1/anomalies/mute`
+suppresses that finding before the notifier sees it.
+
+**Disk guard.** `-max-db-mb 8000` is a last-resort ceiling: once the
+database (including its WAL) is over it, the server runs retention and then
+deletes the oldest raw rows in bounded chunks. Rollups are untouched unless
+`-trim-rollups` is also set; the guard logs every trim and leaves the
+configured retention policy unchanged for the next minute. Use it so a
+runaway capture cannot fill the server's disk; it is not a replacement for a
+sensible `-raw-retention`.
 
 **Sizing.** Storage depends on how many connections the network makes. A
 busy synthetic home (40 devices, 120k connections a day) needs about
@@ -218,6 +234,12 @@ Before starting a sensor, `netgraph-sensor check -iface br-lan -server
 https://netgraph.lan:8443 -token-file ...` resolves the interface, opens it
 with `CAP_NET_RAW`, prints the kernel link type (including monitor mode),
 checks `/healthz`, and verifies that the ingest token can fetch Wi-Fi keys.
+
+Live capture survives an interface reset: if a read fails (a bridge is
+recreated, a USB adapter is unplugged, the kernel resets the ring), that
+capture source is reopened with backoff while the other interfaces keep
+running. An address/CIDR `-iface` is resolved again, so a renamed interface
+is still found. The reopen attempts and the new link are logged.
 
 Capturing needs `CAP_NET_RAW`. Run as root, use the systemd unit
 (below), or grant the capability once:

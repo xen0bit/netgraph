@@ -6,6 +6,7 @@ import (
 	"compress/gzip"
 	"context"
 	"encoding/hex"
+	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -465,5 +466,92 @@ func TestMetrics(t *testing.T) {
 	}
 	if strings.Contains(body, `netgraph_ingest_batches_total 0`) {
 		t.Error("ingest batches not counted")
+	}
+}
+
+func TestGzipResponses(t *testing.T) {
+	srv, _ := serve(t, nil)
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/summary?from="+strconv.FormatInt(window.From.UnixMilli(), 10)+"&to="+strconv.FormatInt(window.To.UnixMilli(), 10), nil)
+	req.Header.Set("Authorization", "Bearer rd-tok")
+	req.Header.Set("Accept-Encoding", "gzip")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.Header.Get("Content-Encoding") != "gzip" || !strings.Contains(resp.Header.Get("Vary"), "Accept-Encoding") {
+		t.Fatalf("gzip headers: %v", resp.Header)
+	}
+	zr, err := gzip.NewReader(resp.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer zr.Close()
+	var got map[string]any
+	if err := json.NewDecoder(zr).Decode(&got); err != nil || got["devices"] == nil {
+		t.Fatalf("gzip body: %v %+v", err, got)
+	}
+	req, _ = http.NewRequest(http.MethodGet, srv.URL+"/api/v1/summary", nil)
+	req.Header.Set("Authorization", "Bearer rd-tok")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.Header.Get("Content-Encoding") != "" {
+		t.Fatalf("unrequested gzip: %v", resp.Header)
+	}
+}
+
+func TestAnomalyMuteAPI(t *testing.T) {
+	srv, _ := serve(t, nil)
+	body := `{"kind":"scan","device":"device:aa:bb:cc:00:00:09","entity":"","until":` +
+		strconv.FormatInt(time.Now().Add(time.Hour).UnixMilli(), 10) + `,"note":"noisy"}`
+	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/anomalies/mute", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer rd-tok")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("mute: %s", resp.Status)
+	}
+	req, _ = http.NewRequest(http.MethodGet, srv.URL+"/api/v1/anomalies/mutes", nil)
+	req.Header.Set("Authorization", "Bearer rd-tok")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Mutes []model.AnomalyMute `json:"mutes"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&got); err != nil {
+		resp.Body.Close()
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if len(got.Mutes) != 1 || got.Mutes[0].Kind != "scan" {
+		t.Fatalf("mutes = %+v", got.Mutes)
+	}
+	req, _ = http.NewRequest(http.MethodDelete, srv.URL+"/api/v1/anomalies/mute?kind=scan&device=device:aa:bb:cc:00:00:09&entity=", nil)
+	req.Header.Set("Authorization", "Bearer rd-tok")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("unmute: %s", resp.Status)
+	}
+}
+
+func TestCSVFormulaText(t *testing.T) {
+	for in, want := range map[string]string{
+		"=1+1": "'=1+1", " =1+1": "' =1+1", "\t@user": "'\t@user", "alice": "alice", "": "",
+	} {
+		if got := csvText(in); got != want {
+			t.Errorf("csvText(%q) = %q, want %q", in, got, want)
+		}
 	}
 }

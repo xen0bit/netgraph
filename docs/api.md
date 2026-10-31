@@ -5,7 +5,9 @@ filter as parameters. When the server has a read token, send it as
 `Authorization: Bearer <token>`. The live stream is the one exception:
 `EventSource` cannot set headers, so it also accepts `?token=`. Query
 tokens elsewhere are rejected, since they leak into logs and Referer
-headers. Times in responses are unix milliseconds.
+headers. Responses larger than a few bytes are gzip-compressed when the
+client accepts it; the live stream is not compressed. Times in responses
+are unix milliseconds.
 
 ## Window and filter parameters
 
@@ -28,8 +30,8 @@ headers. Times in responses are unix milliseconds.
 |---|---|
 | `GET /api/v1/summary` | `{devices, flows, inbound, peak_connections, dns_queries, domains, remote_ips, bytes_out, bytes_in, precision, ...}`; bytes are what devices here sent and received |
 | `GET /api/v1/devices` | `[{id, mac, label, user_label, auto_label, vendor, vendor_short, randomized, role, ips, hostnames, services, serves, fingerprints, user_agents, flows, inbound, dns_queries, bytes_out, bytes_in, remotes, active_from, active_to, first_seen, last_seen}]`; `serves` lists the ports clients connected to (`443/tcp`), `inbound` how many connections came in from outside |
-| `GET /api/v1/flows` | `[{key, proto, client_ip, client_port, server_ip, server_port, device, device_name, device_mac, remote_ip, remote_port, peer_device, peer_name, direction, app, name, sni, http_host, qname, alpn, ja4, user_agent, asn, as_org, country, first_seen, last_seen, state, closed, end_reason, bytes_out, bytes_in, pkts_out, pkts_in}]`, busiest first (see [Flows](#flows)) |
-| `GET /api/v1/dns` | `[{ts, client_ip, device, device_name, server, qname, qtype, rcode, latency_ms, answers: [{name, type, data, ttl, expires}]}]`, newest first |
+| `GET /api/v1/flows` | `[{key, proto, client_ip, client_port, server_ip, server_port, device, device_name, device_mac, remote_ip, remote_port, peer_device, peer_name, direction, app, name, sni, http_host, qname, alpn, ja4, user_agent, asn, as_org, country, first_seen, last_seen, state, closed, end_reason, bytes_out, bytes_in, pkts_out, pkts_in, connections}]`, busiest first (see [Flows](#flows)) |
+| `GET /api/v1/dns` | `[{ts, client_ip, device, device_name, server, qname, qtype, rcode, latency_ms, count, answers: [{name, type, data, ttl, expires}]}]`, newest first; `count` is set on hourly rollup rows |
 | `GET /api/v1/facts` | `[{rel, src, src_label, dst, dst_label, first_seen, last_seen, count, source, attrs}]` |
 | `GET /api/v1/timeseries?step=5m` | `{step, precision, buckets: [{ts, bytes_out, bytes_in, flows_new, dns_queries, devices}]}` |
 | `GET /api/v1/graph` | `{from, to, precision, truncated, nodes: [{id, kind, label, sub, local, bytes_out, bytes_in, attrs}], edges: [{from, to, rel, count, bytes_out, bytes_in, carried, opened, closed, peak, ports, ttl, first_seen, last_seen, attrs}]}` |
@@ -40,8 +42,11 @@ headers. Times in responses are unix milliseconds.
 | `GET /api/v1/live` | server-sent events: `event: ingest` with `[{type, ts, detail}]` per batch |
 | `PUT /api/v1/devices/{mac}/label` | names a device by hand: body `{"label": "Living room TV"}` (JSON required; at most 64 printable characters), `{"label": ""}` restores the automatic name. `204`, or `400`/`404`. Read token |
 | `GET /api/v1/search?q=alice&limit=20` | `[{id, kind, key, label, last_seen}]`: devices (by MAC, name or label), addresses, DNS names and networks whose key starts with `q` or whose name contains it; exact keys first, then devices, then the most recently seen. `q` needs two characters; `kind:q` (`device:3c:22`) searches one kind. `limit` is at most 100 (default 20). Read token |
-| `GET /api/v1/export?kind=flows` | CSV of every field the API returns for that table (`devices`, `flows`, `dns`, `facts`, `anomalies`, `wifi`). It uses the same window and filters and streams the rows, so it is not limited to what the browser loaded. Read token |
+| `GET /api/v1/export?kind=flows` | CSV of every field the API returns for that table (`devices`, `flows`, `dns`, `facts`, `anomalies`, `wifi`). It uses the same window and filters and streams each row from the database, so it is not limited to what the browser loaded or to the memory of the process. Read token |
 | `GET /api/v1/anomalies` | the window's [anomalies](concepts.md#anomalies), most severe first: `{from, to, since, learning, anomalies: [{kind, severity, ts, device, device_name, entity, summary, evidence}]}`. Read token |
+| `GET /api/v1/anomalies/mutes` | `{mutes: [{kind, device, entity, until, note, created}]}`, active mutes only. Read token |
+| `POST /api/v1/anomalies/mute` | body `{kind, device, entity, until, note}`; empty fields are wildcards, `until` is unix ms (default one day). Read token |
+| `DELETE /api/v1/anomalies/mute?kind=...&device=...&entity=...` | remove that exact mute. Read token |
 | `GET /metrics` | Prometheus text: ingest counters, each sensor's last reported stats (packets, kernel drops, queued and dropped events, ...), entities by kind, database size, alert outcomes. Read token |
 | `GET /api/v1/version`, `/healthz` | `{version, commit}`; no token needed |
 

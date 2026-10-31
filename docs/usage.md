@@ -90,8 +90,8 @@ TIME                 DEVICE           TYPE  NAME               RCODE     MS    A
 | `label MAC NAME...`, `label -clear MAC` | name a device by hand; it overrides DHCP, mDNS and every other source until cleared. With `-server` it goes through the API; without, it writes the database file (stop the server first) |
 | `import FILE.pcap...` | ingest captures directly (re-importing a file is a no-op) |
 | `db migrate`/`backup`/`retain`/`vacuum` | maintenance |
-| `db purge BEFORE` | delete everything older than `BEFORE` now, whatever the retention settings |
-| `db forget MAC` | remove one device and everything attributed to it (connections, lookups, facts, rollups, Wi-Fi sync records) |
+| `db purge BEFORE` | delete everything older than `BEFORE` now, whatever the retention settings; `-dry-run` reports the counts only |
+| `db forget MAC` | remove one device and everything attributed to it (connections, lookups, facts, rollups, private address entities, Wi-Fi sync records); `-dry-run` previews it |
 | `db enrich -asn-file FILE` | look up the network of connections stored without an [ASN table](deployment.md#networks-and-countries) |
 | `netgraph-sensor check` | preflight an interface, `CAP_NET_RAW`, link type and server authentication |
 
@@ -172,7 +172,9 @@ page asks for it once and keeps it in the browser.
   window is fetched and laid out, the current graph stays visible under a
   small spinner rather than blanking.
 - **Anomalies:** what stands out in the window, most severe first, with the
-  evidence ([what is checked](concepts.md#anomalies)); the summary bar
+  evidence ([what is checked](concepts.md#anomalies)). The details panel
+  can mute that finding for an hour; mutes are stored on the server and
+  also suppress matching webhook alerts. The summary bar
   counts them and opens the tab. Click one to see it on the graph, filtered
   to the address, network or device it is about, with its evidence at the
   top of the details. On the graph, medium and high ones outline their
@@ -185,7 +187,7 @@ page asks for it once and keeps it in the browser.
   next page and appends it. **CSV** downloads the rows as shown and **All
   CSV** streams every matching row in the window, every field the API
   returns, with times in ISO 8601; text that a spreadsheet would run as a
-  formula is prefixed with `'`. The Wi-Fi table lists only networks reported by a
+  formula (including after leading whitespace) is prefixed with `'`. The Wi-Fi table lists only networks reported by a
   monitor-mode sensor; it stays empty on an Ethernet-only deployment.
 - **Links:** the address bar holds the window, filter, tab, graph options,
   a table's sort and the details that are open, so a copied link shows the
@@ -195,7 +197,9 @@ page asks for it once and keeps it in the browser.
   opening and closing. A device's panel has a **Rename** box: your name
   replaces the automatic one everywhere (the devices table still shows the
   automatic name under it), and **Use “…”** puts the automatic name back.
-  Renaming needs the read token, like the rest of the UI.
+  Renaming and muting need the read token, like the rest of the UI. If a
+  token is missing or rejected, the footer shows **Connect**; the dialog
+  is shared by all in-flight requests and can be reopened without a reload.
 
 The window and filter live in the URL, so a link reproduces a view.
 

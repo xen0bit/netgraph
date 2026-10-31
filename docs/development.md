@@ -68,9 +68,12 @@ writes the scenario for manual use.
 `internal/wifi` pins AES-CCM against RFC 3610 packet vector #1 and the WPA
 PMK against the 802.11i passphrase vector, then checks CCMP/GCMP/TKIP/WEP
 round-trips, fragmented-MSDU reassembly and a complete EAPOL 4-way
-handshake. `make fuzz` covers the radiotap/802.11 parsers; a panic on a
-malformed frame is a bug, not an expected drop. The sensor tests also split
-a DNS-over-TCP message across segments to pin the stream reassembler.
+handshake. The GCMP KATs are the published 802.11ad/11ac vectors; the
+GCMP decryptor also has a fuzz target. `make fuzz` covers the
+radiotap/802.11 parsers; a panic on a malformed frame is a bug, not an
+expected drop. The sensor tests split a DNS-over-TCP message across
+segments (including out of order) and reassemble IPv4/IPv6 fragments before
+decoding them.
 
 ### The Docker lab
 
@@ -104,3 +107,11 @@ Tag `vX.Y.Z` and push. The release workflow runs the tests, builds every
 target with goreleaser (archives, deb/rpm/apk, multi-arch images on GHCR),
 signs the checksums with cosign (keyless) and attaches SBOMs. CI runs the
 same pipeline as a snapshot on every pull request.
+
+The opt-in scale fixture also has a graph benchmark, useful when changing
+anomaly or graph queries:
+
+```sh
+NETGRAPH_SCALE=1 NETGRAPH_SCALE_DB=/tmp/scale.db go test -run TestScale -v ./internal/store
+NETGRAPH_SCALE_DB=/tmp/scale.db go test -run '^$' -bench ScaleGraph ./internal/store
+```

@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/signal"
 	"runtime/debug"
+	"strings"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -39,10 +40,13 @@ func runServe(args []string) error {
 	alertURL := fs.String("alert-webhook", envOr("NETGRAPH_ALERT_WEBHOOK", ""), "POST a JSON alert here when a new device joins the network; $NETGRAPH_ALERT_WEBHOOK")
 	alertLearn := fs.String("alert-learn", "24h", "after the first sensor connects, learn the network this long before alerting on new devices")
 	alertAnomalies := fs.String("alert-anomalies", "", "also POST anomalies at or above this severity: low, medium or high (default off)")
+	alertKinds := fs.String("alert-anomaly-kinds", "", "comma-separated anomaly kinds to alert on (default: all kinds at the chosen severity)")
 	// Not a systemd credential like the files above: credentials are
 	// capped at about 1 MB together, and the table is several.
 	asnFile := fs.String("asn-file", envOr("NETGRAPH_ASN_FILE", ""), "an iptoasn.com ip2asn-combined.tsv(.gz): name the network and country of remote addresses; reloaded on SIGHUP and when the file changes. Default: the table built into release binaries, if any; none: no table. $NETGRAPH_ASN_FILE")
 	webDir := fs.String("web-dir", "", "serve the web UI from this directory instead of the embedded copy")
+	maxDB := fs.Int("max-db-mb", 0, "run emergency retention when the database exceeds this many MiB (0: off)")
+	trimRollups := fs.Bool("trim-rollups", false, "with -max-db-mb, allow emergency retention to delete oldest rollups too")
 	raw := fs.String("raw-retention", "14d", "keep raw flows, DNS and observations this long")
 	rollup := fs.String("rollup-retention", "180d", "keep hourly rollups and facts this long")
 	gap := fs.String("fact-gap", "1h", "silence after which a relationship starts a new period")
@@ -104,11 +108,20 @@ func runServe(args []string) error {
 	if *alertAnomalies != "" && *alertURL == "" {
 		return errors.New("-alert-anomalies needs -alert-webhook")
 	}
+	if *trimRollups && *maxDB <= 0 {
+		return errors.New("-trim-rollups needs -max-db-mb")
+	}
 	if *alertURL != "" {
 		if u, err := url.Parse(*alertURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			return fmt.Errorf("-alert-webhook: want an http(s) URL")
 		}
-		notifier = alert.New(alert.Config{URL: *alertURL, Learn: learnD, AnomalyMin: *alertAnomalies, Logger: log})
+		var kinds []string
+		for _, k := range strings.Split(*alertKinds, ",") {
+			if k = strings.TrimSpace(k); k != "" {
+				kinds = append(kinds, k)
+			}
+		}
+		notifier = alert.New(alert.Config{URL: *alertURL, Learn: learnD, AnomalyMin: *alertAnomalies, AnomalyKinds: kinds, Logger: log})
 		onNew = notifier.Notify
 	}
 	// The ASN table: a file given (reloaded when it changes), else the one
@@ -172,6 +185,10 @@ func runServe(args []string) error {
 			log.Info("anomaly alerts on", "minimum", *alertAnomalies)
 		}
 	}
+	if *maxDB > 0 {
+		go diskGuard(ctx, st, int64(*maxDB)<<20, *trimRollups, log)
+		log.Info("database disk guard on", "max_mb", *maxDB, "trim_rollups", *trimRollups)
+	}
 	if *wifiKeyFile != "" {
 		go reloadWiFiKeys(ctx, *wifiKeyFile, apiSrv, log)
 	}
@@ -222,6 +239,40 @@ func runServe(args []string) error {
 	sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return srv.Shutdown(sctx)
+}
+
+// diskGuard keeps a hard ceiling on the database. It runs early retention
+// first; if the file is still too large it removes the oldest raw rows,
+// optionally including rollups. It is a last resort for a full disk, not a
+// replacement for the configured retention policy.
+func diskGuard(ctx context.Context, st *store.Store, target int64, trimRollups bool, log *slog.Logger) {
+	t := time.NewTicker(time.Minute)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if st.Size() <= target {
+				continue
+			}
+			log.Warn("database over disk guard; trimming oldest data", "bytes", st.Size(), "target", target)
+			if _, err := st.Retain(ctx); err != nil {
+				log.Error("disk guard retention", "err", err)
+			}
+			if st.Size() > target {
+				r, err := st.EmergencyTrim(ctx, target, trimRollups)
+				if err != nil {
+					log.Error("disk guard emergency trim", "err", err)
+					continue
+				}
+				log.Warn("emergency trim complete", "flows", r.Flows, "dns", r.DNS, "facts", r.Facts, "rollups", r.Rollups, "bytes", st.Size())
+			}
+			if st.Size() > target {
+				log.Error("database still over disk guard after trim", "bytes", st.Size(), "target", target)
+			}
+		}
+	}
 }
 
 // watchAnomalies checks the last hour every five minutes and hands new

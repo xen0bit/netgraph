@@ -241,6 +241,12 @@ A window shorter than an hour is compared with hours as it is: its total
 is a lower bound on that hour's. A device filter keeps that device's
 findings; other filters do not apply.
 
+A finding can be muted from its details panel (or with
+`POST /api/v1/anomalies/mute`) for a period. Mutes are stored in the
+database, matched by kind/device/entity (empty fields are wildcards), and
+removed from the report before the webhook notifier sees them. The same
+`GET /api/v1/anomalies/mutes` list shows what is currently silenced.
+
 ## Wi-Fi
 
 A sensor capturing a monitor-mode interface receives radiotap frames. It
@@ -323,10 +329,12 @@ extensions ioctl, so it works with mac80211 monitor interfaces and not with
 - **VPNs and tunnels** show as one connection to the tunnel endpoint.
 - **Randomised MACs** make a phone a new device on each network or after
   a reset. Its DHCP hostname often still names it.
-- **IPv4 fragments** after the first are not counted.
-- **DNS over TCP** is reassembled per connection and handles messages split
-  across segments; a single DNS message is still bounded at 64 KiB, so a
-  zone transfer is not followed indefinitely.
+- **DNS over TCP** is reassembled per connection, including out-of-order
+  and retransmitted segments; a single DNS message is still bounded at
+  64 KiB, so a zone transfer is not followed indefinitely.
+- **IPv4 and IPv6 fragments** are reassembled per flow before L4 decoding.
+  A partial datagram is dropped after 30 seconds or 64 KiB; an overlapping
+  fragment never replaces a byte already received.
 - **WPA3/SAE, OWE and 802.1X** Wi-Fi has no passively derivable PMK; without
   an explicitly supplied PMK, their data frames stay encrypted. When a PMK
   is supplied, GCMP (the WPA3 data cipher) is decrypted like CCMP.

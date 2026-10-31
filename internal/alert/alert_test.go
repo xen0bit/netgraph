@@ -135,3 +135,26 @@ func TestLearningPeriod(t *testing.T) {
 		t.Fatalf("got %+v", r.got)
 	}
 }
+
+func TestAnomalyKindFilter(t *testing.T) {
+	r := &receiver{done: make(chan struct{}, 2)}
+	srv := httptest.NewServer(r)
+	defer srv.Close()
+	n := New(Config{URL: srv.URL, AnomalyMin: model.SeverityLow, AnomalyKinds: []string{model.AnomalyScan}})
+	n.backoff = time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go n.Run(ctx)
+	n.NotifyAnomaly(model.Anomaly{Kind: model.AnomalyBeacon, Severity: model.SeverityHigh, Device: "d", Summary: "beacon"})
+	select {
+	case <-r.done:
+		t.Fatal("filtered anomaly kind was delivered")
+	case <-time.After(30 * time.Millisecond):
+	}
+	n.NotifyAnomaly(model.Anomaly{Kind: model.AnomalyScan, Severity: model.SeverityLow, Device: "d", Summary: "scan"})
+	select {
+	case <-r.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("allowed anomaly kind was not delivered")
+	}
+}

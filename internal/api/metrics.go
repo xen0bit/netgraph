@@ -129,7 +129,7 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 
 	if s.cfg.Alerts != nil {
 		st := s.cfg.Alerts()
-		m("netgraph_alerts_total", "counter", "New-device alerts, by result.")
+		m("netgraph_alerts_total", "counter", "Webhook alerts, by result.")
 		v("netgraph_alerts_total", []string{"result", "sent"}, float64(st.Sent))
 		v("netgraph_alerts_total", []string{"result", "failed"}, float64(st.Failed))
 		v("netgraph_alerts_total", []string{"result", "dropped"}, float64(st.Dropped))

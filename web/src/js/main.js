@@ -118,9 +118,17 @@ async function api(path, extra = {}, raw = false) {
     const headers = token ? { Authorization: `Bearer ${token}` } : {};
     const resp = await fetch(`/api/v1/${path}?${params(extra)}`, { headers });
     if (resp.status === 401) {
-      if (retried) throw new Error(`${path}: read token required`);
+      if (retried) {
+        token = "";
+        try { localStorage.removeItem("netgraph.token"); } catch { /* private mode */ }
+        needAuth();
+        throw new Error(`${path}: read token required`);
+      }
       retried = true;
-      if (!await askToken()) throw new Error(`${path}: read token required`);
+      if (!await askToken()) {
+        needAuth();
+        throw new Error(`${path}: read token required`);
+      }
       continue;
     }
     if (!resp.ok) {
@@ -128,6 +136,7 @@ async function api(path, extra = {}, raw = false) {
       try { msg = (await resp.json()).error || msg; } catch { /* not JSON */ }
       throw new Error(`${path}: ${msg}`);
     }
+    saveToken();
     return raw ? resp.text() : resp.json();
   }
 }
@@ -141,9 +150,17 @@ async function send(method, path, body) {
     if (token) headers.Authorization = `Bearer ${token}`;
     const resp = await fetch(`/api/v1/${path}`, { method, headers, body: JSON.stringify(body) });
     if (resp.status === 401) {
-      if (retried) throw new Error("read token required");
+      if (retried) {
+        token = "";
+        try { localStorage.removeItem("netgraph.token"); } catch { /* private mode */ }
+        needAuth();
+        throw new Error("read token required");
+      }
       retried = true;
-      if (!await askToken()) throw new Error("read token required");
+      if (!await askToken()) {
+        needAuth();
+        throw new Error("read token required");
+      }
       continue;
     }
     if (!resp.ok) {
@@ -151,6 +168,7 @@ async function send(method, path, body) {
       try { msg = (await resp.json()).error || msg; } catch { /* not JSON */ }
       throw new Error(msg);
     }
+    saveToken();
     return;
   }
 }
@@ -169,9 +187,10 @@ function askToken() {
       const v = input.value.trim();
       if (!cancel && v) {
         token = v;
-        try { localStorage.setItem("netgraph.token", token); } catch { /* private mode */ }
-        engine?.call("configure", { base: location.origin, token }).catch(() => {});
+        // Saved only after the server accepts it in a real request.
         if (state.live) openLive();
+      } else {
+        needAuth();
       }
       tokenPrompt = null;
       resolve(cancel ? "" : token);
@@ -182,6 +201,18 @@ function askToken() {
     if (!dlg.open) dlg.showModal();
   });
   return tokenPrompt;
+}
+
+function saveToken() {
+  if (!token) return;
+  try { localStorage.setItem("netgraph.token", token); } catch { /* private mode */ }
+  engine?.call("configure", { base: location.origin, token }).catch(() => {});
+  $("#connect").hidden = true;
+}
+
+function needAuth() {
+  setStatus("Read token required", true);
+  $("#connect").hidden = false;
 }
 
 // --- status -------------------------------------------------------------------
@@ -202,6 +233,7 @@ async function track(p) {
   } catch (e) {
     busy--;
     setStatus(e.message, true);
+    if (/read token|401/.test(e.message)) needAuth();
     throw e;
   }
 }
@@ -491,7 +523,7 @@ const tables = {
 
 // What the API returns at most by default, and at most at all: past the
 // default, "load more" doubles the request.
-const limits = { flows: [1000, 100000], dns: [500, 50000], facts: [2000, 100000] };
+const limits = { flows: [1000, 100000], dns: [500, 50000], facts: [2000, 100000], wifi: [1000, 10000] };
 
 // addrKey sorts addresses by their numbers: 10.0.0.9 before 10.0.0.10.
 const addrKey = (ip) => {
@@ -804,7 +836,7 @@ async function openEntity(id, { anomaly } = {}) {
   const flagged = anomaly
     ? [anomaly.summary, ...Object.entries(anomaly.evidence || {}).map(([k, v]) => `${k}: ${v}`)]
     : state.graph?.nodes?.find((n) => n.id === id)?.attrs?.anomalies?.split("\n");
-  const anomalyBox = flagged ? `<div class="anomaly-box"><b>${anomaly ? `${esc(anomaly.severity)} ${esc(anomaly.kind.replaceAll("_", " "))}` : "Anomalies"}</b><ul>${flagged.map((l) => `<li>${esc(l)}</li>`).join("")}</ul></div>` : "";
+  const anomalyBox = flagged ? `<div class="anomaly-box"><b>${anomaly ? `${esc(anomaly.severity)} ${esc(anomaly.kind.replaceAll("_", " "))}` : "Anomalies"}</b><ul>${flagged.map((l) => `<li>${esc(l)}</li>`).join("")}</ul>${anomaly ? `<button type="button" id="mute-anomaly">Mute this for 1 hour</button>` : ""}</div>` : "";
   $("#panel-body").innerHTML = `${anomalyBox}
     <h2>${esc(d.label || d.key)}</h2>
     <div class="muted mono">${esc(d.id)}</div>${rename}
@@ -813,6 +845,19 @@ async function openEntity(id, { anomaly } = {}) {
     ${flows ? `<h3>Connections</h3><ul>${flows}</ul>` : ""}
     ${timeline ? `<h3>Timeline</h3><ul>${timeline}</ul>` : ""}
     <p><a data-filter="${esc(filterFor(d))}">Filter the window to this ${esc(d.kind)}</a></p>`;
+  $("#mute-anomaly")?.addEventListener("click", async (e) => {
+    e.target.disabled = true;
+    try {
+      await send("POST", "anomalies/mute", { kind: anomaly.kind, device: anomaly.device || "", entity: anomaly.entity || "",
+        until: Date.now() + 3600_000, note: "muted from web UI" });
+      setStatus("anomaly muted for 1 hour");
+      closePanel();
+      refresh();
+    } catch (err) {
+      e.target.disabled = false;
+      setStatus(err.message, true);
+    }
+  });
   const form = $("#panel-body form.rename");
   if (form) {
     const save = async (label) => {
@@ -1012,6 +1057,7 @@ function init() {
   }
   $("#g-top").onchange = () => { state.gopts.top = Number($("#g-top").value) || 15; refresh(); };
   $("#g-layout").onchange = () => { state.layout = $("#g-layout").value; refresh(); };
+  $("#connect").onclick = () => askToken().then((t) => { if (t) refresh(); });
   $("#g-fit").onclick = () => diagram.fit();
   $("#g-svg").onclick = () => { const svg = $("#diagram svg"); if (svg) download(`netgraph-${fileStamp()}.svg`, svg.outerHTML, "image/svg+xml"); };
   $("#g-d2").onclick = async () => {
