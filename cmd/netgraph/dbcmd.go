@@ -36,6 +36,9 @@ func runDB(args []string) error {
 	raw := fs.String("raw-retention", "14d", "retain: keep raw data this long")
 	rollup := fs.String("rollup-retention", "180d", "retain: keep rollups and facts this long")
 	asnFile := fs.String("asn-file", envOr("NETGRAPH_ASN_FILE", ""), "enrich: an iptoasn.com ip2asn-combined.tsv(.gz) (default: the table built into release binaries); $NETGRAPH_ASN_FILE")
+	dryRun := fs.Bool("dry-run", false, "purge/forget: count only, make no changes")
+	force := fs.Bool("force", false, "backup: replace an existing destination")
+	migrateBackup := fs.String("backup", "", "migrate: write a backup here before upgrading")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -50,6 +53,20 @@ func runDB(args []string) error {
 	cfg := store.Config{RawRetention: rawD, RollupRetention: rollD, Logger: quietLogger()}
 	switch cmd {
 	case "migrate":
+		if *migrateBackup != "" {
+			if _, statErr := os.Stat(*db); statErr == nil {
+				b, err := store.OpenBackup(*db, cfg)
+				if err != nil {
+					return err
+				}
+				err = b.Backup(context.Background(), *migrateBackup, store.BackupOptions{Force: *force})
+				b.Close()
+				if err != nil {
+					return err
+				}
+				fmt.Fprintf(os.Stderr, "backed up %s to %s\n", *db, *migrateBackup)
+			}
+		}
 		st, err := store.Open(*db, cfg)
 		if err != nil {
 			return err
@@ -64,7 +81,7 @@ func runDB(args []string) error {
 			return err
 		}
 		defer st.Close()
-		if err := st.Backup(context.Background(), fs.Arg(0)); err != nil {
+		if err := st.Backup(context.Background(), fs.Arg(0), store.BackupOptions{Force: *force}); err != nil {
 			return err
 		}
 		fmt.Fprintf(os.Stderr, "backed up %s to %s\n", *db, fs.Arg(0))
@@ -79,8 +96,8 @@ func runDB(args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "deleted: %d flow records, %d lookups, %d answers, %d observations, %d facts, %d rollup rows, %d entities, %d Wi-Fi handshakes\n",
-			r.Flows, r.DNS, r.Answers, r.Observations, r.Facts, r.Rollups, r.Entities, r.Handshakes)
+		fmt.Fprintf(os.Stderr, "deleted: %d flow records, %d lookups, %d answers, %d observations, %d facts, %d rollup rows, %d entities, %d Wi-Fi handshakes, %d mutes\n",
+			r.Flows, r.DNS, r.Answers, r.Observations, r.Facts, r.Rollups, r.Entities, r.Handshakes, r.Mutes)
 		return nil
 	case "purge":
 		if fs.NArg() != 1 {
@@ -95,12 +112,16 @@ func runDB(args []string) error {
 			return err
 		}
 		defer st.Close()
-		r, err := st.PurgeBefore(context.Background(), before)
+		r, err := st.PurgeBeforeWithOptions(context.Background(), before, store.PurgeOptions{DryRun: *dryRun})
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "deleted: %d flow records, %d connections, %d lookups, %d answers, %d observations, %d facts, %d rollup rows, %d entities, %d Wi-Fi records\n",
-			r.Flows, r.Connections, r.DNS, r.Answers, r.Observations, r.Facts, r.Rollups, r.Entities, r.Handshakes)
+		verb := "deleted"
+		if r.DryRun {
+			verb = "would delete"
+		}
+		fmt.Fprintf(os.Stderr, "%s: %d flow records, %d connections, %d lookups, %d answers, %d observations, %d facts, %d rollup rows, %d entities, %d Wi-Fi records, %d mutes\n",
+			verb, r.Flows, r.Connections, r.DNS, r.Answers, r.Observations, r.Facts, r.Rollups, r.Entities, r.Handshakes, r.Mutes)
 		return nil
 	case "forget":
 		if fs.NArg() != 1 {
@@ -111,12 +132,16 @@ func runDB(args []string) error {
 			return err
 		}
 		defer st.Close()
-		r, err := st.ForgetDevice(context.Background(), fs.Arg(0))
+		r, err := st.ForgetDeviceWithOptions(context.Background(), fs.Arg(0), store.ForgetOptions{DryRun: *dryRun})
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "forgot %s: %d connections, %d flow records, %d lookups, %d observations, %d facts, %d rollup rows, %d Wi-Fi records\n",
-			r.Device, r.Connections, r.Flows, r.DNS, r.Observations, r.Facts, r.Rollups, r.Handshakes+r.Groups)
+		verb := "forgot"
+		if r.DryRun {
+			verb = "would forget"
+		}
+		fmt.Fprintf(os.Stderr, "%s %s: %d connections, %d flow records, %d lookups, %d observations, %d facts, %d rollup rows, %d entities, %d Wi-Fi records, %d mutes\n",
+			verb, r.Device, r.Connections, r.Flows, r.DNS, r.Observations, r.Facts, r.Rollups, r.Entities, r.Handshakes+r.Groups, r.Mutes)
 		return nil
 	case "enrich":
 		var table *asn.DB

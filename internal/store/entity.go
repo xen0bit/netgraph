@@ -366,9 +366,10 @@ func (s *Store) Search(ctx context.Context, q string, limit int) ([]model.Search
 		args = append(args, k)
 	}
 	args = append(args, like, like, like, q, like, limit)
-	rows, err := s.r.QueryContext(ctx, `SELECT kind, key, label, last_seen, attrs FROM entities
+	rows, err := s.r.QueryContext(ctx, `SELECT kind, key, label, last_seen, attrs FROM entities e
 		WHERE kind IN (`+marks+`) AND (lower(key) LIKE ? || '%' ESCAPE '\' OR lower(label) LIKE '%' || ? || '%' ESCAPE '\'
 			OR (kind = 'device' AND json_valid(attrs) AND lower(coalesce(json_extract(attrs, '$.auto_label'), '')) LIKE '%' || ? || '%' ESCAPE '\'))
+			AND (kind = 'device' OR EXISTS (SELECT 1 FROM facts f WHERE f.src = e.id OR f.dst = e.id))
 		ORDER BY lower(key) = ? DESC, lower(key) LIKE ? || '%' ESCAPE '\' DESC, `+order+`, last_seen DESC LIMIT ?`, args...)
 	if err != nil {
 		return nil, err

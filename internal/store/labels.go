@@ -60,6 +60,10 @@ func (s *Store) SetDeviceLabel(ctx context.Context, mac, label string) error {
 			s.log.Error("rewarm ingest caches", "err", werr)
 		}
 	}
+	if err == nil {
+		// Anomaly summaries and alert payloads carry the old label.
+		s.invalidateAnomalies()
+	}
 	return err
 }
 

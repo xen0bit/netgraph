@@ -9,10 +9,13 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log/slog"
 	"net/url"
+	"os"
+	"path/filepath"
 	"runtime"
 	"sort"
 	"strconv"
@@ -98,19 +101,16 @@ type Store struct {
 	sub  *broker
 
 	anomMu  sync.Mutex
+	anomGen uint64 // bumped by invalidateAnomalies
 	anomKey string
 	anomAt  time.Time
 	anomRep *model.AnomalyReport
 }
 
-func dsn(path string, readOnly bool) string {
-	return dsnMode(path, readOnly, readOnly)
-}
-
-// dsnMode is dsn with explicit query_only control. A backup source is opened
-// read-only without query_only: VACUUM INTO reads the source but creates a
-// new file, which query_only would refuse.
-func dsnMode(path string, readOnly, queryOnly bool) string {
+// dsn opens path in WAL mode; queryOnly refuses writes. A backup source is
+// opened without query_only: VACUUM INTO reads the source but creates a new
+// file, which query_only would refuse.
+func dsn(path string, queryOnly bool) string {
 	q := url.Values{}
 	for _, p := range []string{"busy_timeout(10000)", "journal_mode(WAL)", "synchronous(NORMAL)", "foreign_keys(0)", "cache_size(-16000)", "temp_store(MEMORY)"} {
 		q.Add("_pragma", p)
@@ -210,7 +210,11 @@ func OpenReadOnly(path string, cfg Config) (*Store, error) {
 // can still be backed up before it is migrated.
 func OpenBackup(path string, cfg Config) (*Store, error) {
 	cfg.defaults()
-	r, err := sql.Open("sqlite", dsnMode(path, true, false))
+	// Without query_only, opening a missing path would create it.
+	if _, err := os.Stat(path); err != nil {
+		return nil, err
+	}
+	r, err := sql.Open("sqlite", dsn(path, false))
 	if err != nil {
 		return nil, err
 	}
@@ -245,10 +249,109 @@ func (s *Store) Close() error {
 // Path is the database file.
 func (s *Store) Path() string { return s.path }
 
+// BackupOptions controls an online backup.
+type BackupOptions struct {
+	// Force replaces an existing destination.
+	Force bool
+}
+
+// Backup writes a consistent copy of the database with VACUUM INTO. The
+// copy is made beside the destination and only renamed into place after an
+// integrity check, so an interrupted or corrupt backup leaves no partial
+// file that looks valid.
+func (s *Store) Backup(ctx context.Context, path string, opts ...BackupOptions) error {
+	force := len(opts) > 0 && opts[0].Force
+	if filepath.Clean(path) == filepath.Clean(s.path) {
+		return errors.New("backup destination is the open database")
+	}
+	if !force {
+		if _, err := os.Stat(path); err == nil {
+			return fmt.Errorf("%s exists (use -force to replace it)", path)
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	dir, base := filepath.Split(path)
+	if dir == "" {
+		dir = "."
+	}
+	tmp, err := os.CreateTemp(dir, "."+base+".tmp-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		_ = os.Remove(tmpName)
+		return err
+	}
+	// VACUUM INTO requires the destination not to exist.
+	if err := os.Remove(tmpName); err != nil {
+		return err
+	}
+	cleanup := true
+	defer func() {
+		if cleanup {
+			_ = os.Remove(tmpName)
+		}
+	}()
+	db := s.w
+	if db == nil {
+		db = s.r
+	}
+	if _, err := db.ExecContext(ctx, "VACUUM INTO ?", tmpName); err != nil {
+		return err
+	}
+	// A backup that cannot be opened and integrity-checked is not a backup.
+	// Plain read-only: dsn's journal_mode(WAL) would convert the copy and
+	// leave -wal/-shm files under the temporary name.
+	check, err := sql.Open("sqlite", "file:"+tmpName+"?mode=ro")
+	if err != nil {
+		return err
+	}
+	var result string
+	err = check.QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&result)
+	check.Close()
+	if err != nil {
+		return fmt.Errorf("backup integrity check: %w", err)
+	}
+	if result != "ok" {
+		return fmt.Errorf("backup integrity check: %s", result)
+	}
+	f, err := os.OpenFile(tmpName, os.O_RDWR, 0)
+	if err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmpName, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		if !force || runtime.GOOS != "windows" {
+			return err
+		}
+		// Windows cannot rename over an existing file.
+		if removeErr := os.Remove(path); removeErr != nil && !errors.Is(removeErr, os.ErrNotExist) {
+			return err
+		}
+		if err := os.Rename(tmpName, path); err != nil {
+			return err
+		}
+	}
+	cleanup = false
+	return nil
+}
+
 // invalidateAnomalies drops the short-lived anomaly report cache. New data
 // or a retention pass can change what a window finds.
 func (s *Store) invalidateAnomalies() {
 	s.anomMu.Lock()
+	s.anomGen++
 	s.anomRep = nil
 	s.anomKey = ""
 	s.anomMu.Unlock()
@@ -301,15 +404,6 @@ func (s *Store) migrate(ctx context.Context) error {
 }
 
 // Backup writes a consistent copy of the database to path.
-func (s *Store) Backup(ctx context.Context, path string) error {
-	db := s.w
-	if db == nil {
-		db = s.r
-	}
-	_, err := db.ExecContext(ctx, "VACUUM INTO ?", path)
-	return err
-}
-
 // Vacuum rebuilds the database file, reclaiming all free space.
 func (s *Store) Vacuum(ctx context.Context) error {
 	if s.w == nil {

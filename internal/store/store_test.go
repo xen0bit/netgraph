@@ -664,6 +664,7 @@ loop:
 		longest = max(longest, time.Since(t0))
 	}
 	pass := time.Since(start)
+	t.Logf("longest ingest wait %s of %s", longest, pass)
 	if r.Flows < 2*backlog {
 		t.Fatalf("retention deleted %d flow rows, want %d", r.Flows, 2*backlog)
 	}

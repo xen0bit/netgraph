@@ -226,6 +226,26 @@ func checkWebUI(t *testing.T, devtools, ui, token, shotDir string, expect []stri
 	if err != nil || !strings.Contains(learning, "Learning") {
 		t.Errorf("anomalies tab: %v %q", err, learning)
 	}
+
+	// A browser with no stored token gets one shared dialog, and entering
+	// the token recovers without a reload.
+	if token != "" {
+		err = chromedp.Run(ctx,
+			chromedp.Navigate(ui+"/healthz"),
+			chromedp.Evaluate(`localStorage.removeItem("netgraph.token")`, nil),
+			chromedp.Navigate(fmt.Sprintf("%s/#from=%d&to=%d", ui, now-2*3600*1000, now+60*1000)),
+			chromedp.WaitVisible(`#token-dialog[open]`, chromedp.ByQuery),
+			chromedp.SendKeys(`#token-input`, token, chromedp.ByQuery),
+			chromedp.Click(`#token-dialog button[value="ok"]`, chromedp.ByQuery),
+			chromedp.WaitVisible(`#diagram svg`, chromedp.ByQuery),
+			chromedp.Poll(`document.querySelector("#connect").hidden`, nil, chromedp.WithPollingTimeout(20*time.Second)),
+			shot("token-recovered"),
+		)
+		if err != nil {
+			t.Errorf("token dialog recovery: %v", err)
+		}
+	}
+
 	if len(consoleErrors) > 0 {
 		t.Errorf("page threw: %v", consoleErrors)
 	}

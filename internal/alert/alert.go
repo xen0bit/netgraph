@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -46,6 +47,8 @@ type Config struct {
 	// AnomalyCooldown suppresses a repeat of the same finding for this
 	// long (default 1h).
 	AnomalyCooldown time.Duration
+	// AnomalyKinds limits alerts to these finding kinds. Empty means all.
+	AnomalyKinds []string
 }
 
 // Payload is the JSON posted for one new device or anomaly.
@@ -127,6 +130,9 @@ func (n *Notifier) Notify(d store.NewDevice) {
 // page once a minute.
 func (n *Notifier) NotifyAnomaly(a model.Anomaly) {
 	if n.cfg.AnomalyMin == "" || model.SeverityRank(a.Severity) < model.SeverityRank(n.cfg.AnomalyMin) {
+		return
+	}
+	if len(n.cfg.AnomalyKinds) > 0 && !slices.Contains(n.cfg.AnomalyKinds, a.Kind) {
 		return
 	}
 	key := a.Kind + "|" + a.Device + "|" + a.Entity

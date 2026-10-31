@@ -46,12 +46,18 @@ type anomalyDevice struct {
 // A device filter keeps that device's anomalies; other filters are ignored.
 func (s *Store) Anomalies(ctx context.Context, f model.Filter) (*model.AnomalyReport, error) {
 	from, to := s.window(f)
+	// The cache lock is not held while the checks run: Ingest invalidates
+	// the cache on every batch and must not wait behind a slow report. A
+	// report computed while data changed is returned but not cached.
 	key := fmt.Sprintf("%d|%d|%s", from, to, f.Device)
 	s.anomMu.Lock()
-	defer s.anomMu.Unlock()
-	if s.anomRep != nil && s.anomKey == key && s.cfg.Now().Sub(s.anomAt) < 15*time.Second {
-		return s.anomRep, nil
+	if s.anomRep != nil && s.anomKey == key && s.cfg.Now().Sub(s.anomAt) < time.Minute {
+		rep := s.anomRep
+		s.anomMu.Unlock()
+		return rep, nil
 	}
+	gen := s.anomGen
+	s.anomMu.Unlock()
 	rep := &model.AnomalyReport{FromMS: from, ToMS: to, Anomalies: []model.Anomaly{}}
 	since, err := s.FirstSensorSeen(ctx)
 	if err != nil {
@@ -88,6 +94,20 @@ func (s *Store) Anomalies(ctx context.Context, f model.Filter) (*model.AnomalyRe
 		}
 		out = slices.DeleteFunc(out, func(x model.Anomaly) bool { return !keep[x.Device] })
 	}
+	mutes, err := s.AnomalyMutes(ctx, true)
+	if err != nil {
+		return nil, err
+	}
+	if len(mutes) > 0 {
+		out = slices.DeleteFunc(out, func(x model.Anomaly) bool {
+			for _, m := range mutes {
+				if muteMatches(m, x) {
+					return true
+				}
+			}
+			return false
+		})
+	}
 	slices.SortFunc(out, func(x, y model.Anomaly) int {
 		if c := cmp.Compare(model.SeverityRank(y.Severity), model.SeverityRank(x.Severity)); c != 0 {
 			return c
@@ -95,7 +115,11 @@ func (s *Store) Anomalies(ctx context.Context, f model.Filter) (*model.AnomalyRe
 		return cmp.Or(cmp.Compare(x.TS, y.TS), cmp.Compare(x.Kind, y.Kind), cmp.Compare(x.Device, y.Device), cmp.Compare(x.Entity, y.Entity))
 	})
 	rep.Anomalies = append(rep.Anomalies, out...)
-	s.anomKey, s.anomAt, s.anomRep = key, s.cfg.Now(), rep
+	s.anomMu.Lock()
+	if s.anomGen == gen {
+		s.anomKey, s.anomAt, s.anomRep = key, s.cfg.Now(), rep
+	}
+	s.anomMu.Unlock()
 	return rep, nil
 }
 

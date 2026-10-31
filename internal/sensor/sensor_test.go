@@ -458,3 +458,210 @@ func TestResolveInterface(t *testing.T) {
 		t.Fatal("found an interface for an address nobody holds")
 	}
 }
+
+func dnsResponseName(t *testing.T, name string) []byte {
+	t.Helper()
+	b := dnsmessage.NewBuilder(nil, dnsmessage.Header{Response: true, ID: 9})
+	if err := b.StartQuestions(); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.Question(dnsmessage.Question{Name: dnsmessage.MustNewName(name), Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.StartAnswers(); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.AResource(dnsmessage.ResourceHeader{Name: dnsmessage.MustNewName(name), Type: dnsmessage.TypeA, Class: dnsmessage.ClassINET, TTL: 60},
+		dnsmessage.AResource{A: testutil.ExampleIP.As4()}); err != nil {
+		t.Fatal(err)
+	}
+	msg, err := b.Finish()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return msg
+}
+
+func udpDNSPacket(msg []byte) []byte {
+	b := make([]byte, 8+len(msg))
+	binary.BigEndian.PutUint16(b[0:], 53)
+	binary.BigEndian.PutUint16(b[2:], 40000)
+	binary.BigEndian.PutUint16(b[4:], uint16(len(b)))
+	binary.BigEndian.PutUint16(b[6:], 0)
+	copy(b[8:], msg)
+	return b
+}
+
+func TestIPv4FragmentReassembly(t *testing.T) {
+	var out collector
+	p := NewProcessor(Config{}, &out)
+	msg := udpDNSPacket(dnsResponseName(t, "v4frag.example."))
+	mk := func(off int, more bool, part []byte) []byte {
+		eth := make([]byte, 14)
+		copy(eth[0:6], []byte{0x3c, 0x22, 0xfb, 0x01, 0x02, 0x03})
+		copy(eth[6:12], []byte{0xaa, 0xbb, 0xcc, 0x00, 0x00, 0x01})
+		binary.BigEndian.PutUint16(eth[12:], 0x0800)
+		ip := make([]byte, 20)
+		ip[0] = 0x45
+		binary.BigEndian.PutUint16(ip[2:], uint16(20+len(part)))
+		binary.BigEndian.PutUint16(ip[4:], 0x1234)
+		flags := uint16(off / 8)
+		if more {
+			flags |= 0x2000
+		}
+		binary.BigEndian.PutUint16(ip[6:], flags)
+		ip[8], ip[9] = 64, 17
+		copy(ip[12:16], testutil.Router.IP.AsSlice())
+		copy(ip[16:20], testutil.Phone.IP.AsSlice())
+		return append(append(eth, ip...), part...)
+	}
+	p.Handle(testutil.Base, mk(0, true, msg[:16]), capture.LinkEthernet)
+	p.Handle(testutil.Base.Add(time.Millisecond), mk(16, false, msg[16:]), capture.LinkEthernet)
+	var got *wire.DNS
+	for _, e := range out.of(wire.TypeDNS) {
+		if e.DNS != nil && e.DNS.QName == "v4frag.example" {
+			got = e.DNS
+		}
+	}
+	if got == nil || len(got.Answers) != 1 {
+		t.Fatalf("fragmented DNS event = %+v", got)
+	}
+}
+
+func TestIPv6FragmentReassembly(t *testing.T) {
+	var out collector
+	p := NewProcessor(Config{}, &out)
+	msg := udpDNSPacket(dnsResponseName(t, "v6frag.example."))
+	mk := func(off int, more bool, part []byte) []byte {
+		eth := make([]byte, 14)
+		copy(eth[0:6], []byte{0x3c, 0x22, 0xfb, 0x01, 0x02, 0x03})
+		copy(eth[6:12], []byte{0xaa, 0xbb, 0xcc, 0x00, 0x00, 0x01})
+		binary.BigEndian.PutUint16(eth[12:], 0x86dd)
+		ip := make([]byte, 48)
+		ip[0] = 0x60
+		binary.BigEndian.PutUint16(ip[4:], uint16(8+len(part)))
+		ip[6] = 44
+		ip[7] = 64
+		src16, dst16 := testutil.Router.IP.As16(), testutil.Phone.IP.As16()
+		copy(ip[8:24], src16[:])
+		copy(ip[24:40], dst16[:])
+		ip[40] = 17
+		f := uint16(off)
+		if more {
+			f |= 1
+		}
+		binary.BigEndian.PutUint16(ip[42:], f)
+		binary.BigEndian.PutUint32(ip[44:], 0x12345678)
+		return append(append(eth, ip...), part...)
+	}
+	p.Handle(testutil.Base, mk(0, true, msg[:16]), capture.LinkEthernet)
+	p.Handle(testutil.Base.Add(time.Millisecond), mk(16, false, msg[16:]), capture.LinkEthernet)
+	var got *wire.DNS
+	for _, e := range out.of(wire.TypeDNS) {
+		if e.DNS != nil && e.DNS.QName == "v6frag.example" {
+			got = e.DNS
+		}
+	}
+	if got == nil || len(got.Answers) != 1 {
+		t.Fatalf("fragmented IPv6 DNS event = %+v", got)
+	}
+}
+
+func tcpDNSSegment(seq uint32, part []byte) []byte {
+	eth := make([]byte, 14)
+	copy(eth[0:6], []byte{0x3c, 0x22, 0xfb, 0x01, 0x02, 0x03})
+	copy(eth[6:12], []byte{0xaa, 0xbb, 0xcc, 0x00, 0x00, 0x01})
+	binary.BigEndian.PutUint16(eth[12:], 0x0800)
+	ip := make([]byte, 20)
+	ip[0] = 0x45
+	binary.BigEndian.PutUint16(ip[2:], uint16(40+len(part)))
+	ip[8], ip[9] = 64, 6
+	copy(ip[12:16], testutil.Router.IP.AsSlice())
+	copy(ip[16:20], testutil.Phone.IP.AsSlice())
+	tcp := make([]byte, 20)
+	binary.BigEndian.PutUint16(tcp[0:], 53)
+	binary.BigEndian.PutUint16(tcp[2:], 40000)
+	binary.BigEndian.PutUint32(tcp[4:], seq)
+	tcp[12] = 0x50
+	tcp[13] = 0x18
+	return append(append(append(eth, ip...), tcp...), part...)
+}
+
+func TestDNSOverTCPOutOfOrder(t *testing.T) {
+	var out collector
+	p := NewProcessor(Config{}, &out)
+	msg := dnsResponseName(t, "reorder.example.")
+	payload := make([]byte, 2+len(msg))
+	binary.BigEndian.PutUint16(payload, uint16(len(msg)))
+	copy(payload[2:], msg)
+	p.Handle(testutil.Base, tcpDNSSegment(1005, payload[5:]), capture.LinkEthernet)
+	p.Handle(testutil.Base.Add(time.Millisecond), tcpDNSSegment(1000, payload[:5]), capture.LinkEthernet)
+	var got *wire.DNS
+	for _, e := range out.of(wire.TypeDNS) {
+		if e.DNS != nil && e.DNS.QName == "reorder.example" {
+			got = e.DNS
+		}
+	}
+	if got == nil || len(got.Answers) != 1 {
+		t.Fatalf("out-of-order DNS event = %+v", got)
+	}
+}
+
+// Overlapping fragments are placed at their offsets, not concatenated.
+func TestIPv4FragmentOverlap(t *testing.T) {
+	var out collector
+	p := NewProcessor(Config{}, &out)
+	msg := udpDNSPacket(dnsResponseName(t, "overlap.example."))
+	mk := func(off int, more bool, part []byte) []byte {
+		eth := make([]byte, 14)
+		copy(eth[0:6], []byte{0x3c, 0x22, 0xfb, 0x01, 0x02, 0x03})
+		copy(eth[6:12], []byte{0xaa, 0xbb, 0xcc, 0x00, 0x00, 0x01})
+		binary.BigEndian.PutUint16(eth[12:], 0x0800)
+		ip := make([]byte, 20)
+		ip[0] = 0x45
+		binary.BigEndian.PutUint16(ip[2:], uint16(20+len(part)))
+		binary.BigEndian.PutUint16(ip[4:], 0x4321)
+		flags := uint16(off / 8)
+		if more {
+			flags |= 0x2000
+		}
+		binary.BigEndian.PutUint16(ip[6:], flags)
+		ip[8], ip[9] = 64, 17
+		copy(ip[12:16], testutil.Router.IP.AsSlice())
+		copy(ip[16:20], testutil.Phone.IP.AsSlice())
+		return append(append(eth, ip...), part...)
+	}
+	p.Handle(testutil.Base, mk(0, true, msg[:24]), capture.LinkEthernet)
+	p.Handle(testutil.Base.Add(time.Millisecond), mk(16, false, msg[16:]), capture.LinkEthernet)
+	var got *wire.DNS
+	for _, e := range out.of(wire.TypeDNS) {
+		if e.DNS != nil && e.DNS.QName == "overlap.example" {
+			got = e.DNS
+		}
+	}
+	if got == nil || len(got.Answers) != 1 {
+		t.Fatalf("overlapping fragments: dns event = %+v", got)
+	}
+}
+
+// A retransmitted segment of a message already decoded is not decoded again.
+func TestDNSOverTCPRetransmission(t *testing.T) {
+	var out collector
+	p := NewProcessor(Config{}, &out)
+	msg := dnsResponseName(t, "retx.example.")
+	payload := make([]byte, 2+len(msg))
+	binary.BigEndian.PutUint16(payload, uint16(len(msg)))
+	copy(payload[2:], msg)
+	p.Handle(testutil.Base, tcpDNSSegment(1000, payload), capture.LinkEthernet)
+	p.Handle(testutil.Base.Add(time.Millisecond), tcpDNSSegment(1000, payload), capture.LinkEthernet)
+	p.Handle(testutil.Base.Add(2*time.Millisecond), tcpDNSSegment(1000, payload[:7]), capture.LinkEthernet)
+	n := 0
+	for _, e := range out.of(wire.TypeDNS) {
+		if e.DNS != nil && e.DNS.QName == "retx.example" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("retransmitted DNS message decoded %d times, want 1", n)
+	}
+}

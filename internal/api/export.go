@@ -16,69 +16,80 @@ import (
 
 // export serves every field of one table as CSV, for the rows the window
 // selects. It exists so a large window does not depend on how many rows the
-// web UI happened to load; the CSV writer streams to the response.
+// web UI happened to load; each row is written as the database produces it.
 func (s *Server) export(w http.ResponseWriter, r *http.Request) {
 	f, ok := s.filter(w, r)
 	if !ok {
 		return
 	}
 	kind := r.URL.Query().Get("kind")
-	var (
-		rows any
-		err  error
-		max  int
-	)
+	ctx := r.Context()
+	max := 0
 	switch kind {
+	case "":
+		kind = "flows"
+		fallthrough
+	case "flows":
+		max = 100000
+		f.Limit = exportLimit(f.Limit, max)
 	case "devices":
 		max = 100000
 		f.Limit = exportLimit(f.Limit, max)
-		var v []model.Device
-		v, err = s.cfg.Store.Devices(r.Context(), f)
-		rows = v
-	case "flows", "":
-		kind, max = "flows", 100000
-		f.Limit = exportLimit(f.Limit, max)
-		var v []model.Flow
-		v, err = s.cfg.Store.Flows(r.Context(), f)
-		rows = v
 	case "dns":
 		max = 50000
 		f.Limit = exportLimit(f.Limit, max)
-		var v []model.DNSQuery
-		v, err = s.cfg.Store.DNS(r.Context(), f)
-		rows = v
 	case "facts":
 		max = 100000
 		f.Limit = exportLimit(f.Limit, max)
-		var v []model.Fact
-		v, err = s.cfg.Store.Facts(r.Context(), f)
-		rows = v
 	case "anomalies":
-		var rep *model.AnomalyReport
-		rep, err = s.cfg.Store.Anomalies(r.Context(), f)
-		if rep != nil {
-			rows = rep.Anomalies
-		} else {
-			rows = []model.Anomaly{}
-		}
 	case "wifi":
 		max = 10000
 		f.Limit = exportLimit(f.Limit, max)
-		var v []model.WiFiNetwork
-		v, err = s.cfg.Store.WiFi(r.Context(), f)
-		rows = v
 	default:
 		httpError(w, http.StatusBadRequest, fmt.Errorf("unknown export kind %q (devices, flows, dns, facts, anomalies, wifi)", kind))
 		return
 	}
-	if err != nil {
-		s.fail(w, err)
-		return
-	}
+
 	w.Header().Set("Content-Type", "text/csv; charset=utf-8")
 	w.Header().Set("Content-Disposition", `attachment; filename="netgraph-`+kind+`.csv"`)
+	w.Header().Set("Cache-Control", "no-store")
 	cw := csv.NewWriter(w)
-	if err := writeCSV(r.Context(), cw, rows); err != nil {
+	var err error
+	switch kind {
+	case "devices":
+		var rows []model.Device
+		rows, err = s.cfg.Store.Devices(ctx, f)
+		if err == nil {
+			err = writeCSV(ctx, cw, rows)
+		}
+	case "flows":
+		err = writeCSVEach(ctx, cw, func(yield func(model.Flow) error) error {
+			return s.cfg.Store.WalkFlows(ctx, f, yield)
+		})
+	case "dns":
+		err = writeCSVEach(ctx, cw, func(yield func(model.DNSQuery) error) error {
+			return s.cfg.Store.WalkDNS(ctx, f, yield)
+		})
+	case "facts":
+		err = writeCSVEach(ctx, cw, func(yield func(model.Fact) error) error {
+			return s.cfg.Store.WalkFacts(ctx, f, yield)
+		})
+	case "wifi":
+		err = writeCSVEach(ctx, cw, func(yield func(model.WiFiNetwork) error) error {
+			return s.cfg.Store.WalkWiFi(ctx, f, yield)
+		})
+	case "anomalies":
+		var rep *model.AnomalyReport
+		rep, err = s.cfg.Store.Anomalies(ctx, f)
+		if err == nil {
+			var rows []model.Anomaly
+			if rep != nil {
+				rows = rep.Anomalies
+			}
+			err = writeCSV(ctx, cw, rows)
+		}
+	}
+	if err != nil {
 		s.log.Error("export csv", "kind", kind, "err", err)
 	}
 	cw.Flush()
@@ -91,18 +102,27 @@ func exportLimit(n, max int) int {
 	return n
 }
 
-// writeCSV writes a slice of structs as CSV: one column per json field, in
-// struct order. Times are ISO 8601; text a spreadsheet would evaluate as a
-// formula is prefixed with a quote.
-func writeCSV(ctx context.Context, cw *csv.Writer, rows any) error {
+// writeCSV writes a slice of structs as CSV.
+func writeCSV[T any](ctx context.Context, cw *csv.Writer, rows []T) error {
+	return writeCSVEach(ctx, cw, func(yield func(T) error) error {
+		for _, row := range rows {
+			if err := yield(row); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// writeCSVEach writes a sequence of structs as CSV: one column per json field,
+// in struct order. Times are ISO 8601; text a spreadsheet would evaluate as a
+// formula is prefixed with a quote. The callback lets the caller stream rows
+// from the database without retaining them.
+func writeCSVEach[T any](ctx context.Context, cw *csv.Writer, walk func(func(T) error) error) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	rv := reflect.ValueOf(rows)
-	if rv.Kind() != reflect.Slice {
-		return fmt.Errorf("export: %T is not a slice", rows)
-	}
-	t := rv.Type().Elem()
+	t := reflect.TypeOf((*T)(nil)).Elem()
 	for t.Kind() == reflect.Pointer {
 		t = t.Elem()
 	}
@@ -129,20 +149,23 @@ func writeCSV(ctx context.Context, cw *csv.Writer, rows any) error {
 	if err := cw.Write(names); err != nil {
 		return err
 	}
-	for i := 0; i < rv.Len(); i++ {
-		if i%1024 == 0 {
+	n := 0
+	err := walk(func(row T) error {
+		if n%1024 == 0 {
 			if err := ctx.Err(); err != nil {
 				return err
 			}
 		}
-		v := rv.Index(i)
+		n++
+		v := reflect.ValueOf(row)
 		rec := make([]string, len(fields))
 		for j, f := range fields {
 			rec[j] = csvValue(names[j], v.FieldByIndex(f.Index))
 		}
-		if err := cw.Write(rec); err != nil {
-			return err
-		}
+		return cw.Write(rec)
+	})
+	if err != nil {
+		return err
 	}
 	return cw.Error()
 }
@@ -172,10 +195,13 @@ func csvValue(name string, v reflect.Value) string {
 		return strconv.FormatBool(v.Bool())
 	case reflect.String:
 		return csvText(v.String())
-	case reflect.Slice, reflect.Map, reflect.Array:
+	case reflect.Slice:
 		if v.Type().Elem().Kind() == reflect.Uint8 {
 			return string(v.Bytes())
 		}
+		b, _ := json.Marshal(v.Interface())
+		return csvText(string(b))
+	case reflect.Map, reflect.Array, reflect.Struct:
 		b, _ := json.Marshal(v.Interface())
 		return csvText(string(b))
 	default:
@@ -192,10 +218,18 @@ func isTimeField(name string) bool {
 	return false
 }
 
-// csvText neutralises a cell a spreadsheet could run as a formula.
+// csvText neutralises a cell a spreadsheet could run as a formula, including
+// one hidden behind leading whitespace.
 func csvText(s string) string {
-	if s != "" && strings.ContainsRune("=+-@\t\r", rune(s[0])) {
-		return "'" + s
+	for _, c := range s {
+		switch c {
+		case ' ', '\t', '\r', '\n':
+			continue
+		case '=', '+', '-', '@':
+			return "'" + s
+		default:
+			return s
+		}
 	}
 	return s
 }

@@ -61,6 +61,7 @@ type Processor struct {
 	pending    map[dnsKey]pendingQuery
 	seen       map[uint64]time.Time
 	tcpStreams map[tcpKey]*tcpStream
+	fragPkts   map[packetKey]*packetState
 
 	packets, bytes, decodeErrors, pendingDropped atomic.Uint64
 }
@@ -84,9 +85,38 @@ type tcpKey struct {
 }
 
 type tcpStream struct {
-	buf  []byte
-	next uint32
-	last time.Time
+	start uint32
+	buf   []byte
+	next  uint32
+	segs  map[uint32][]byte // out-of-order segments, bounded
+	size  int
+	last  time.Time
+	// consumed is set once a message was decoded: bytes before start are
+	// then retransmissions, not a segment that arrived early.
+	consumed bool
+}
+
+const (
+	tcpFIN = 0x01
+	tcpRST = 0x04
+
+	maxTCPStreams = 1024
+)
+
+type packetKey struct {
+	src, dst netip.Addr
+	id       uint32
+	proto    uint8
+	v6       bool
+}
+
+type packetState struct {
+	first   *frame
+	parts   map[int][]byte
+	total   int
+	end     int
+	haveEnd bool
+	last    time.Time
 }
 
 // NewProcessor returns a processor emitting to out.
@@ -110,7 +140,7 @@ func NewProcessor(cfg Config, out wire.Emitter) *Processor {
 		cfg.IsLocal = LocalAddr
 	}
 	p := &Processor{cfg: cfg, out: out, log: cfg.Logger, rdns: cfg.RDNS, wifi: cfg.WiFi, pending: map[dnsKey]pendingQuery{},
-		seen: map[uint64]time.Time{}, tcpStreams: map[tcpKey]*tcpStream{}}
+		seen: map[uint64]time.Time{}, tcpStreams: map[tcpKey]*tcpStream{}, fragPkts: map[packetKey]*packetState{}}
 	if p.wifi != nil {
 		p.wifi.SetData(func(ts time.Time, eth []byte) {
 			// A decrypted 802.11 data frame is an Ethernet frame: the
@@ -179,6 +209,115 @@ func (p *Processor) handleEthernet(ts time.Time, data []byte, link int) {
 	if !f.ipValid {
 		return
 	}
+	if f.fragmented {
+		p.reassemble(ts, &f, mac)
+		return
+	}
+	p.processFrame(ts, &f, mac)
+}
+
+// reassemble joins IPv4/IPv6 fragments. Fragments are keyed by addresses,
+// identification and protocol; a bounded cache drops a partial datagram
+// after 30 seconds or when it grows too large. Only a complete datagram is
+// passed to flow/DNS/application decoding.
+func (p *Processor) reassemble(ts time.Time, f *frame, mac string) {
+	key := packetKey{src: f.src, dst: f.dst, id: f.fragID, proto: f.fragProto, v6: f.v6}
+	if !f.v6 {
+		key.proto = f.proto
+	}
+	off := f.fragOff
+	if off < 0 || off > 65535 {
+		return
+	}
+	p.mu.Lock()
+	st := p.fragPkts[key]
+	if st == nil {
+		st = &packetState{parts: map[int][]byte{}}
+		p.fragPkts[key] = st
+	}
+	st.last = ts
+	if off == 0 {
+		// Keep the headers, not the slices: they alias the capture
+		// buffer, which the next packet overwrites.
+		cp := *f
+		cp.l3, cp.l4, cp.payload = nil, nil, nil
+		cp.ipLen -= len(f.l4) // just the header length
+		st.first = &cp
+	}
+	if _, dup := st.parts[off]; !dup {
+		part := append([]byte(nil), f.l4...)
+		st.parts[off] = part
+		st.total += len(part)
+	}
+	if !f.fragMore {
+		st.end = off + len(f.l4)
+		st.haveEnd = true
+	}
+	if st.total > 65535 || st.end > 65535 || len(st.parts) > 128 || len(p.fragPkts) > 1024 {
+		delete(p.fragPkts, key)
+		p.mu.Unlock()
+		return
+	}
+	complete := st.first != nil && st.haveEnd
+	var assembled []byte
+	if complete {
+		offs := make([]int, 0, len(st.parts))
+		for o := range st.parts {
+			offs = append(offs, o)
+		}
+		sort.Ints(offs)
+		covered := 0
+		for _, o := range offs {
+			if o > covered {
+				complete = false
+				break
+			}
+			if end := o + len(st.parts[o]); end > covered {
+				covered = end
+			}
+		}
+		if covered < st.end {
+			complete = false
+		}
+		if complete {
+			// Fragments may overlap (legitimately after a
+			// retransmission, or crafted): place each at its
+			// offset rather than concatenating them. Written from
+			// the highest offset down, the lower-offset fragment's
+			// bytes win an overlap.
+			assembled = make([]byte, st.end)
+			for i := len(offs) - 1; i >= 0; i-- {
+				if o := offs[i]; o < st.end {
+					copy(assembled[o:], st.parts[o])
+				}
+			}
+		}
+	}
+	if !complete {
+		p.mu.Unlock()
+		return
+	}
+	first := *st.first
+	delete(p.fragPkts, key)
+	p.mu.Unlock()
+
+	headerLen := max(first.ipLen, 0)
+	full := first
+	full.l4 = assembled
+	full.ipLen = headerLen + len(assembled)
+	full.frag = false
+	full.fragmented = false
+	full.fragMore = false
+	full.fragOff = 0
+	full.payload = nil
+	full.sport, full.dport, full.seq, full.tcpFlags = 0, 0, 0, 0
+	parseL4(&full)
+	p.processFrame(ts, &full, mac)
+}
+
+// processFrame feeds a complete (possibly reassembled) IP packet through
+// flow accounting and the application decoders.
+func (p *Processor) processFrame(ts time.Time, f *frame, mac string) {
 	src := netip.AddrPortFrom(f.src, f.sport)
 	dst := netip.AddrPortFrom(f.dst, f.dport)
 	if p.cfg.Ignore != nil && p.cfg.Ignore(src, dst) {
@@ -212,10 +351,10 @@ func (p *Processor) handleEthernet(ts time.Time, data []byte, link int) {
 	}
 	switch f.proto {
 	case flow.ProtoUDP:
-		p.udp(ts, &f, mac)
+		p.udp(ts, f, mac)
 	case flow.ProtoTCP:
 		if f.sport == 53 || f.dport == 53 {
-			p.tcpDNS(ts, &f, mac)
+			p.tcpDNS(ts, f, mac)
 		}
 	}
 }
@@ -276,36 +415,91 @@ func (p *Processor) udp(ts time.Time, f *frame, mac string) {
 
 // tcpDNS reassembles the byte stream on a TCP/53 connection, so a message
 // split across segments (or several messages in one segment) is decoded.
-// Gaps and retransmissions are handled by trimming or resetting the stream;
-// a DNS message is at most 65535 bytes.
+// Out-of-order segments are held in a small bounded window. A stream stays
+// known until FIN/RST or two idle minutes, so a retransmission of data
+// already decoded is trimmed rather than decoded twice. A DNS message is at
+// most 65535 bytes.
 func (p *Processor) tcpDNS(ts time.Time, f *frame, mac string) {
-	if len(f.payload) == 0 {
-		return
-	}
 	key := tcpKey{src: netip.AddrPortFrom(f.src, f.sport), dst: netip.AddrPortFrom(f.dst, f.dport)}
+	closing := f.tcpFlags&(tcpFIN|tcpRST) != 0
 	p.mu.Lock()
 	st := p.tcpStreams[key]
-	if st == nil {
-		st = &tcpStream{next: f.seq}
-		p.tcpStreams[key] = st
+	if len(f.payload) == 0 {
+		if closing && st != nil {
+			delete(p.tcpStreams, key)
+		}
+		p.mu.Unlock()
+		return
 	}
-	b := f.payload
-	if d := int32(f.seq - st.next); d < 0 {
-		if int(-d) >= len(b) {
+	if st == nil {
+		if closing || len(p.tcpStreams) >= maxTCPStreams {
+			// No state to keep (or no room): decode the whole messages
+			// this segment holds, as a stateless decoder would.
 			p.mu.Unlock()
+			for _, msg := range splitTCPDNS(f.payload) {
+				p.dnsMessage(ts, f, mac, msg, flow.ProtoTCP)
+			}
 			return
 		}
-		b = b[-d:]
-	} else if d > 0 {
-		// A gap would poison every later message: start over at this
-		// segment rather than decoding shifted bytes.
-		st.buf = st.buf[:0]
-		st.next = f.seq
+		st = &tcpStream{start: f.seq, next: f.seq, segs: map[uint32][]byte{}}
+		p.tcpStreams[key] = st
 	}
-	st.buf = append(st.buf, b...)
-	st.next += uint32(len(b))
 	st.last = ts
-	if len(st.buf) > 128<<10 || len(p.tcpStreams) > 1024 {
+	b, seq := f.payload, f.seq
+	if d := int32(seq - st.start); d < 0 {
+		before := int(-d)
+		switch {
+		case st.consumed || before > len(b):
+			// Already decoded (a retransmission), or a gap before
+			// the stream's first byte that can never be filled.
+			if before >= len(b) {
+				p.mu.Unlock()
+				return
+			}
+			b, seq = b[before:], st.start
+		default:
+			// The stream was first seen mid-message and this segment
+			// came before it: prepend the bytes before start.
+			st.buf = append(append([]byte(nil), b[:before]...), st.buf...)
+			st.start = seq
+			b, seq = b[before:], seq+uint32(before)
+		}
+	}
+	switch {
+	case int32(seq-st.next) < 0:
+		// Retransmission overlapping data already held.
+		skip := int(st.next - seq)
+		if skip < len(b) {
+			st.buf = append(st.buf, b[skip:]...)
+		}
+	case seq != st.next:
+		// Hold the segment until the gap is filled. A small bounded
+		// reorder window keeps out-of-order TCP from losing a query
+		// without letting a broken peer grow the map forever.
+		if _, ok := st.segs[seq]; !ok {
+			st.segs[seq] = append([]byte(nil), b...)
+			st.size += len(b)
+		}
+		if st.size > 128<<10 || len(st.segs) > 256 {
+			delete(p.tcpStreams, key)
+		}
+		p.mu.Unlock()
+		return
+	default:
+		st.buf = append(st.buf, b...)
+	}
+	st.next = st.start + uint32(len(st.buf))
+	for {
+		next, ok := st.segs[st.next]
+		if !ok {
+			break
+		}
+		delete(st.segs, st.next)
+		st.size -= len(next)
+		st.buf = append(st.buf, next...)
+		st.next += uint32(len(next))
+	}
+	if len(st.buf) > 128<<10 {
 		delete(p.tcpStreams, key)
 		p.mu.Unlock()
 		return
@@ -318,14 +512,30 @@ func (p *Processor) tcpDNS(ts time.Time, f *frame, mac string) {
 		}
 		msgs = append(msgs, append([]byte(nil), st.buf[2:2+l]...))
 		st.buf = st.buf[2+l:]
+		st.start += uint32(2 + l)
+		st.consumed = true
 	}
-	if len(st.buf) == 0 {
+	if closing {
 		delete(p.tcpStreams, key)
 	}
 	p.mu.Unlock()
 	for _, msg := range msgs {
 		p.dnsMessage(ts, f, mac, msg, flow.ProtoTCP)
 	}
+}
+
+// splitTCPDNS returns the whole length-prefixed messages in one segment.
+func splitTCPDNS(b []byte) [][]byte {
+	var out [][]byte
+	for len(b) >= 2 {
+		l := int(binary.BigEndian.Uint16(b))
+		if l == 0 || 2+l > len(b) {
+			break
+		}
+		out = append(out, b[2:2+l])
+		b = b[2+l:]
+	}
+	return out
 }
 
 func (p *Processor) dnsMessage(ts time.Time, f *frame, mac string, b []byte, proto uint8) {
@@ -452,6 +662,11 @@ func (p *Processor) Tick(now time.Time) {
 	for k, st := range p.tcpStreams {
 		if now.Sub(st.last) >= 2*time.Minute {
 			delete(p.tcpStreams, k)
+		}
+	}
+	for k, st := range p.fragPkts {
+		if now.Sub(st.last) >= 30*time.Second || len(p.fragPkts) > 1024 {
+			delete(p.fragPkts, k)
 		}
 	}
 	p.mu.Unlock()

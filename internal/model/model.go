@@ -553,6 +553,18 @@ type AnomalyReport struct {
 	Anomalies []Anomaly `json:"anomalies"`
 }
 
+// AnomalyMute suppresses matching findings until Until (ms). Empty Kind,
+// Device or Entity fields are wildcards; the API/UI normally sets all three
+// for one finding.
+type AnomalyMute struct {
+	Kind    string `json:"kind,omitempty"`
+	Device  string `json:"device,omitempty"`
+	Entity  string `json:"entity,omitempty"`
+	Until   int64  `json:"until"`
+	Note    string `json:"note,omitempty"`
+	Created int64  `json:"created,omitempty"`
+}
+
 // WiFiNetwork is one SSID an access point was seen broadcasting. It exists
 // only when a monitor-mode sensor with Wi-Fi support has reported it.
 type WiFiNetwork struct {

@@ -96,18 +96,104 @@ func New(cfg Config) *Server {
 	read("/api/v1/sensors", s.sensors)
 	read("/api/v1/wifi", s.wifi)
 	read("/api/v1/anomalies", s.anomalies)
+	read("/api/v1/anomalies/mutes", s.anomalyMutes)
 	read("/api/v1/search", s.search)
 	read("/api/v1/export", s.export)
 	s.mux.Handle("GET /api/v1/live", s.requireLive(http.HandlerFunc(s.live)))
 	read("/metrics", s.metrics)
 	s.mux.Handle("PUT /api/v1/devices/{mac}/label", s.requireRead(http.HandlerFunc(s.setLabel)))
+	s.mux.Handle("POST /api/v1/anomalies/mute", s.requireRead(http.HandlerFunc(s.muteAnomaly)))
+	s.mux.Handle("DELETE /api/v1/anomalies/mute", s.requireRead(http.HandlerFunc(s.unmuteAnomaly)))
 	s.mux.HandleFunc("GET /", s.web)
 	return s
 }
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
-	s.mux.ServeHTTP(w, r)
+	if r.URL.Path == "/api/v1/live" || !acceptsGzip(r) {
+		s.mux.ServeHTTP(w, r)
+		return
+	}
+	w.Header().Set("Vary", "Accept-Encoding")
+	gz := &gzipResponseWriter{ResponseWriter: w, head: r.Method == http.MethodHead}
+	defer gz.Close()
+	s.mux.ServeHTTP(gz, r)
+}
+
+func acceptsGzip(r *http.Request) bool {
+	for _, part := range strings.Split(r.Header.Get("Accept-Encoding"), ",") {
+		fields := strings.Split(part, ";")
+		if strings.TrimSpace(fields[0]) != "gzip" {
+			continue
+		}
+		for _, q := range fields[1:] {
+			q = strings.TrimSpace(q)
+			if strings.HasPrefix(q, "q=") && strings.TrimPrefix(q, "q=") == "0" {
+				return false
+			}
+		}
+		return true
+	}
+	return false
+}
+
+// gzipResponseWriter compresses ordinary responses, but not SSE, HEAD or a
+// representation that already has a Content-Encoding (the web WASM asset is
+// stored gzipped).
+type gzipResponseWriter struct {
+	http.ResponseWriter
+	gz      *gzip.Writer
+	wrote   bool
+	encoded bool
+	skip    bool
+	head    bool
+}
+
+// Unwrap lets http.ResponseController reach the connection.
+func (g *gzipResponseWriter) Unwrap() http.ResponseWriter { return g.ResponseWriter }
+
+func (g *gzipResponseWriter) WriteHeader(code int) {
+	if g.wrote {
+		return
+	}
+	g.wrote = true
+	h := g.Header()
+	ct := h.Get("Content-Type")
+	g.skip = g.head || code == http.StatusNoContent || code == http.StatusNotModified ||
+		h.Get("Content-Encoding") != "" || strings.HasPrefix(ct, "text/event-stream")
+	if !g.skip {
+		h.Set("Content-Encoding", "gzip")
+		h.Del("Content-Length")
+		g.encoded = true
+		g.gz = gzip.NewWriter(g.ResponseWriter)
+	}
+	g.ResponseWriter.WriteHeader(code)
+}
+
+func (g *gzipResponseWriter) Write(p []byte) (int, error) {
+	if !g.wrote {
+		g.WriteHeader(http.StatusOK)
+	}
+	if g.encoded {
+		return g.gz.Write(p)
+	}
+	return g.ResponseWriter.Write(p)
+}
+
+func (g *gzipResponseWriter) Flush() {
+	if g.gz != nil {
+		_ = g.gz.Flush()
+	}
+	if f, ok := g.ResponseWriter.(http.Flusher); ok {
+		f.Flush()
+	}
+}
+
+func (g *gzipResponseWriter) Close() error {
+	if g.gz != nil {
+		return g.gz.Close()
+	}
+	return nil
 }
 
 func tokenOK(r *http.Request, want string) bool {
@@ -326,6 +412,46 @@ func (s *Server) wifiKeys(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	writeJSON(w, out)
+}
+
+// anomalyMutes lists the mutes in force.
+func (s *Server) anomalyMutes(w http.ResponseWriter, r *http.Request) {
+	m, err := s.cfg.Store.AnomalyMutes(r.Context(), true)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, map[string]any{"mutes": m})
+}
+
+// muteAnomaly creates or replaces a mute. Like setLabel it requires a JSON
+// body, so a cross-origin form cannot post one without a preflight.
+func (s *Server) muteAnomaly(w http.ResponseWriter, r *http.Request) {
+	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		httpError(w, http.StatusUnsupportedMediaType, errors.New("expected application/json"))
+		return
+	}
+	var body model.AnomalyMute
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.cfg.Store.SetAnomalyMute(r.Context(), body); err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
+}
+
+// unmuteAnomaly removes one mute. DELETE is never a simple cross-origin
+// request, so it needs no body check.
+func (s *Server) unmuteAnomaly(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	if err := s.cfg.Store.DeleteAnomalyMute(r.Context(), q.Get("kind"), q.Get("device"), q.Get("entity")); err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, map[string]bool{"ok": true})
 }
 
 // setLabel names a device by hand ({"label": ""} clears the name). It is

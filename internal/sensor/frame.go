@@ -25,12 +25,18 @@ type frame struct {
 	etherType      uint16
 	l3             []byte // payload after the link layer
 
-	ipValid  bool
-	src, dst netip.Addr
-	proto    uint8
-	ipLen    int  // header + payload, from the IP header (not the capture)
-	frag     bool // a non-first fragment: no L4 header
-	l4       []byte
+	ipValid    bool
+	src, dst   netip.Addr
+	proto      uint8
+	ipLen      int  // header + payload, from the IP header (not the capture)
+	frag       bool // a non-first fragment: no L4 header
+	fragmented bool // any fragment, including the first
+	fragID     uint32
+	fragOff    int
+	fragMore   bool
+	fragProto  uint8 // next header after an IPv6 fragment header
+	v6         bool
+	l4         []byte
 
 	sport, dport uint16
 	tcpFlags     uint8
@@ -98,7 +104,7 @@ func parseFrame(data []byte, link int, f *frame) bool {
 	case etherIPv6:
 		parseIPv6(f)
 	}
-	if f.ipValid && !f.frag {
+	if f.ipValid && !f.fragmented {
 		parseL4(f)
 	}
 	return true
@@ -117,7 +123,13 @@ func parseIPv4(f *frame) {
 	f.proto = b[9]
 	f.src = netip.AddrFrom4([4]byte(b[12:16]))
 	f.dst = netip.AddrFrom4([4]byte(b[16:20]))
-	f.frag = binary.BigEndian.Uint16(b[6:])&0x1fff != 0
+	fl := binary.BigEndian.Uint16(b[6:])
+	f.fragOff = int(fl&0x1fff) * 8
+	f.fragMore = fl&0x2000 != 0
+	f.frag = f.fragOff != 0
+	f.fragmented = f.frag || f.fragMore
+	f.fragID = uint32(binary.BigEndian.Uint16(b[4:6]))
+	f.fragProto = f.proto
 	end := min(max(f.ipLen, ihl), len(b))
 	f.l4 = b[ihl:end]
 	f.ipValid = true
@@ -129,6 +141,7 @@ func parseIPv6(f *frame) {
 		return
 	}
 	f.ipLen = 40 + int(binary.BigEndian.Uint16(b[4:]))
+	f.v6 = true
 	f.src = netip.AddrFrom16([16]byte(b[8:24]))
 	f.dst = netip.AddrFrom16([16]byte(b[24:40]))
 	next := b[6]
@@ -145,7 +158,13 @@ func parseIPv6(f *frame) {
 			if off+8 > len(b) {
 				return
 			}
-			f.frag = binary.BigEndian.Uint16(b[off+2:])&0xfff8 != 0
+			fo := binary.BigEndian.Uint16(b[off+2:])
+			f.fragOff = int(fo & 0xfff8)
+			f.fragMore = fo&1 != 0
+			f.frag = f.fragOff != 0
+			f.fragmented = f.frag || f.fragMore
+			f.fragID = binary.BigEndian.Uint32(b[off+4:])
+			f.fragProto = b[off]
 			next, off = b[off], off+8
 		case 51: // AH
 			if off+8 > len(b) {
