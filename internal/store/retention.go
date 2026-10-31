@@ -2,7 +2,17 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"time"
+)
+
+// retainChunk is how many rows one retention delete removes while it holds
+// the ingest lock and the single write connection. A connections row
+// updates about eight indexes; at 5000 rows a chunk took seconds on a slow
+// machine, and an ingest waited for all of it.
+const (
+	retainChunk    = 1000
+	retainChunkSQL = "1000"
 )
 
 // RetentionResult counts what one retention pass deleted.
@@ -25,12 +35,12 @@ func (s *Store) Retain(ctx context.Context) (RetentionResult, error) {
 		sql string
 		arg int64
 	}{
-		{&r.Flows, `DELETE FROM flows WHERE rowid IN (SELECT rowid FROM flows WHERE t_end < ? LIMIT 5000)`, raw},
-		{&r.Flows, `DELETE FROM connections WHERE flow_key IN (SELECT flow_key FROM connections WHERE last_seen < ? LIMIT 5000)`, raw},
-		{&r.DNS, `DELETE FROM dns WHERE rowid IN (SELECT rowid FROM dns WHERE ts < ? LIMIT 5000)`, raw},
-		{&r.Answers, `DELETE FROM dns_answers WHERE rowid IN (SELECT rowid FROM dns_answers WHERE expires < ? LIMIT 5000)`, raw},
-		{&r.Observations, `DELETE FROM observations WHERE rowid IN (SELECT rowid FROM observations WHERE ts < ? LIMIT 5000)`, raw},
-		{&r.Facts, `DELETE FROM facts WHERE rowid IN (SELECT rowid FROM facts WHERE last_seen < ? LIMIT 5000)`, roll},
+		{&r.Flows, `DELETE FROM flows WHERE rowid IN (SELECT rowid FROM flows WHERE t_end < ? LIMIT ` + retainChunkSQL + `)`, raw},
+		{&r.Flows, `DELETE FROM connections WHERE flow_key IN (SELECT flow_key FROM connections WHERE last_seen < ? LIMIT ` + retainChunkSQL + `)`, raw},
+		{&r.DNS, `DELETE FROM dns WHERE rowid IN (SELECT rowid FROM dns WHERE ts < ? LIMIT ` + retainChunkSQL + `)`, raw},
+		{&r.Answers, `DELETE FROM dns_answers WHERE rowid IN (SELECT rowid FROM dns_answers WHERE expires < ? LIMIT ` + retainChunkSQL + `)`, raw},
+		{&r.Observations, `DELETE FROM observations WHERE rowid IN (SELECT rowid FROM observations WHERE ts < ? LIMIT ` + retainChunkSQL + `)`, raw},
+		{&r.Facts, `DELETE FROM facts WHERE rowid IN (SELECT rowid FROM facts WHERE last_seen < ? LIMIT ` + retainChunkSQL + `)`, roll},
 		// The rollups are WITHOUT ROWID; they are small enough to delete
 		// in one statement.
 		{&r.Rollups, `DELETE FROM traffic_hourly WHERE bucket < ?`, roll},
@@ -66,7 +76,7 @@ func (s *Store) Retain(ctx context.Context) (RetentionResult, error) {
 			}
 			k, _ := res.RowsAffected()
 			*n += k
-			if k < 5000 {
+			if k < retainChunk {
 				return nil
 			}
 		}
@@ -81,7 +91,7 @@ func (s *Store) Retain(ctx context.Context) (RetentionResult, error) {
 	// few, since an entity outlives its facts only briefly.
 	s.mu.Lock()
 	if err := run(&r.Entities, `DELETE FROM entities WHERE rowid IN (SELECT id FROM entities e WHERE e.last_seen < ?
-		AND NOT EXISTS (SELECT 1 FROM facts WHERE src = e.id OR dst = e.id) LIMIT 5000)`, roll, false); err != nil {
+		AND NOT EXISTS (SELECT 1 FROM facts WHERE src = e.id OR dst = e.id) LIMIT `+retainChunkSQL+`)`, roll, false); err != nil {
 		s.mu.Unlock()
 		return r, err
 	}
@@ -94,13 +104,41 @@ func (s *Store) Retain(ctx context.Context) (RetentionResult, error) {
 		}
 	}
 	s.mu.Unlock()
-	// Reclaiming pages can take seconds. Do it without the ingest lock, or
-	// a large database makes one ingest wait for most of the pass.
-	if _, err := s.w.ExecContext(ctx, `PRAGMA incremental_vacuum`); err != nil {
+	if err := s.reclaim(ctx); err != nil {
 		return r, err
 	}
 	s.invalidateAnomalies()
 	return r, nil
+}
+
+// reclaim returns free pages to the filesystem a few at a time. One
+// incremental_vacuum over a large freelist can take seconds, and the write
+// connection is single: dropping the ingest lock alone is not enough, an
+// ingest would still wait for the connection. Short steps let it in.
+func (s *Store) reclaim(ctx context.Context) error {
+	const step = 256 // pages per statement
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		var free int64
+		if err := s.w.QueryRowContext(ctx, `PRAGMA freelist_count`).Scan(&free); err != nil {
+			return err
+		}
+		if free == 0 {
+			return nil
+		}
+		if _, err := s.w.ExecContext(ctx, fmt.Sprintf(`PRAGMA incremental_vacuum(%d)`, step)); err != nil {
+			return err
+		}
+		var after int64
+		if err := s.w.QueryRowContext(ctx, `PRAGMA freelist_count`).Scan(&after); err != nil {
+			return err
+		}
+		if after >= free {
+			return nil // not in incremental auto_vacuum mode: nothing to do
+		}
+	}
 }
 
 // RunRetention applies retention every interval until ctx ends.
