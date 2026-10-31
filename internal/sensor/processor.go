@@ -91,7 +91,17 @@ type tcpStream struct {
 	segs  map[uint32][]byte // out-of-order segments, bounded
 	size  int
 	last  time.Time
+	// consumed is set once a message was decoded: bytes before start are
+	// then retransmissions, not a segment that arrived early.
+	consumed bool
 }
+
+const (
+	tcpFIN = 0x01
+	tcpRST = 0x04
+
+	maxTCPStreams = 1024
+)
 
 type packetKey struct {
 	src, dst netip.Addr
@@ -227,7 +237,11 @@ func (p *Processor) reassemble(ts time.Time, f *frame, mac string) {
 	}
 	st.last = ts
 	if off == 0 {
+		// Keep the headers, not the slices: they alias the capture
+		// buffer, which the next packet overwrites.
 		cp := *f
+		cp.l3, cp.l4, cp.payload = nil, nil, nil
+		cp.ipLen -= len(f.l4) // just the header length
 		st.first = &cp
 	}
 	if _, dup := st.parts[off]; !dup {
@@ -239,7 +253,7 @@ func (p *Processor) reassemble(ts time.Time, f *frame, mac string) {
 		st.end = off + len(f.l4)
 		st.haveEnd = true
 	}
-	if st.total > 65535 || len(st.parts) > 128 || len(p.fragPkts) > 1024 {
+	if st.total > 65535 || st.end > 65535 || len(st.parts) > 128 || len(p.fragPkts) > 1024 {
 		delete(p.fragPkts, key)
 		p.mu.Unlock()
 		return
@@ -266,14 +280,15 @@ func (p *Processor) reassemble(ts time.Time, f *frame, mac string) {
 			complete = false
 		}
 		if complete {
-			assembled = make([]byte, 0, st.end)
-			for _, o := range offs {
-				if o >= st.end {
-					break
-				}
-				part := st.parts[o]
-				if end := min(o+len(part), st.end); end > o {
-					assembled = append(assembled, part[:end-o]...)
+			// Fragments may overlap (legitimately after a
+			// retransmission, or crafted): place each at its
+			// offset rather than concatenating them. Written from
+			// the highest offset down, the lower-offset fragment's
+			// bytes win an overlap.
+			assembled = make([]byte, st.end)
+			for i := len(offs) - 1; i >= 0; i-- {
+				if o := offs[i]; o < st.end {
+					copy(assembled[o:], st.parts[o])
 				}
 			}
 		}
@@ -286,7 +301,7 @@ func (p *Processor) reassemble(ts time.Time, f *frame, mac string) {
 	delete(p.fragPkts, key)
 	p.mu.Unlock()
 
-	headerLen := max(first.ipLen-len(first.l4), 0)
+	headerLen := max(first.ipLen, 0)
 	full := first
 	full.l4 = assembled
 	full.ipLen = headerLen + len(assembled)
@@ -400,46 +415,72 @@ func (p *Processor) udp(ts time.Time, f *frame, mac string) {
 
 // tcpDNS reassembles the byte stream on a TCP/53 connection, so a message
 // split across segments (or several messages in one segment) is decoded.
-// Out-of-order segments are held in a small bounded window; retransmissions
-// are trimmed, and a DNS message is at most 65535 bytes.
+// Out-of-order segments are held in a small bounded window. A stream stays
+// known until FIN/RST or two idle minutes, so a retransmission of data
+// already decoded is trimmed rather than decoded twice. A DNS message is at
+// most 65535 bytes.
 func (p *Processor) tcpDNS(ts time.Time, f *frame, mac string) {
-	if len(f.payload) == 0 {
-		return
-	}
 	key := tcpKey{src: netip.AddrPortFrom(f.src, f.sport), dst: netip.AddrPortFrom(f.dst, f.dport)}
+	closing := f.tcpFlags&(tcpFIN|tcpRST) != 0
 	p.mu.Lock()
 	st := p.tcpStreams[key]
+	if len(f.payload) == 0 {
+		if closing && st != nil {
+			delete(p.tcpStreams, key)
+		}
+		p.mu.Unlock()
+		return
+	}
 	if st == nil {
+		if closing || len(p.tcpStreams) >= maxTCPStreams {
+			// No state to keep (or no room): decode the whole messages
+			// this segment holds, as a stateless decoder would.
+			p.mu.Unlock()
+			for _, msg := range splitTCPDNS(f.payload) {
+				p.dnsMessage(ts, f, mac, msg, flow.ProtoTCP)
+			}
+			return
+		}
 		st = &tcpStream{start: f.seq, next: f.seq, segs: map[uint32][]byte{}}
 		p.tcpStreams[key] = st
 	}
-	b := f.payload
-	switch d := int32(f.seq - st.start); {
-	case d < 0:
-		// A segment before the first one we saw: prepend the part that
-		// does not overlap the current buffer.
-		cut := min(int(-d), len(b))
-		st.buf = append(append([]byte(nil), b[:cut]...), st.buf...)
-		st.start = f.seq
-	case f.seq < st.next:
-		// Retransmission overlapping data already held.
-		skip := int(st.next - f.seq)
-		if skip >= len(b) {
-			p.mu.Unlock()
-			return
+	st.last = ts
+	b, seq := f.payload, f.seq
+	if d := int32(seq - st.start); d < 0 {
+		before := int(-d)
+		switch {
+		case st.consumed || before > len(b):
+			// Already decoded (a retransmission), or a gap before
+			// the stream's first byte that can never be filled.
+			if before >= len(b) {
+				p.mu.Unlock()
+				return
+			}
+			b, seq = b[before:], st.start
+		default:
+			// The stream was first seen mid-message and this segment
+			// came before it: prepend the bytes before start.
+			st.buf = append(append([]byte(nil), b[:before]...), st.buf...)
+			st.start = seq
+			b, seq = b[before:], seq+uint32(before)
 		}
-		b = b[skip:]
-		st.buf = append(st.buf, b...)
-	case f.seq > st.next:
+	}
+	switch {
+	case int32(seq-st.next) < 0:
+		// Retransmission overlapping data already held.
+		skip := int(st.next - seq)
+		if skip < len(b) {
+			st.buf = append(st.buf, b[skip:]...)
+		}
+	case seq != st.next:
 		// Hold the segment until the gap is filled. A small bounded
 		// reorder window keeps out-of-order TCP from losing a query
 		// without letting a broken peer grow the map forever.
-		if _, ok := st.segs[f.seq]; !ok {
-			st.segs[f.seq] = append([]byte(nil), b...)
+		if _, ok := st.segs[seq]; !ok {
+			st.segs[seq] = append([]byte(nil), b...)
 			st.size += len(b)
 		}
-		st.last = ts
-		if st.size > 128<<10 || len(st.segs) > 256 || len(p.tcpStreams) > 1024 {
+		if st.size > 128<<10 || len(st.segs) > 256 {
 			delete(p.tcpStreams, key)
 		}
 		p.mu.Unlock()
@@ -448,7 +489,6 @@ func (p *Processor) tcpDNS(ts time.Time, f *frame, mac string) {
 		st.buf = append(st.buf, b...)
 	}
 	st.next = st.start + uint32(len(st.buf))
-	st.last = ts
 	for {
 		next, ok := st.segs[st.next]
 		if !ok {
@@ -473,14 +513,29 @@ func (p *Processor) tcpDNS(ts time.Time, f *frame, mac string) {
 		msgs = append(msgs, append([]byte(nil), st.buf[2:2+l]...))
 		st.buf = st.buf[2+l:]
 		st.start += uint32(2 + l)
+		st.consumed = true
 	}
-	if len(st.buf) == 0 && len(st.segs) == 0 {
+	if closing {
 		delete(p.tcpStreams, key)
 	}
 	p.mu.Unlock()
 	for _, msg := range msgs {
 		p.dnsMessage(ts, f, mac, msg, flow.ProtoTCP)
 	}
+}
+
+// splitTCPDNS returns the whole length-prefixed messages in one segment.
+func splitTCPDNS(b []byte) [][]byte {
+	var out [][]byte
+	for len(b) >= 2 {
+		l := int(binary.BigEndian.Uint16(b))
+		if l == 0 || 2+l > len(b) {
+			break
+		}
+		out = append(out, b[2:2+l])
+		b = b[2+l:]
+	}
+	return out
 }
 
 func (p *Processor) dnsMessage(ts time.Time, f *frame, mac string, b []byte, proto uint8) {

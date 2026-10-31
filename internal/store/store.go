@@ -101,19 +101,16 @@ type Store struct {
 	sub  *broker
 
 	anomMu  sync.Mutex
+	anomGen uint64 // bumped by invalidateAnomalies
 	anomKey string
 	anomAt  time.Time
 	anomRep *model.AnomalyReport
 }
 
-func dsn(path string, readOnly bool) string {
-	return dsnMode(path, readOnly, readOnly)
-}
-
-// dsnMode is dsn with explicit query_only control. A backup source is opened
-// read-only without query_only: VACUUM INTO reads the source but creates a
-// new file, which query_only would refuse.
-func dsnMode(path string, readOnly, queryOnly bool) string {
+// dsn opens path in WAL mode; queryOnly refuses writes. A backup source is
+// opened without query_only: VACUUM INTO reads the source but creates a new
+// file, which query_only would refuse.
+func dsn(path string, queryOnly bool) string {
 	q := url.Values{}
 	for _, p := range []string{"busy_timeout(10000)", "journal_mode(WAL)", "synchronous(NORMAL)", "foreign_keys(0)", "cache_size(-16000)", "temp_store(MEMORY)"} {
 		q.Add("_pragma", p)
@@ -213,7 +210,11 @@ func OpenReadOnly(path string, cfg Config) (*Store, error) {
 // can still be backed up before it is migrated.
 func OpenBackup(path string, cfg Config) (*Store, error) {
 	cfg.defaults()
-	r, err := sql.Open("sqlite", dsnMode(path, true, false))
+	// Without query_only, opening a missing path would create it.
+	if _, err := os.Stat(path); err != nil {
+		return nil, err
+	}
+	r, err := sql.Open("sqlite", dsn(path, false))
 	if err != nil {
 		return nil, err
 	}
@@ -301,7 +302,9 @@ func (s *Store) Backup(ctx context.Context, path string, opts ...BackupOptions) 
 		return err
 	}
 	// A backup that cannot be opened and integrity-checked is not a backup.
-	check, err := sql.Open("sqlite", dsn(tmpName, true))
+	// Plain read-only: dsn's journal_mode(WAL) would convert the copy and
+	// leave -wal/-shm files under the temporary name.
+	check, err := sql.Open("sqlite", "file:"+tmpName+"?mode=ro")
 	if err != nil {
 		return err
 	}
@@ -348,6 +351,7 @@ func (s *Store) Backup(ctx context.Context, path string, opts ...BackupOptions) 
 // or a retention pass can change what a window finds.
 func (s *Store) invalidateAnomalies() {
 	s.anomMu.Lock()
+	s.anomGen++
 	s.anomRep = nil
 	s.anomKey = ""
 	s.anomMu.Unlock()

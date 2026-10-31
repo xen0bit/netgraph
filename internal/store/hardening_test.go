@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -352,7 +353,8 @@ func TestEmergencyTrim(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r.Flows == 0 || r.DNS == 0 || r.Facts == 0 {
+	// Facts follow rollup retention, so only -trim-rollups removes them.
+	if r.Flows == 0 || r.DNS == 0 || r.Facts != 0 || r.Rollups != 0 {
 		t.Errorf("emergency trim counts: %+v", r)
 	}
 	fl, err := st.Flows(ctx, win(0, time.Hour))
@@ -361,5 +363,38 @@ func TestEmergencyTrim(t *testing.T) {
 	}
 	if len(fl) != 0 {
 		t.Errorf("emergency trim left %d flows", len(fl))
+	}
+	if r, err = st.EmergencyTrim(ctx, 1, true); err != nil {
+		t.Fatal(err)
+	}
+	if r.Facts == 0 || r.Rollups == 0 {
+		t.Errorf("emergency trim with rollups: %+v", r)
+	}
+}
+
+// More concurrent walks than read connections, each looking up labels
+// while its cursor is open, must not wait on each other forever.
+func TestWalkersDoNotExhaustPool(t *testing.T) {
+	st, _, _ := homeStore(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	var wg sync.WaitGroup
+	errs := make(chan error, 32)
+	for range 32 {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs <- st.WalkFlows(ctx, win(0, time.Hour), func(model.Flow) error {
+				time.Sleep(time.Millisecond)
+				return nil
+			})
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
 	}
 }

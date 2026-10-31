@@ -76,6 +76,26 @@ type Frame struct {
 	TS time.Time
 }
 
+// clone returns a copy that owns its header, body and addresses, for a frame
+// kept after the capture buffer it aliases is reused.
+func (f *Frame) clone() *Frame {
+	c := *f
+	buf := append(append([]byte(nil), f.header...), f.Body...)
+	n := len(f.header)
+	c.header, c.Body = buf[:n:n], buf[n:]
+	cp := func(a []byte) []byte {
+		if a == nil {
+			return nil
+		}
+		return append([]byte(nil), a...)
+	}
+	c.addr1, c.addr2, c.addr3, c.addr4 = cp(f.addr1), cp(f.addr2), cp(f.addr3), cp(f.addr4)
+	c.Addr1, c.Addr2, c.Addr3, c.Addr4 = cp(f.Addr1), cp(f.Addr2), cp(f.Addr3), cp(f.Addr4)
+	c.Src, c.Dst, c.BSSID = cp(f.Src), cp(f.Dst), cp(f.BSSID)
+	c.IEs = nil // management only; data frames, the only ones kept, have none
+	return &c
+}
+
 // Parse decodes a frame without a radiotap header.
 func Parse(b []byte) (*Frame, error) {
 	if len(b) < 2 {

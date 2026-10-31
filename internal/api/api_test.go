@@ -507,9 +507,22 @@ func TestAnomalyMuteAPI(t *testing.T) {
 	srv, _ := serve(t, nil)
 	body := `{"kind":"scan","device":"device:aa:bb:cc:00:00:09","entity":"","until":` +
 		strconv.FormatInt(time.Now().Add(time.Hour).UnixMilli(), 10) + `,"note":"noisy"}`
+	// A form-encodable body (a cross-site form) is refused.
 	req, _ := http.NewRequest(http.MethodPost, srv.URL+"/api/v1/anomalies/mute", strings.NewReader(body))
 	req.Header.Set("Authorization", "Bearer rd-tok")
+	req.Header.Set("Content-Type", "text/plain")
 	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnsupportedMediaType {
+		t.Fatalf("text/plain mute: %s", resp.Status)
+	}
+	req, _ = http.NewRequest(http.MethodPost, srv.URL+"/api/v1/anomalies/mute", strings.NewReader(body))
+	req.Header.Set("Authorization", "Bearer rd-tok")
+	req.Header.Set("Content-Type", "application/json")
+	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
 	}

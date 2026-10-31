@@ -15,6 +15,17 @@ import (
 // hand each one to a callback instead of retaining it. The CSV exporter uses
 // them so a large window is bounded by the driver's read buffer, not by the
 // number of rows in the result.
+//
+// Each walk runs on one connection of its own. Its lookups (device labels,
+// peers, AS names) happen while its cursor is open; taken from the shared
+// read pool instead, a few concurrent exports could hold every connection
+// and wait on each other forever.
+
+// queryer is what a walk's lookups need: a *sql.Conn or the pool.
+type queryer interface {
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
+	QueryRowContext(ctx context.Context, query string, args ...any) *sql.Row
+}
 
 // WalkFlows visits each connection active in the window.
 func (s *Store) WalkFlows(ctx context.Context, f model.Filter, yield func(model.Flow) error) error {
@@ -34,12 +45,17 @@ func (s *Store) WalkFlows(ctx context.Context, f model.Filter, yield func(model.
 		` + connBytes("pkts_out", from, to) + `, ` + connBytes("pkts_in", from, to) + `
 		FROM connections c WHERE ` + w.sql() + `
 		ORDER BY bo + bi DESC, first_seen LIMIT ? OFFSET ?`
-	rows, err := s.r.QueryContext(ctx, q, append(w.args, limit(f, 1000, 100000), offset(f))...)
+	conn, err := s.r.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	rows, err := conn.QueryContext(ctx, q, append(w.args, limit(f, 1000, 100000), offset(f))...)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
-	d := newFlowDecor(s, from, to)
+	d := newFlowDecor(conn, from, to)
 	for rows.Next() {
 		var fl model.Flow
 		var proto, final int
@@ -78,7 +94,12 @@ func (s *Store) walkFlowsHourly(ctx context.Context, f model.Filter, from, to in
 	if err := s.flowWhere(ctx, f, w, hourlyCols); err != nil {
 		return err
 	}
-	rows, err := s.r.QueryContext(ctx, `SELECT client_device, client_ip, remote_ip, remote_port, proto, name, direction, max(app),
+	conn, err := s.r.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	rows, err := conn.QueryContext(ctx, `SELECT client_device, client_ip, remote_ip, remote_port, proto, name, direction, max(app),
 		min(bucket), max(bucket), sum(flows), sum(bytes_out), sum(bytes_in), coalesce(max(remote_asn), 0), max(remote_cc)
 		FROM traffic_hourly WHERE `+w.sql()+`
 		GROUP BY client_device, client_ip, remote_ip, remote_port, proto, name, direction ORDER BY sum(bytes_out) + sum(bytes_in) DESC LIMIT ? OFFSET ?`, append(w.args, limit(f, 1000, 100000), offset(f))...)
@@ -86,7 +107,7 @@ func (s *Store) walkFlowsHourly(ctx context.Context, f model.Filter, from, to in
 		return err
 	}
 	defer rows.Close()
-	d := newFlowDecor(s, from, to)
+	d := newFlowDecor(conn, from, to)
 	for rows.Next() {
 		var fl model.Flow
 		var dev int64
@@ -123,13 +144,18 @@ func (s *Store) WalkDNS(ctx context.Context, f model.Filter, yield func(model.DN
 	if err != nil {
 		return err
 	}
-	rows, err := s.r.QueryContext(ctx, `SELECT ts, client_ip, client_device, server_ip, qname, qtype, rcode, coalesce(latency_ms, 0), answers
+	conn, err := s.r.Conn(ctx)
+	if err != nil {
+		return err
+	}
+	defer conn.Close()
+	rows, err := conn.QueryContext(ctx, `SELECT ts, client_ip, client_device, server_ip, qname, qtype, rcode, coalesce(latency_ms, 0), answers
 		FROM dns WHERE `+w.sql()+` ORDER BY ts DESC LIMIT ? OFFSET ?`, append(w.args, limit(f, 500, 50000), offset(f))...)
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
-	var devs deviceCache
+	devs := deviceCache{q: conn}
 	for rows.Next() {
 		var q model.DNSQuery
 		var dev int64
@@ -145,7 +171,7 @@ func (s *Store) WalkDNS(ctx context.Context, f model.Filter, yield func(model.DN
 		for _, a := range as {
 			q.Answers = append(q.Answers, model.DNSAnswer{Name: a.Name, Type: a.Type, Data: a.Data, TTL: a.TTL, Expires: q.TS + int64(a.TTL)*1000})
 		}
-		if err := devs.apply(ctx, s, &q, dev); err != nil {
+		if err := devs.apply(ctx, &q, dev); err != nil {
 			return err
 		}
 		if err := yield(q); err != nil {
@@ -260,6 +286,7 @@ func (s *Store) WalkWiFi(ctx context.Context, f model.Filter, yield func(model.W
 // deviceCache resolves device IDs to their display fields one at a time, for
 // the streaming walkers. The number of devices in a window is small.
 type deviceCache struct {
+	q    queryer
 	meta map[int64]deviceMeta
 }
 
@@ -267,11 +294,11 @@ type deviceMeta struct {
 	id, label, mac string
 }
 
-func (c *deviceCache) apply(ctx context.Context, s *Store, q *model.DNSQuery, dev int64) error {
+func (c *deviceCache) apply(ctx context.Context, q *model.DNSQuery, dev int64) error {
 	if dev == 0 {
 		return nil
 	}
-	m, err := c.get(ctx, s, dev)
+	m, err := c.get(ctx, dev)
 	if err != nil {
 		return err
 	}
@@ -280,7 +307,7 @@ func (c *deviceCache) apply(ctx context.Context, s *Store, q *model.DNSQuery, de
 	return nil
 }
 
-func (c *deviceCache) get(ctx context.Context, s *Store, id int64) (deviceMeta, error) {
+func (c *deviceCache) get(ctx context.Context, id int64) (deviceMeta, error) {
 	if c.meta == nil {
 		c.meta = map[int64]deviceMeta{}
 	}
@@ -288,7 +315,7 @@ func (c *deviceCache) get(ctx context.Context, s *Store, id int64) (deviceMeta, 
 		return m, nil
 	}
 	var key, label, attrs string
-	err := s.r.QueryRowContext(ctx, `SELECT key, label, attrs FROM entities WHERE id = ? AND kind = 'device'`, id).Scan(&key, &label, &attrs)
+	err := c.q.QueryRowContext(ctx, `SELECT key, label, attrs FROM entities WHERE id = ? AND kind = 'device'`, id).Scan(&key, &label, &attrs)
 	if err == sql.ErrNoRows {
 		c.meta[id] = deviceMeta{}
 		return deviceMeta{}, nil
@@ -306,7 +333,7 @@ func (c *deviceCache) get(ctx context.Context, s *Store, id int64) (deviceMeta, 
 // flowDecor adds the device names, local peer and AS organisation that the
 // slice path adds after reading all rows.
 type flowDecor struct {
-	s       *Store
+	q       queryer
 	from    int64
 	to      int64
 	devices deviceCache
@@ -314,13 +341,13 @@ type flowDecor struct {
 	asns    map[uint32]string
 }
 
-func newFlowDecor(s *Store, from, to int64) *flowDecor {
-	return &flowDecor{s: s, from: from, to: to, peers: map[string]int64{}, asns: map[uint32]string{}}
+func newFlowDecor(q queryer, from, to int64) *flowDecor {
+	return &flowDecor{q: q, from: from, to: to, devices: deviceCache{q: q}, peers: map[string]int64{}, asns: map[uint32]string{}}
 }
 
 func (d *flowDecor) apply(ctx context.Context, fl *model.Flow, dev int64) error {
 	if dev != 0 {
-		m, err := d.devices.get(ctx, d.s, dev)
+		m, err := d.devices.get(ctx, dev)
 		if err != nil {
 			return err
 		}
@@ -332,7 +359,7 @@ func (d *flowDecor) apply(ctx context.Context, fl *model.Flow, dev int64) error 
 			return err
 		}
 		if id != 0 {
-			m, err := d.devices.get(ctx, d.s, id)
+			m, err := d.devices.get(ctx, id)
 			if err != nil {
 				return err
 			}
@@ -355,7 +382,7 @@ func (d *flowDecor) peer(ctx context.Context, ip string) (int64, error) {
 	}
 	var n int
 	var id int64
-	err := d.s.r.QueryRowContext(ctx, `SELECT count(DISTINCT f.src), coalesce(min(f.src), 0)
+	err := d.q.QueryRowContext(ctx, `SELECT count(DISTINCT f.src), coalesce(min(f.src), 0)
 		FROM entities ip JOIN facts f ON f.dst = ip.id AND f.rel = 'has_ip'
 		WHERE ip.kind = 'ip' AND ip.key = ? AND f.last_seen >= ? AND f.first_seen < ?`, ip, d.from, d.to).Scan(&n, &id)
 	if err != nil {
@@ -373,7 +400,7 @@ func (d *flowDecor) asOrg(ctx context.Context, asn uint32) (string, error) {
 		return org, nil
 	}
 	var label string
-	err := d.s.r.QueryRowContext(ctx, `SELECT label FROM entities WHERE kind = 'asn' AND key = ?`, strconv.FormatUint(uint64(asn), 10)).Scan(&label)
+	err := d.q.QueryRowContext(ctx, `SELECT label FROM entities WHERE kind = 'asn' AND key = ?`, strconv.FormatUint(uint64(asn), 10)).Scan(&label)
 	if err == sql.ErrNoRows {
 		d.asns[asn] = ""
 		return "", nil

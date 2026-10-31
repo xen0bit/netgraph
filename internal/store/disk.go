@@ -19,7 +19,7 @@ func (s *Store) Size() int64 {
 }
 
 // EmergencyTrim deletes the oldest raw rows until the database is at or
-// below target. It never touches rollups unless allowRollups is set. It is
+// below target. It never touches rollups or facts unless allowRollups is set. It is
 // deliberately separate from Retain so a full disk can be relieved without
 // silently shortening the configured retention forever.
 func (s *Store) EmergencyTrim(ctx context.Context, target int64, allowRollups bool) (RetentionResult, error) {
@@ -52,10 +52,15 @@ func (s *Store) EmergencyTrim(ctx context.Context, target int64, allowRollups bo
 			{&r.DNS, `DELETE FROM dns WHERE rowid IN (SELECT rowid FROM dns ORDER BY ts LIMIT 5000)`},
 			{&r.Answers, `DELETE FROM dns_answers WHERE rowid IN (SELECT rowid FROM dns_answers ORDER BY expires LIMIT 5000)`},
 			{&r.Observations, `DELETE FROM observations WHERE rowid IN (SELECT rowid FROM observations ORDER BY ts LIMIT 5000)`},
-			{&r.Facts, `DELETE FROM facts WHERE rowid IN (SELECT rowid FROM facts ORDER BY last_seen LIMIT 5000)`},
 		}
 		if allowRollups {
+			// Facts are kept as long as rollups (RollupRetention), so
+			// they are trimmed only when rollups may be.
 			steps = append(steps,
+				struct {
+					n *int64
+					q string
+				}{&r.Facts, `DELETE FROM facts WHERE rowid IN (SELECT rowid FROM facts ORDER BY last_seen LIMIT 5000)`},
 				struct {
 					n *int64
 					q string

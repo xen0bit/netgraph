@@ -46,12 +46,18 @@ type anomalyDevice struct {
 // A device filter keeps that device's anomalies; other filters are ignored.
 func (s *Store) Anomalies(ctx context.Context, f model.Filter) (*model.AnomalyReport, error) {
 	from, to := s.window(f)
+	// The cache lock is not held while the checks run: Ingest invalidates
+	// the cache on every batch and must not wait behind a slow report. A
+	// report computed while data changed is returned but not cached.
 	key := fmt.Sprintf("%d|%d|%s", from, to, f.Device)
 	s.anomMu.Lock()
-	defer s.anomMu.Unlock()
 	if s.anomRep != nil && s.anomKey == key && s.cfg.Now().Sub(s.anomAt) < time.Minute {
-		return s.anomRep, nil
+		rep := s.anomRep
+		s.anomMu.Unlock()
+		return rep, nil
 	}
+	gen := s.anomGen
+	s.anomMu.Unlock()
 	rep := &model.AnomalyReport{FromMS: from, ToMS: to, Anomalies: []model.Anomaly{}}
 	since, err := s.FirstSensorSeen(ctx)
 	if err != nil {
@@ -109,7 +115,11 @@ func (s *Store) Anomalies(ctx context.Context, f model.Filter) (*model.AnomalyRe
 		return cmp.Or(cmp.Compare(x.TS, y.TS), cmp.Compare(x.Kind, y.Kind), cmp.Compare(x.Device, y.Device), cmp.Compare(x.Entity, y.Entity))
 	})
 	rep.Anomalies = append(rep.Anomalies, out...)
-	s.anomKey, s.anomAt, s.anomRep = key, s.cfg.Now(), rep
+	s.anomMu.Lock()
+	if s.anomGen == gen {
+		s.anomKey, s.anomAt, s.anomRep = key, s.cfg.Now(), rep
+	}
+	s.anomMu.Unlock()
 	return rep, nil
 }
 

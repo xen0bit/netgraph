@@ -606,3 +606,62 @@ func TestDNSOverTCPOutOfOrder(t *testing.T) {
 		t.Fatalf("out-of-order DNS event = %+v", got)
 	}
 }
+
+// Overlapping fragments are placed at their offsets, not concatenated.
+func TestIPv4FragmentOverlap(t *testing.T) {
+	var out collector
+	p := NewProcessor(Config{}, &out)
+	msg := udpDNSPacket(dnsResponseName(t, "overlap.example."))
+	mk := func(off int, more bool, part []byte) []byte {
+		eth := make([]byte, 14)
+		copy(eth[0:6], []byte{0x3c, 0x22, 0xfb, 0x01, 0x02, 0x03})
+		copy(eth[6:12], []byte{0xaa, 0xbb, 0xcc, 0x00, 0x00, 0x01})
+		binary.BigEndian.PutUint16(eth[12:], 0x0800)
+		ip := make([]byte, 20)
+		ip[0] = 0x45
+		binary.BigEndian.PutUint16(ip[2:], uint16(20+len(part)))
+		binary.BigEndian.PutUint16(ip[4:], 0x4321)
+		flags := uint16(off / 8)
+		if more {
+			flags |= 0x2000
+		}
+		binary.BigEndian.PutUint16(ip[6:], flags)
+		ip[8], ip[9] = 64, 17
+		copy(ip[12:16], testutil.Router.IP.AsSlice())
+		copy(ip[16:20], testutil.Phone.IP.AsSlice())
+		return append(append(eth, ip...), part...)
+	}
+	p.Handle(testutil.Base, mk(0, true, msg[:24]), capture.LinkEthernet)
+	p.Handle(testutil.Base.Add(time.Millisecond), mk(16, false, msg[16:]), capture.LinkEthernet)
+	var got *wire.DNS
+	for _, e := range out.of(wire.TypeDNS) {
+		if e.DNS != nil && e.DNS.QName == "overlap.example" {
+			got = e.DNS
+		}
+	}
+	if got == nil || len(got.Answers) != 1 {
+		t.Fatalf("overlapping fragments: dns event = %+v", got)
+	}
+}
+
+// A retransmitted segment of a message already decoded is not decoded again.
+func TestDNSOverTCPRetransmission(t *testing.T) {
+	var out collector
+	p := NewProcessor(Config{}, &out)
+	msg := dnsResponseName(t, "retx.example.")
+	payload := make([]byte, 2+len(msg))
+	binary.BigEndian.PutUint16(payload, uint16(len(msg)))
+	copy(payload[2:], msg)
+	p.Handle(testutil.Base, tcpDNSSegment(1000, payload), capture.LinkEthernet)
+	p.Handle(testutil.Base.Add(time.Millisecond), tcpDNSSegment(1000, payload), capture.LinkEthernet)
+	p.Handle(testutil.Base.Add(2*time.Millisecond), tcpDNSSegment(1000, payload[:7]), capture.LinkEthernet)
+	n := 0
+	for _, e := range out.of(wire.TypeDNS) {
+		if e.DNS != nil && e.DNS.QName == "retx.example" {
+			n++
+		}
+	}
+	if n != 1 {
+		t.Fatalf("retransmitted DNS message decoded %d times, want 1", n)
+	}
+}

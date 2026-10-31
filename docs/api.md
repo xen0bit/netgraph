@@ -45,7 +45,7 @@ are unix milliseconds.
 | `GET /api/v1/export?kind=flows` | CSV of every field the API returns for that table (`devices`, `flows`, `dns`, `facts`, `anomalies`, `wifi`). It uses the same window and filters and streams each row from the database, so it is not limited to what the browser loaded or to the memory of the process. Read token |
 | `GET /api/v1/anomalies` | the window's [anomalies](concepts.md#anomalies), most severe first: `{from, to, since, learning, anomalies: [{kind, severity, ts, device, device_name, entity, summary, evidence}]}`. Read token |
 | `GET /api/v1/anomalies/mutes` | `{mutes: [{kind, device, entity, until, note, created}]}`, active mutes only. Read token |
-| `POST /api/v1/anomalies/mute` | body `{kind, device, entity, until, note}`; empty fields are wildcards, `until` is unix ms (default one day). Read token |
+| `POST /api/v1/anomalies/mute` | JSON body (`Content-Type: application/json`) `{kind, device, entity, until, note}`; empty fields are wildcards, `until` is unix ms (default one day). Read token |
 | `DELETE /api/v1/anomalies/mute?kind=...&device=...&entity=...` | remove that exact mute. Read token |
 | `GET /metrics` | Prometheus text: ingest counters, each sensor's last reported stats (packets, kernel drops, queued and dropped events, ...), entities by kind, database size, alert outcomes. Read token |
 | `GET /api/v1/version`, `/healthz` | `{version, commit}`; no token needed |

@@ -253,8 +253,9 @@ func (p *Processor) fragment(ts time.Time, f *Frame, llc []byte) {
 	}
 	st.last = ts
 	if f.FragNumber == 0 {
-		cp := *f
-		st.first = &cp
+		// The frame aliases the capture buffer; later fragments arrive
+		// in later reads that overwrite it.
+		st.first = f.clone()
 	}
 	if f.FragNumber < st.next {
 		return // duplicate of a fragment already joined

@@ -264,12 +264,14 @@ the sensor fetches from the server and holds only in memory:
 - **WPA/WPA2-PSK** uses the PMK the server derived from the SSID and
   passphrase in its key file (PBKDF2), or a raw PMK. It follows EAPOL
   messages 1–4, derives the PTK from the nonces, verifies the MIC, and
-  decrypts CCMP or TKIP data frames.
+  decrypts CCMP, GCMP-128/256 or TKIP data frames. The cipher is the one
+  the station chose in message 2, else the one the AP's beacon offers.
 - **WPA3/SAE, OWE and 802.1X** cannot be followed from the air alone. They
   are parsed and reported as networks, and can be decrypted only when a PMK
   is supplied (`pmk <ssid> <hex>` in the server's key file). With that PMK,
-  a captured 4-way handshake derives the PTK and GCMP data frames decrypt
-  like CCMP ones.
+  an 802.1X handshake is followed like a WPA2 one. SAE and OWE handshakes
+  use SHA-256 key derivation and AES-CMAC MICs, which are not implemented
+  yet: they are reported, never decrypted.
 
 Decrypted data frames are rebuilt as Ethernet and enter the normal flow,
 DNS, TLS and HTTP pipeline, so a Wi-Fi capture produces the same connection
@@ -334,10 +336,10 @@ extensions ioctl, so it works with mac80211 monitor interfaces and not with
   64 KiB, so a zone transfer is not followed indefinitely.
 - **IPv4 and IPv6 fragments** are reassembled per flow before L4 decoding.
   A partial datagram is dropped after 30 seconds or 64 KiB; an overlapping
-  fragment never replaces a byte already received.
+  fragment never replaces bytes a lower-offset fragment supplied.
 - **WPA3/SAE, OWE and 802.1X** Wi-Fi has no passively derivable PMK; without
-  an explicitly supplied PMK, their data frames stay encrypted. When a PMK
-  is supplied, GCMP (the WPA3 data cipher) is decrypted like CCMP.
+  an explicitly supplied PMK, their data frames stay encrypted. A supplied
+  PMK decrypts 802.1X networks; SAE/OWE key derivation is not implemented.
 - **Wi-Fi group keys** come from a message 3 or group rekey that some
   sensor saw. A network whose GTK no sensor has seen since netgraph started
   (no client joined and the AP has not rekeyed) keeps its broadcasts

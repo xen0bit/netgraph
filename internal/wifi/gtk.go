@@ -29,9 +29,8 @@ var errRelayed = errors.New("wifi: group frame relays a known client")
 
 // groupKey is one installed GTK.
 type groupKey struct {
-	tk   []byte // 16 bytes for CCMP/GCMP-128, 32 for TKIP/GCMP-256
-	tkip bool
-	gcmp bool
+	tk   []byte    // 16 bytes for CCMP/GCMP-128, 32 for TKIP/GCMP-256
+	tkip bool      // 32 bytes; a GCMP-256 group cipher in the beacon overrides it
 	ts   time.Time // when the AP sent it: a later key in the slot wins
 }
 
@@ -206,11 +205,11 @@ func (k *Keyring) installGTK(bssid, ssid string, msg *EAPOLKey, kek []byte, ts t
 			return 0, false, nil
 		}
 	}
-	gk := groupKey{tk: append([]byte(nil), gtk...), ts: ts, gcmp: msg.Version() == 3}
+	gk := groupKey{tk: append([]byte(nil), gtk...), ts: ts}
 	switch len(gtk) {
 	case 16:
 	case 32:
-		gk.tkip = !gk.gcmp
+		gk.tkip = true
 	default:
 		return 0, false, fmt.Errorf("eapol: GTK length %d", len(gtk))
 	}
@@ -296,17 +295,11 @@ func (k *Keyring) LoadGroupKey(r GroupKeyRecord) (bool, error) {
 	}
 	msg := &EAPOLKey{Descriptor: r.Descriptor, KeyInfo: r.KeyInfo, KeyLength: r.KeyLength, KeyData: r.KeyData}
 	copy(msg.IV[:], r.IV)
-	tkip := msg.Version() == 1
-	gcmp := msg.Version() == 3
-	bits := 384
-	if tkip || gcmp && r.KeyLength >= 32 {
-		bits = 512
-	}
-	ptk, err := DerivePTK(pmk, ap, sta, r.ANonce, r.SNonce, bits)
+	ptk, err := DerivePTK(pmk, ap, sta, r.ANonce, r.SNonce, ptkBits)
 	if err != nil {
 		return false, err
 	}
-	_, ok, err := k.installGTK(ap.String(), r.SSID, msg, splitPTKCipher(ptk, tkip, gcmp).KEK, r.TS)
+	_, ok, err := k.installGTK(ap.String(), r.SSID, msg, splitPTK(ptk, msg.Version() == 1).KEK, r.TS)
 	return ok, err
 }
 

@@ -113,15 +113,64 @@ func lessFirst(a, b []byte) ([]byte, []byte) {
 type PTK struct {
 	KCK  []byte
 	KEK  []byte
-	TK   []byte // 16 bytes for CCMP/GCMP-128, 32 for TKIP/GCMP-256
+	TK   []byte // 16 bytes for CCMP and GCMP-128, 32 for TKIP
 	TKIP bool
-	GCMP bool
+	// TK256 is the 32-byte temporal key GCMP-256 needs, when the PTK was
+	// derived long enough. PRF output is a prefix of the longer output,
+	// so deriving 512 bits leaves KCK, KEK and the 16-byte TK unchanged.
+	TK256 []byte
+	// Cipher is the pairwise cipher the station chose in message 2, or
+	// empty when that message was not seen (the beacon decides then).
+	Cipher string
 }
 
-func splitPTK(ptk []byte, tkip bool) *PTK { return splitPTKCipher(ptk, tkip, false) }
+// ptkBits is the PTK length to derive: always 512, so a GCMP-256 key is
+// available whichever cipher the network turns out to use.
+const ptkBits = 512
 
-func splitPTKCipher(ptk []byte, tkip, gcmp bool) *PTK {
-	return &PTK{KCK: ptk[0:16], KEK: ptk[16:32], TK: ptk[32:], TKIP: tkip, GCMP: gcmp}
+func splitPTK(ptk []byte, tkip bool) *PTK {
+	p := &PTK{KCK: ptk[0:16], KEK: ptk[16:32], TK: ptk[32:], TKIP: tkip}
+	if !tkip && len(ptk) >= 64 {
+		p.TK, p.TK256 = ptk[32:48], ptk[32:64]
+	}
+	return p
+}
+
+// pairwiseCipher picks the cipher for a station's unicast frames: what it
+// chose in its handshake, else the one GCMP suite an AP offers without
+// CCMP. Empty means CCMP (or TKIP, which the PTK records itself).
+func pairwiseCipher(chosen string, sec Security) string {
+	if chosen != "" {
+		return chosen
+	}
+	if sec.UsesCCMP() || sec.UsesTKIP() {
+		return ""
+	}
+	for _, c := range sec.Pairwise {
+		if c == "GCMP-128" || c == "GCMP-256" {
+			return c
+		}
+	}
+	return ""
+}
+
+// rsnPairwise returns the pairwise cipher named by the RSN element in an
+// EAPOL-Key message's (unencrypted) key data: message 2 carries the
+// station's choice there.
+func rsnPairwise(keyData []byte) string {
+	ies, err := parseIEs(keyData)
+	if err != nil {
+		return ""
+	}
+	body, ok := ies.find(ieRSN)
+	if !ok {
+		return ""
+	}
+	s, err := parseSuiteIE(body, true)
+	if err != nil || len(s.Pairwise) != 1 {
+		return ""
+	}
+	return s.Pairwise[0]
 }
 
 // EAPOLKey is one 802.1X EAPOL-Key message. Raw aliases the frame and is
@@ -262,6 +311,7 @@ type HandshakeInfo struct {
 
 type handshake struct {
 	anonce, snonce []byte
+	cipher         string // pairwise cipher from message 2's RSN element
 }
 
 // pairSource is what a PTK was derived from: the network whose PMK was
@@ -553,10 +603,11 @@ func (k *Keyring) ProcessEAPOL(f *Frame, msg *EAPOLKey) HandshakeInfo {
 		hs.anonce = append([]byte(nil), msg.Nonce[:]...)
 	case 2:
 		hs.snonce = append([]byte(nil), msg.Nonce[:]...)
+		hs.cipher = rsnPairwise(msg.KeyData)
 	case 3:
 		hs.anonce = append([]byte(nil), msg.Nonce[:]...)
 	}
-	anonce, snonce := hs.anonce, hs.snonce
+	anonce, snonce, cipher := hs.anonce, hs.snonce, hs.cipher
 	k.mu.Unlock()
 	if info.Message == 1 {
 		// It only carries the authenticator nonce; message 2 completes
@@ -564,7 +615,7 @@ func (k *Keyring) ProcessEAPOL(f *Frame, msg *EAPOLKey) HandshakeInfo {
 		return info
 	}
 
-	ssid, sec, known := k.Network(ap.String())
+	ssid, _, known := k.Network(ap.String())
 	if !known && len(msg.KeyData) > 0 {
 		if ie := keyDataSSID(msg.KeyData); ie != "" {
 			ssid = ie
@@ -580,17 +631,13 @@ func (k *Keyring) ProcessEAPOL(f *Frame, msg *EAPOLKey) HandshakeInfo {
 		return info
 	}
 	tkip := msg.Version() == 1
-	gcmp := msg.Version() == 3 || sec.UsesGCMP()
-	bits := 384
-	if tkip || len(msg.KeyData) > 0 && msg.KeyLength == 32 {
-		bits = 512
-	}
-	ptk, err := DerivePTK(pmk, ap, sta, anonce, snonce, bits)
+	ptk, err := DerivePTK(pmk, ap, sta, anonce, snonce, ptkBits)
 	if err != nil {
 		info.Err = err
 		return info
 	}
-	split := splitPTKCipher(ptk, tkip, gcmp)
+	split := splitPTK(ptk, tkip)
+	split.Cipher = cipher
 	switch info.Message {
 	case 2, 3, 4:
 		ok, err := msg.VerifyMIC(split.KCK)
@@ -649,17 +696,11 @@ func (k *Keyring) LoadHandshake(bssid, sta, ssid string, anonce, snonce []byte, 
 	if len(pmk) != 32 {
 		return false, nil
 	}
-	tkip := keyVersion == 1
-	gcmp := keyVersion == 3
-	bits := 384
-	if tkip {
-		bits = 512
-	}
-	ptk, err := DerivePTK(pmk, ap, st, anonce, snonce, bits)
+	ptk, err := DerivePTK(pmk, ap, st, anonce, snonce, ptkBits)
 	if err != nil {
 		return false, err
 	}
-	k.install(key, src, splitPTKCipher(ptk, tkip, gcmp))
+	k.install(key, src, splitPTK(ptk, keyVersion == 1))
 	return true, nil
 }
 
@@ -713,9 +754,9 @@ func (k *Keyring) Decrypt(f *Frame) ([]byte, string, error) {
 				out, err := tkipDecrypt(f.rawHeader(), body, gk.tk, true)
 				return out, "TKIP", err
 			}
-			if gk.gcmp {
+			if _, sec, _ := k.Network(ap); strings.HasPrefix(sec.Group, "GCMP") {
 				out, err := gcmpDecrypt(f.rawHeader(), body, gk.tk)
-				return out, "GCMP", err
+				return out, sec.Group, err
 			}
 			out, err := ccmpDecrypt(f.rawHeader(), body, gk.tk)
 			return out, "CCMP", err
@@ -737,9 +778,17 @@ func (k *Keyring) Decrypt(f *Frame) ([]byte, string, error) {
 				out, err := tkipDecrypt(f.rawHeader(), body, ptk.TK, f.FromDS && !f.ToDS)
 				return out, "TKIP", err
 			}
-			if ptk.GCMP {
+			_, sec, _ := k.Network(ap)
+			switch c := pairwiseCipher(ptk.Cipher, sec); c {
+			case "GCMP-128":
 				out, err := gcmpDecrypt(f.rawHeader(), body, ptk.TK)
-				return out, "GCMP", err
+				return out, c, err
+			case "GCMP-256":
+				if len(ptk.TK256) != 32 {
+					return nil, "", fmt.Errorf("wifi: no 256-bit temporal key")
+				}
+				out, err := gcmpDecrypt(f.rawHeader(), body, ptk.TK256)
+				return out, c, err
 			}
 			out, err := ccmpDecrypt(f.rawHeader(), body, ptk.TK)
 			return out, "CCMP", err

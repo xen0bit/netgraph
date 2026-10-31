@@ -61,8 +61,8 @@ netgraph serve -db /var/lib/netgraph/netgraph.db -listen :8443
 | `-alert-learn` | `24h` | learn the network this long after the first sensor connects before alerting on new devices |
 | `-alert-anomalies` | | also POST anomalies at or above this severity: `low`, `medium` or `high`; repeats of one finding are cooled down for an hour |
 | `-alert-anomaly-kinds` | | comma-separated finding kinds to alert on, such as `scan,rogue_dhcp`; empty means all |
-| `-max-db-mb` | | emergency database ceiling in MiB; when crossed, old raw rows (then rollups only with `-trim-rollups`) are deleted |
-| `-trim-rollups` | off | allow the disk guard to delete the oldest hourly rollups too |
+| `-max-db-mb` | | emergency database ceiling in MiB; when crossed, old raw rows (rollups and facts only with `-trim-rollups`) are deleted |
+| `-trim-rollups` | off | allow the disk guard to delete the oldest hourly rollups and facts too |
 | `-web-dir` | | serve the UI from a directory instead of the embedded copy |
 
 "unit:" defaults apply under the packaged systemd unit, which hands the

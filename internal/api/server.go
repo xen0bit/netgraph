@@ -115,7 +115,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.Header().Set("Vary", "Accept-Encoding")
-	gz := &gzipResponseWriter{ResponseWriter: w}
+	gz := &gzipResponseWriter{ResponseWriter: w, head: r.Method == http.MethodHead}
 	defer gz.Close()
 	s.mux.ServeHTTP(gz, r)
 }
@@ -146,7 +146,11 @@ type gzipResponseWriter struct {
 	wrote   bool
 	encoded bool
 	skip    bool
+	head    bool
 }
+
+// Unwrap lets http.ResponseController reach the connection.
+func (g *gzipResponseWriter) Unwrap() http.ResponseWriter { return g.ResponseWriter }
 
 func (g *gzipResponseWriter) WriteHeader(code int) {
 	if g.wrote {
@@ -155,7 +159,7 @@ func (g *gzipResponseWriter) WriteHeader(code int) {
 	g.wrote = true
 	h := g.Header()
 	ct := h.Get("Content-Type")
-	g.skip = code == http.StatusNoContent || code == http.StatusNotModified ||
+	g.skip = g.head || code == http.StatusNoContent || code == http.StatusNotModified ||
 		h.Get("Content-Encoding") != "" || strings.HasPrefix(ct, "text/event-stream")
 	if !g.skip {
 		h.Set("Content-Encoding", "gzip")
@@ -410,10 +414,7 @@ func (s *Server) wifiKeys(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
-// setLabel names a device by hand ({"label": ""} clears the name). It is
-// authorised like the UI that calls it, with the read token. A JSON body is
-// required, so a cross-origin page cannot send it without a CORS preflight,
-// which this server never grants.
+// anomalyMutes lists the mutes in force.
 func (s *Server) anomalyMutes(w http.ResponseWriter, r *http.Request) {
 	m, err := s.cfg.Store.AnomalyMutes(r.Context(), true)
 	if err != nil {
@@ -423,7 +424,13 @@ func (s *Server) anomalyMutes(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"mutes": m})
 }
 
+// muteAnomaly creates or replaces a mute. Like setLabel it requires a JSON
+// body, so a cross-origin form cannot post one without a preflight.
 func (s *Server) muteAnomaly(w http.ResponseWriter, r *http.Request) {
+	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		httpError(w, http.StatusUnsupportedMediaType, errors.New("expected application/json"))
+		return
+	}
 	var body model.AnomalyMute
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil {
 		httpError(w, http.StatusBadRequest, err)
@@ -436,6 +443,8 @@ func (s *Server) muteAnomaly(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
+// unmuteAnomaly removes one mute. DELETE is never a simple cross-origin
+// request, so it needs no body check.
 func (s *Server) unmuteAnomaly(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	if err := s.cfg.Store.DeleteAnomalyMute(r.Context(), q.Get("kind"), q.Get("device"), q.Get("entity")); err != nil {
@@ -445,6 +454,10 @@ func (s *Server) unmuteAnomaly(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]bool{"ok": true})
 }
 
+// setLabel names a device by hand ({"label": ""} clears the name). It is
+// authorised like the UI that calls it, with the read token. A JSON body is
+// required, so a cross-origin page cannot send it without a CORS preflight,
+// which this server never grants.
 func (s *Server) setLabel(w http.ResponseWriter, r *http.Request) {
 	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
 		httpError(w, http.StatusUnsupportedMediaType, errors.New("expected application/json"))

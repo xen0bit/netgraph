@@ -46,7 +46,7 @@ func runServe(args []string) error {
 	asnFile := fs.String("asn-file", envOr("NETGRAPH_ASN_FILE", ""), "an iptoasn.com ip2asn-combined.tsv(.gz): name the network and country of remote addresses; reloaded on SIGHUP and when the file changes. Default: the table built into release binaries, if any; none: no table. $NETGRAPH_ASN_FILE")
 	webDir := fs.String("web-dir", "", "serve the web UI from this directory instead of the embedded copy")
 	maxDB := fs.Int("max-db-mb", 0, "run emergency retention when the database exceeds this many MiB (0: off)")
-	trimRollups := fs.Bool("trim-rollups", false, "with -max-db-mb, allow emergency retention to delete oldest rollups too")
+	trimRollups := fs.Bool("trim-rollups", false, "with -max-db-mb, allow emergency retention to delete the oldest rollups and facts too")
 	raw := fs.String("raw-retention", "14d", "keep raw flows, DNS and observations this long")
 	rollup := fs.String("rollup-retention", "180d", "keep hourly rollups and facts this long")
 	gap := fs.String("fact-gap", "1h", "silence after which a relationship starts a new period")
