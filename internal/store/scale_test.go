@@ -156,3 +156,36 @@ func TestScale(t *testing.T) {
 		time1("graph all", graph(all))
 	}
 }
+
+// BenchmarkScaleGraph measures the 24-hour graph from a prebuilt scale
+// database. It is opt-in like TestScale:
+//
+//	NETGRAPH_SCALE=1 NETGRAPH_SCALE_DB=/tmp/scale.db go test -bench ScaleGraph ./internal/store
+func BenchmarkScaleGraph(b *testing.B) {
+	path := os.Getenv("NETGRAPH_SCALE_DB")
+	if path == "" {
+		b.Skip("set NETGRAPH_SCALE_DB to a TestScale database")
+	}
+	day := time.Date(2026, 10, 24, 0, 0, 0, 0, time.UTC)
+	st, err := Open(path, Config{Now: func() time.Time { return day.Add(25 * time.Hour) }})
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer st.Close()
+	f := model.Filter{From: day, To: day.Add(24 * time.Hour)}
+	for _, tc := range []struct {
+		name string
+		o    model.GraphOptions
+	}{
+		{"with-anomalies", model.DefaultGraphOptions},
+		{"no-anomalies", func() model.GraphOptions { o := model.DefaultGraphOptions; o.Anomalies = false; return o }()},
+	} {
+		b.Run(tc.name, func(b *testing.B) {
+			for range b.N {
+				if _, err := st.Graph(context.Background(), f, tc.o); err != nil {
+					b.Fatal(err)
+				}
+			}
+		})
+	}
+}

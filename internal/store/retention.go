@@ -7,7 +7,7 @@ import (
 
 // RetentionResult counts what one retention pass deleted.
 type RetentionResult struct {
-	Flows, DNS, Answers, Observations, Facts, Rollups, Entities, Handshakes int64
+	Flows, DNS, Answers, Observations, Facts, Rollups, Entities, Handshakes, Mutes int64
 }
 
 // Retain deletes data past its retention: raw tables after RawRetention,
@@ -43,6 +43,7 @@ func (s *Store) Retain(ctx context.Context) (RetentionResult, error) {
 		// At most four rows per AP, and an AP that never rekeys keeps
 		// its GTK for as long as it runs, so these follow the rollups too.
 		{&r.Handshakes, `DELETE FROM wifi_group_keys WHERE ts < ?`, roll},
+		{&r.Mutes, `DELETE FROM anomaly_mutes WHERE until < ?`, now.UnixMilli()},
 	}
 	// Each chunk takes the ingest lock for itself, so ingest runs between
 	// them. Deleting a fact ingest still has open is harmless: a fact past

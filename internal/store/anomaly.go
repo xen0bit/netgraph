@@ -49,7 +49,7 @@ func (s *Store) Anomalies(ctx context.Context, f model.Filter) (*model.AnomalyRe
 	key := fmt.Sprintf("%d|%d|%s", from, to, f.Device)
 	s.anomMu.Lock()
 	defer s.anomMu.Unlock()
-	if s.anomRep != nil && s.anomKey == key && s.cfg.Now().Sub(s.anomAt) < 15*time.Second {
+	if s.anomRep != nil && s.anomKey == key && s.cfg.Now().Sub(s.anomAt) < time.Minute {
 		return s.anomRep, nil
 	}
 	rep := &model.AnomalyReport{FromMS: from, ToMS: to, Anomalies: []model.Anomaly{}}
@@ -87,6 +87,20 @@ func (s *Store) Anomalies(ctx context.Context, f model.Filter) (*model.AnomalyRe
 			keep[d.id] = true
 		}
 		out = slices.DeleteFunc(out, func(x model.Anomaly) bool { return !keep[x.Device] })
+	}
+	mutes, err := s.AnomalyMutes(ctx, true)
+	if err != nil {
+		return nil, err
+	}
+	if len(mutes) > 0 {
+		out = slices.DeleteFunc(out, func(x model.Anomaly) bool {
+			for _, m := range mutes {
+				if muteMatches(m, x) {
+					return true
+				}
+			}
+			return false
+		})
 	}
 	slices.SortFunc(out, func(x, y model.Anomaly) int {
 		if c := cmp.Compare(model.SeverityRank(y.Severity), model.SeverityRank(x.Severity)); c != 0 {

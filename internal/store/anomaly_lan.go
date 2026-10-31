@@ -1,9 +1,11 @@
 package store
 
 import (
+	"cmp"
 	"context"
 	"fmt"
 	"net/netip"
+	"slices"
 	"strconv"
 	"time"
 
@@ -16,37 +18,76 @@ import (
 // misconfiguration, or ARP spoofing).
 func (a *anomalies) arpConflicts(ctx context.Context) error {
 	const minOverlap int64 = 5 * 60 * 1000
+	// Read overlapping fact rows, not min/max over a group: a device can
+	// hold an address in several separate periods, and only an actual
+	// overlap is a conflict.
 	rows, err := a.s.r.QueryContext(ctx, `
-		SELECT ip.key, f1.src, f2.src, min(f1.first_seen), max(f1.last_seen)
+		SELECT ip.key, f1.src, f2.src,
+		       max(f1.first_seen, f2.first_seen) AS overlap_start,
+		       min(f1.last_seen, f2.last_seen) AS overlap_end
 		FROM facts f1
 		JOIN facts f2 ON f2.dst = f1.dst AND f2.rel = 'has_ip' AND f2.src > f1.src
 		JOIN entities ip ON ip.id = f1.dst AND ip.kind = 'ip'
 		WHERE f1.rel = 'has_ip'
 		  AND f1.first_seen < ? AND f1.last_seen >= ?
 		  AND f2.first_seen < ? AND f2.last_seen >= ?
-		  AND min(f1.last_seen, f2.last_seen) - max(f1.first_seen, f2.first_seen) >= ?
-		GROUP BY ip.key, f1.src, f2.src`, a.to, a.from, a.to, a.from, minOverlap)
+		  AND f1.first_seen < f2.last_seen AND f2.first_seen < f1.last_seen
+		ORDER BY ip.key, f1.src, f2.src, overlap_start`, a.to, a.from, a.to, a.from)
 	if err != nil {
 		return err
 	}
+	type pair struct {
+		ip       string
+		one, two int64
+	}
+	type span struct{ first, last int64 }
 	type conflict struct {
-		ip          string
-		one, two    int64
+		pair
 		first, last int64
 	}
-	var cs []conflict
-	var ids []int64
+	spans := map[pair][]span{}
+	var order []pair
 	for rows.Next() {
-		var c conflict
-		if err := rows.Scan(&c.ip, &c.one, &c.two, &c.first, &c.last); err != nil {
+		var key pair
+		var s span
+		if err := rows.Scan(&key.ip, &key.one, &key.two, &s.first, &s.last); err != nil {
 			rows.Close()
 			return err
 		}
-		cs = append(cs, c)
-		ids = append(ids, c.one, c.two)
+		if _, ok := spans[key]; !ok {
+			order = append(order, key)
+		}
+		spans[key] = append(spans[key], s)
 	}
 	if err := rows.Close(); err != nil {
 		return err
+	}
+	var cs []conflict
+	var ids []int64
+	for _, key := range order {
+		ss := spans[key]
+		slices.SortFunc(ss, func(x, y span) int { return cmp.Compare(x.first, y.first) })
+		merged := ss[0]
+		best := span{}
+		flush := func() {
+			if merged.last-merged.first > best.last-best.first {
+				best = merged
+			}
+		}
+		for _, s := range ss[1:] {
+			if s.first <= merged.last {
+				merged.last = max(merged.last, s.last)
+				continue
+			}
+			flush()
+			merged = s
+		}
+		flush()
+		if best.last-best.first < minOverlap {
+			continue
+		}
+		cs = append(cs, conflict{pair: key, first: best.first, last: best.last})
+		ids = append(ids, key.one, key.two)
 	}
 	devs, err := a.devices(ctx, ids)
 	if err != nil {
@@ -57,8 +98,6 @@ func (a *anomalies) arpConflicts(ctx context.Context) error {
 		if one == nil || two == nil {
 			continue
 		}
-		// A randomized phone rotating its address is still worth a low
-		// note; two fixed devices are the stronger case.
 		sev := model.SeverityMedium
 		if one.randomized || two.randomized {
 			sev = model.SeverityLow
