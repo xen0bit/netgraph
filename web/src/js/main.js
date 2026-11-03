@@ -1138,6 +1138,16 @@ async function saveNote() {
   }
 }
 
+async function exportCapsule() {
+  try {
+    const html = await track(api("capsule", { from: state.to - state.span, to: state.to }, true));
+    download(`netgraph-capsule-${fileStamp()}.html`, html, "text/html");
+    setStatus("capsule downloaded");
+  } catch (e) {
+    setStatus(e.message, true);
+  }
+}
+
 async function saveBookmark() {
   const name = prompt("Bookmark this moment as:");
   if (!name) return;
@@ -1503,6 +1513,7 @@ function init() {
   $("#rec-now").onclick = () => setRecAt(Date.now());
   $("#rec-note").onclick = openNote;
   $("#rec-bookmark").onclick = saveBookmark;
+  $("#rec-capsule").onclick = exportCapsule;
   $("#note-save").onclick = saveNote;
   $("#rec-diff").onclick = renderDiffBox;
   $("#rec-unfollow").onclick = () => { state.rec.follow = ""; refresh(); };

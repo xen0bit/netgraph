@@ -145,6 +145,7 @@ func New(cfg Config) *Server {
 	read("/api/v1/coverage", s.coverage)
 	read("/api/v1/airspace", s.airspace)
 	read("/api/v1/weather", s.weather)
+	read("/api/v1/capsule", s.capsule)
 	read("/api/v1/annotations", s.annotations)
 	read("/api/v1/bookmarks", s.bookmarks)
 	read("/api/v1/autopsy", s.autopsyPreview)
@@ -1258,21 +1259,7 @@ func (s *Server) exportIncident(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, err)
 		return
 	}
-	d, err := s.cfg.Store.IncidentDetail(r.Context(), id)
-	if err != nil {
-		s.fail(w, err)
-		return
-	}
-	a, err := s.cfg.Store.IncidentAutopsy(r.Context(), id)
-	if err != nil {
-		s.fail(w, err)
-		return
-	}
-	bundle := map[string]any{
-		"schema": "netgraph.incident.v1", "incident": d, "autopsy": a,
-		"generated": time.Now().UTC().Format(time.RFC3339),
-	}
-	b, err := json.MarshalIndent(bundle, "", "  ")
+	b, err := s.cfg.Store.ExportIncident(r.Context(), id)
 	if err != nil {
 		s.fail(w, err)
 		return

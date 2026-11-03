@@ -99,6 +99,7 @@ TIME                 DEVICE           TYPE  NAME               RCODE     MS    A
 | `query weather` | observed traffic and a simple forecast |
 | `note "text" -at TIME` | add a note to the recorded moment |
 | `bookmark "name" -at TIME` | mark a moment |
+| `incident list/show/autopsy/export` | work with saved investigations |
 | `graph -o FILE` | the window's graph: `.svg`, `.d2`, `.txt`, `.json`, or `-` for text on stdout |
 | `label MAC NAME...`, `label -clear MAC` | name a device by hand; it overrides DHCP, mDNS and every other source until cleared. With `-server` it goes through the API; without, it writes the database file (stop the server first) |
 | `import FILE.pcap...` | ingest captures directly (re-importing a file is a no-op) |

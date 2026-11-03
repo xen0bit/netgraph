@@ -672,6 +672,18 @@ func TestRecorderEndpoints(t *testing.T) {
 	if inc.ID == 0 {
 		t.Fatal("incident has no id")
 	}
+	req, _ = http.NewRequest(http.MethodGet, srv.URL+"/api/v1/capsule?from="+strconv.FormatInt(window.From.UnixMilli(), 10)+"&to="+strconv.FormatInt(window.To.UnixMilli(), 10), nil)
+	req.Header.Set("Authorization", "Bearer rd-tok")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("capsule: %v %v", err, resp)
+	}
+	capsule, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !bytes.Contains(capsule, []byte("netgraph time capsule")) {
+		t.Fatalf("capsule body: %.200s", capsule)
+	}
+
 	resp = post("/api/v1/annotations", map[string]any{"ts": window.To.UnixMilli(), "text": "api note", "entity": "device:3c:22:fb:01:02:03"})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("annotation: %s", resp.Status)

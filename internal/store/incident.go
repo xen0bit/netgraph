@@ -221,6 +221,9 @@ func (s *Store) Autopsy(ctx context.Context, a model.Anomaly, f model.Filter) (*
 		ID: "finding", AtMS: a.TS, Title: strings.ReplaceAll(a.Kind, "_", " "),
 		Narrative: intro + " " + a.Summary, Camera: model.Camera{Focus: subject}, Evidence: ev, Severity: a.Severity,
 	})
+	if s := autopsyKindScene(a, subject, ev); s != nil {
+		out.Scenes = append(out.Scenes, *s)
+	}
 	if subject == "" {
 		out.Gaps = append(out.Gaps, "the finding names no entity, so the camera cannot follow one")
 		return out, nil
@@ -270,6 +273,45 @@ func (s *Store) Autopsy(ctx context.Context, a model.Anomaly, f model.Filter) (*
 		return cmpScene(x, y)
 	})
 	return out, nil
+}
+
+func autopsyKindScene(a model.Anomaly, subject string, ev []model.EvidenceRef) *model.Scene {
+	var title, narrative string
+	switch a.Kind {
+	case model.AnomalyNewDevice:
+		title, narrative = "Identity anchor", "The first record is a device entity; its MAC and vendor are the anchor. Check the address periods and the first conversations before assuming the name is trustworthy."
+	case model.AnomalyNewDestination:
+		title, narrative = "Destination evidence", "The destination is named from SNI, HTTP Host or DNS. If it is unnamed, the address and network are the only evidence; an address is not a domain."
+	case model.AnomalyUploadSpike:
+		title, narrative = "Upload attribution", "The spike is measured against this device's own history. The bytes are attributed to destinations; an unnamed destination remains a gap."
+	case model.AnomalyBeacon:
+		title, narrative = "Periodicity", "Beaconing is inferred from repeated connections to one destination. Check the interval and jitter, and whether the name is new."
+	case model.AnomalyDNSFailures:
+		title, narrative = "Failure source", "Failures are response codes or timeouts. They can be the client resolver, the upstream server or the name itself; the lookup records show which."
+	case model.AnomalyDNSTunnel:
+		title, narrative = "Name shape", "Tunnelling is inferred from many long, unique names under one site. Encrypted DNS (DoH/DoT) is invisible to this evidence."
+	case model.AnomalyRogueAP:
+		title, narrative = "Radio identity", "The finding is about a BSSID using an SSID seen elsewhere. Client associations and handshakes are the impact; a monitor-only sensor may miss the radio."
+	case model.AnomalyScan:
+		title, narrative = "Probe visibility", "The source touched many ports or hosts. Blocked probes and upstream firewall decisions are invisible; only observed attempts count."
+	case model.AnomalyBruteForce:
+		title, narrative = "Session shape", "The evidence is many short sessions to a login service. Application-level success or failure is not visible; bytes and close reasons are."
+	case model.AnomalyNewService:
+		title, narrative = "Listener", "A local device started serving a port. Clients and bytes show reachability; the service banner is not assumed."
+	case model.AnomalyInboundSurge:
+		title, narrative = "Inbound baseline", "Inbound connections are compared with recent hours. Upstream NAT and firewall state are outside the observed evidence."
+	case model.AnomalyARPConflict:
+		title, narrative = "Address claimant", "Two MACs claimed one address. Later traffic shows which claimant won; ARP on other segments is invisible."
+	case model.AnomalyRogueDHCP:
+		title, narrative = "Offer path", "A DHCP server other than the expected one answered. Offers and later leases show the impact; unicast or relayed DHCP may be invisible."
+	case model.AnomalyDeauthFlood:
+		title, narrative = "Burst impact", "A burst of deauthentication frames is the precursor. The next associations, roams and handshakes show whether clients were knocked off."
+	case model.AnomalySensorSilent:
+		title, narrative = "Blind spot", "A sensor stopped reporting. Other sensors and the last stats show what was still visible; absence of evidence is not evidence of absence."
+	default:
+		return nil
+	}
+	return &model.Scene{ID: "kind", AtMS: a.TS, Title: title, Narrative: narrative, Camera: model.Camera{Focus: subject}, Evidence: ev, Severity: a.Severity}
 }
 
 func autopsyIntro(kind string) string {
@@ -323,4 +365,21 @@ func (s *Store) IncidentAutopsy(ctx context.Context, id int64) (*model.Autopsy, 
 	}
 	out.Incident = id
 	return out, nil
+}
+
+// ExportIncident builds the self-contained bundle used by the API and CLI.
+func (s *Store) ExportIncident(ctx context.Context, id int64) ([]byte, error) {
+	d, err := s.IncidentDetail(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	a, err := s.IncidentAutopsy(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	bundle := map[string]any{
+		"schema": "netgraph.incident.v1", "incident": d, "autopsy": a,
+		"generated": time.Now().UTC().Format(time.RFC3339),
+	}
+	return json.MarshalIndent(bundle, "", "  ")
 }
