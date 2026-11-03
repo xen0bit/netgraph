@@ -926,6 +926,26 @@ type WeatherReport struct {
 	Gaps   []string       `json:"gaps,omitempty"`
 }
 
+// Annotation is a human note pinned to a moment and optionally an entity.
+type Annotation struct {
+	ID      int64  `json:"id"`
+	TS      int64  `json:"ts"`
+	Entity  string `json:"entity,omitempty"`
+	Kind    string `json:"kind,omitempty"`
+	Text    string `json:"text"`
+	Author  string `json:"author,omitempty"`
+	Created int64  `json:"created,omitempty"`
+}
+
+// Bookmark marks a moment for later.
+type Bookmark struct {
+	ID      int64  `json:"id"`
+	TS      int64  `json:"ts"`
+	Entity  string `json:"entity,omitempty"`
+	Name    string `json:"name"`
+	Created int64  `json:"created,omitempty"`
+}
+
 // AnomalyMute suppresses matching findings until Until (ms). Empty Kind,
 // Device or Entity fields are wildcards; the API/UI normally sets all three
 // for one finding.

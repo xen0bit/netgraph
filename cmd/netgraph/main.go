@@ -49,6 +49,10 @@ func main() {
 		err = runWhatIf(os.Args[2:])
 	case "ask":
 		err = runAsk(os.Args[2:])
+	case "note":
+		err = runNote(os.Args[2:])
+	case "bookmark":
+		err = runBookmark(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "netgraph: unknown command %q\n\n", os.Args[1])
 		usage()
@@ -74,6 +78,8 @@ commands:
   label      name a device by hand (or -clear the name)
   whatif     test a proposed policy against observed traffic
   ask        answer a question from recorded evidence, with citations
+  note       add a timestamped note to the Flight Recorder rail
+  bookmark   mark a moment
   import     ingest pcap/pcapng files directly
   db         database maintenance (migrate, backup, retain, vacuum)
   version    print version information

@@ -1114,6 +1114,42 @@ function setLive(on) {
   refresh();
 }
 
+// --- notes and bookmarks --------------------------------------------------------------
+
+function openNote() {
+  const dlg = $("#note-dialog");
+  $("#note-text").value = "";
+  $("#note-entity").value = state.rec.follow || state.open || "";
+  $("#note-status").textContent = stamp(state.to);
+  if (!dlg.open) dlg.showModal();
+  setTimeout(() => $("#note-text").focus(), 0);
+}
+
+async function saveNote() {
+  const text = $("#note-text").value.trim();
+  if (!text) { $("#note-status").textContent = "write something first"; return; }
+  try {
+    await send("POST", "annotations", { ts: state.to, entity: $("#note-entity").value.trim(), kind: "note", text, author: "web" });
+    $("#note-dialog").close();
+    setStatus("note saved");
+    refresh();
+  } catch (e) {
+    $("#note-status").textContent = e.message;
+  }
+}
+
+async function saveBookmark() {
+  const name = prompt("Bookmark this moment as:");
+  if (!name) return;
+  try {
+    await send("POST", "bookmarks", { ts: state.to, entity: state.rec.follow || state.open || "", name });
+    setStatus("bookmark saved");
+    refresh();
+  } catch (e) {
+    setStatus(e.message, true);
+  }
+}
+
 // --- what-if -------------------------------------------------------------------------
 
 const whatifExample = {
@@ -1315,7 +1351,7 @@ async function renderRail(seq) {
   box.hidden = false;
   let page;
   try {
-    page = await track(api("timeline", { from: state.to - units.d, to: state.to, limit: 40, entity: state.rec.follow || "" }));
+    page = await track(api("timeline", { from: state.to - units.d, to: state.to + 1, limit: 40, entity: state.rec.follow || "" }));
   } catch (e) {
     box.innerHTML = `<p class="muted">${esc(e.message)}</p>`;
     return;
@@ -1465,6 +1501,9 @@ function init() {
   $("#rec-back").onclick = () => setRecAt(state.rec.at - Math.max(1000, state.rec.lookback / 5));
   $("#rec-fwd").onclick = () => setRecAt(Math.min(Date.now(), state.rec.at + Math.max(1000, state.rec.lookback / 5)));
   $("#rec-now").onclick = () => setRecAt(Date.now());
+  $("#rec-note").onclick = openNote;
+  $("#rec-bookmark").onclick = saveBookmark;
+  $("#note-save").onclick = saveNote;
   $("#rec-diff").onclick = renderDiffBox;
   $("#rec-unfollow").onclick = () => { state.rec.follow = ""; refresh(); };
   $("#rec-head").oninput = () => {

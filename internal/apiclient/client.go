@@ -331,3 +331,29 @@ func (c *Client) Weather(ctx context.Context, f model.Filter) (*model.WeatherRep
 	err := c.getJSON(ctx, "/api/v1/weather", f.Values(), &v)
 	return &v, err
 }
+
+func (c *Client) CreateAnnotation(ctx context.Context, a model.Annotation) (*model.Annotation, error) {
+	body, err := json.Marshal(a)
+	if err != nil {
+		return nil, err
+	}
+	b, err := c.do(ctx, http.MethodPost, "/api/v1/annotations", nil, body)
+	if err != nil {
+		return nil, err
+	}
+	var v model.Annotation
+	return &v, json.Unmarshal(b, &v)
+}
+
+func (c *Client) CreateBookmark(ctx context.Context, b model.Bookmark) (*model.Bookmark, error) {
+	body, err := json.Marshal(b)
+	if err != nil {
+		return nil, err
+	}
+	bdy, err := c.do(ctx, http.MethodPost, "/api/v1/bookmarks", nil, body)
+	if err != nil {
+		return nil, err
+	}
+	var v model.Bookmark
+	return &v, json.Unmarshal(bdy, &v)
+}

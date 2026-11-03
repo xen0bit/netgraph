@@ -49,6 +49,8 @@
     <select id="rec-speed" aria-label="Playback speed"><option value="1">1×</option><option value="10">10×</option><option value="60">60×</option></select>
     <select id="rec-lookback" aria-label="Frame lookback"><option value="300000">5m</option><option value="900000">15m</option><option value="3600000">1h</option></select>
     <button id="rec-now">Now</button>
+    <button id="rec-note">Note</button>
+    <button id="rec-bookmark">Mark</button>
     <button id="rec-diff" title="Mark A, then compare the current moment">Diff A</button>
     <span id="rec-follow" class="muted" hidden></span>
     <button id="rec-unfollow" hidden>Unfollow</button>
@@ -120,6 +122,14 @@
   </main>
 
   <footer class="status"><span id="status" role="status" aria-live="polite"></span><button id="connect" type="button" hidden>Connect</button><span id="version"></span></footer>
+
+  <dialog id="note-dialog" class="note">
+    <h2>Add a note</h2>
+    <p class="muted">Notes are kept with the recorded moment and appear on the event rail.</p>
+    <input id="note-entity" type="text" aria-label="Entity (optional)" placeholder="device:aa:bb:cc:00:00:01 (optional)">
+    <textarea id="note-text" rows="4" aria-label="Note" placeholder="What changed?"></textarea>
+    <div class="actions"><button id="note-save" type="button">Save note</button><span id="note-status" class="muted"></span></div>
+  </dialog>
 
   <dialog id="whatif-dialog" class="whatif">
     <h2>What-if change simulator</h2>

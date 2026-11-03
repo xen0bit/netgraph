@@ -55,6 +55,7 @@ they must not depend on the resolver of the machine replaying them.
 | `traffic_hourly`, `dns_hourly` | hourly rollups per device and destination | rollup retention |
 | `timeline_events` | the Flight Recorder's compact event rail: device joins, DNS, flow open/close, observations | raw retention |
 | `frame_cache` | disposable computed moments | bounded by size and age |
+| `annotations`, `bookmarks` | human notes and marked moments on the rail | until deleted |
 
 A fact's rows are its **periods**. Seeing a relationship again within
 `-fact-gap` (1 h) extends the current period; after a longer silence a new
