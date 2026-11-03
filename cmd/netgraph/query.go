@@ -9,6 +9,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/xen0bit/netgraph/internal/model"
 	"github.com/xen0bit/netgraph/internal/store"
@@ -30,6 +31,10 @@ what:
   sensors      sensors that have sent data
   wifi         Wi-Fi networks seen by monitor-mode sensors
   anomalies    what stands out in the window, most severe first
+  frame        the network at -at (a Flight Recorder moment)
+  timeline     the event rail over the window
+  story ID     one entity's intervals and milestones
+  diff         what changed between -at-a and -at-b
 `
 
 func runQuery(args []string) error {
@@ -39,9 +44,9 @@ func runQuery(args []string) error {
 	}
 	what, args := args[0], args[1:]
 	var id string
-	if what == "entity" {
+	if what == "entity" || what == "story" {
 		if len(args) == 0 || strings.HasPrefix(args[0], "-") {
-			return errors.New("usage: netgraph query entity <kind:key> [flags]")
+			return fmt.Errorf("usage: netgraph query %s <kind:key> [flags]", what)
 		}
 		id, args = args[0], args[1:]
 	}
@@ -52,6 +57,14 @@ func runQuery(args []string) error {
 	f.register(fs)
 	out := fs.String("o", "table", "output: table, json or csv")
 	step := fs.String("step", "", "timeseries step, e.g. 5m (default: about 60 buckets)")
+	at := fs.String("at", "", "moment for frame/diff: -15m, RFC 3339, '2026-10-25 14:00', unix ms")
+	atA := fs.String("at-a", "", "first moment for diff")
+	atB := fs.String("at-b", "", "second moment for diff")
+	lookback := fs.String("lookback", "5m", "frame/diff lookback ending at the moment")
+	scope := fs.String("scope", "", "frame/diff scope: device:MAC, domain:name or ip:addr")
+	entity := fs.String("entity", "", "timeline entity filter: device:MAC, domain:name, ...")
+	kinds := fs.String("kinds", "", "timeline comma-separated event kinds")
+	cursor := fs.String("cursor", "", "timeline cursor from a previous page")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -125,6 +138,87 @@ func runQuery(args []string) error {
 			return err
 		}
 		v, t = series, timeseriesTable(series)
+	case "frame":
+		lb, perr := model.ParseDuration(*lookback)
+		if perr != nil || lb <= 0 {
+			return fmt.Errorf("-lookback: %w", perr)
+		}
+		if *at != "" {
+			t, perr := model.ParseTime(*at, time.Now())
+			if perr != nil {
+				return perr
+			}
+			filter.To, filter.From = t, t.Add(-lb)
+		}
+		switch {
+		case strings.HasPrefix(*scope, "device:"):
+			filter.Device = strings.TrimPrefix(*scope, "device:")
+		case strings.HasPrefix(*scope, "domain:"):
+			filter.DomainExact = strings.TrimPrefix(*scope, "domain:")
+		case strings.HasPrefix(*scope, "ip:"):
+			filter.IP = strings.TrimPrefix(*scope, "ip:")
+		case *scope != "":
+			return fmt.Errorf("-scope: unknown %q", *scope)
+		}
+		fr, err := be.Frame(ctx(), filter)
+		if err != nil {
+			return err
+		}
+		v = fr
+		if *out != "json" {
+			return writeFrame(w, fr, *out)
+		}
+	case "timeline":
+		var ks []string
+		for _, k := range strings.Split(*kinds, ",") {
+			if k = strings.TrimSpace(k); k != "" {
+				ks = append(ks, k)
+			}
+		}
+		page, err := be.Timeline(ctx(), filter, model.TimelineQuery{Entity: *entity, Kinds: ks, Cursor: *cursor, Limit: filter.Limit})
+		if err != nil {
+			return err
+		}
+		v, t = page, timelineTable(page.Events)
+	case "story":
+		st, err := be.Story(ctx(), id, filter)
+		if err != nil {
+			return err
+		}
+		v = st
+		if *out != "json" {
+			return writeStory(w, st)
+		}
+	case "diff":
+		lb, perr := model.ParseDuration(*lookback)
+		if perr != nil || lb <= 0 {
+			return fmt.Errorf("-lookback: %w", perr)
+		}
+		if *atB == "" {
+			*atB = "now"
+		}
+		if *atA == "" {
+			*atA = "-" + lb.String()
+		}
+		ta, perr := model.ParseTime(*atA, time.Now())
+		if perr != nil {
+			return perr
+		}
+		tb, perr := model.ParseTime(*atB, time.Now())
+		if perr != nil {
+			return perr
+		}
+		fa, fb := filter, filter
+		fa.To, fa.From = ta, ta.Add(-lb)
+		fb.To, fb.From = tb, tb.Add(-lb)
+		df, err := be.Diff(ctx(), fa, fb, *scope)
+		if err != nil {
+			return err
+		}
+		v = df
+		if *out != "json" {
+			return writeDiff(w, df, *out)
+		}
 	case "sensors":
 		ss, err := be.Sensors(ctx())
 		if err != nil {
@@ -336,4 +430,68 @@ func firstNonEmpty(ss ...string) string {
 		}
 	}
 	return ""
+}
+
+func timelineTable(events []model.TimelineEntry) *table {
+	t := &table{head: []string{"TIME", "KIND", "ENTITY", "TITLE", "REF"}}
+	for _, e := range events {
+		t.add(ts(e.TS), e.Kind, e.Entity, clip(e.Title, 48), e.Ref)
+	}
+	return t
+}
+
+func writeFrame(w io.Writer, fr *model.Frame, format string) error {
+	fmt.Fprintf(w, "MOMENT %s (lookback %s, %s)\n", ts(fr.AtMS), time.Duration(fr.LookbackMS)*time.Millisecond, fr.Precision)
+	if fr.Summary != nil {
+		_ = writeSummary(w, fr.Summary)
+	}
+	if len(fr.Devices) > 0 {
+		fmt.Fprintln(w, "\nDEVICES")
+		_ = devicesTable(fr.Devices).write(w, "table")
+	}
+	if len(fr.Flows) > 0 {
+		fmt.Fprintln(w, "\nCONNECTIONS")
+		_ = flowsTable(fr.Flows).write(w, "table")
+	}
+	return nil
+}
+
+func writeStory(w io.Writer, st *model.Story) error {
+	fmt.Fprintf(w, "%s  (%s)\n%s → %s\n", st.Label, st.Entity, ts(st.FromMS), ts(st.ToMS))
+	t := &table{head: []string{"FROM", "TO", "KIND", "ENTITY", "LABEL", "COUNT", "SENT", "RECV"}}
+	for _, s := range st.Segments {
+		t.add(ts(s.FromMS), ts(s.ToMS), s.Kind, s.Entity, clip(s.Label, 36), strconv.Itoa(s.Count), model.FormatBytes(s.BytesOut), model.FormatBytes(s.BytesIn))
+	}
+	if err := t.write(w, "table"); err != nil {
+		return err
+	}
+	if len(st.Milestones) > 0 {
+		fmt.Fprintln(w, "\nMILESTONES")
+		_ = timelineTable(st.Milestones).write(w, "table")
+	}
+	for _, g := range st.Gaps {
+		fmt.Fprintf(w, "gap: %s\n", g)
+	}
+	return nil
+}
+
+func writeDiff(w io.Writer, d *model.Diff, format string) error {
+	fmt.Fprintf(w, "%s → %s\n", ts(d.FromMS), ts(d.ToMS))
+	t := &table{head: []string{"CHANGE", "KIND", "KEY", "LABEL", "BEFORE", "AFTER"}}
+	for _, x := range d.Added {
+		t.add("added", x.Kind, x.Key, clip(x.Label, 36), "", x.After)
+	}
+	for _, x := range d.Removed {
+		t.add("removed", x.Kind, x.Key, clip(x.Label, 36), x.Before, "")
+	}
+	for _, x := range d.Changed {
+		t.add("changed", x.Kind, x.Key, clip(x.Label, 36), x.Before, x.After)
+	}
+	if err := t.write(w, format); err != nil {
+		return err
+	}
+	for _, g := range d.Gaps {
+		fmt.Fprintf(w, "gap: %s\n", g)
+	}
+	return nil
 }

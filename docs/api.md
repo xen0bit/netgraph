@@ -44,6 +44,21 @@ are unix milliseconds.
 | `GET /api/v1/live` | server-sent events: `event: ingest` with `[{type, ts, detail}]` per batch |
 | `PUT /api/v1/devices/{mac}/label` | names a device by hand: body `{"label": "Living room TV"}` (JSON required; at most 64 printable characters), `{"label": ""}` restores the automatic name. `204`, or `400`/`404`. Read token |
 | `GET /api/v1/search?q=alice&limit=20` | `[{id, kind, key, label, last_seen}]`: devices (by MAC, name or label), addresses, DNS names and networks whose key starts with `q` or whose name contains it; exact keys first, then devices, then the most recently seen. `q` needs two characters; `kind:q` (`device:3c:22`) searches one kind. `limit` is at most 100 (default 20). Read token |
+| `GET /api/v1/frame` | `?at=TIME&lookback=5m&scope=device:MAC&limit=N`: a recorded moment, built from the same queries as a window. Returns summary, devices, destinations, connections, DNS, Wi-Fi, sensors, anomalies and graph. `scope` applies a device, domain or IP filter. |
+| `GET /api/v1/timeline` | `?from=&to=&entity=&kinds=dns,flow_open,anomaly&limit=&cursor=`: the event rail, newest first. `cursor` is opaque. Older windows cluster events. |
+| `GET /api/v1/story` | `?entity=device:MAC&from=-7d&to=now`: an entity's intervals, milestones, evidence and gaps. |
+| `GET /api/v1/diff` | `?at_a=&at_b=&lookback=5m&scope=`: what was added, removed or changed between two moments. |
+| `GET /api/v1/autopsy` | `?kind=&ts=&device=&entity=&summary=&severity=`: a deterministic, evidence-backed reconstruction of an anomaly; no incident needs to exist. |
+| `GET /api/v1/incidents` | saved investigations, newest first (`?status=&limit=`). |
+| `GET /api/v1/incidents/{id}` | one incident with notes and pinned evidence. |
+| `GET /api/v1/incidents/{id}/autopsy` | the incident's cached/rebuilt reel. |
+| `GET /api/v1/incidents/{id}/export` | a self-contained JSON bundle (no packets, no keys). |
+| `POST /api/v1/incidents` | save an anomaly: `{anomaly, title, from?, to?}`. Read token. |
+| `PATCH /api/v1/incidents/{id}` | `{status, title, summary, note, author}`. Read token. |
+| `POST /api/v1/incidents/{id}/pin` | pin an evidence reference. Read token. |
+| `DELETE /api/v1/incidents/{id}` | remove an incident and its notes/evidence. Read token. |
+| `POST /api/v1/whatif` | run a proposed policy against observed traffic: `{policy, from, to}`. Read-only; never applies a rule. Read token. |
+| `POST /api/v1/ask` | grounded question answering: `{q, from, to}`. Returns claims, citations, plan and gaps. Read token. |
 | `GET /api/v1/export?kind=flows` | CSV of every field the API returns for that table (`devices`, `flows`, `dns`, `facts`, `anomalies`, `wifi`). It uses the same window and filters and streams most kinds from the database, so it is not limited to what the browser loaded. Default safety caps: connections and facts 100,000 rows, lookups 50,000, Wi-Fi networks 10,000, devices and anomalies materialised in memory. Add `all=1` to stream every matching row (hard ceiling 5,000,000); the web "All CSV" uses it. Read token |
 | `GET /api/v1/anomalies` | the window's [anomalies](concepts.md#anomalies), most severe first: `{from, to, since, learning, anomalies: [{kind, severity, ts, device, device_name, entity, summary, evidence}]}`. Only the `device` filter applies. Read token |
 | `GET /api/v1/anomalies/mutes` | `{mutes: [{kind, device, entity, until, note, created}]}`, active mutes only. Read token |

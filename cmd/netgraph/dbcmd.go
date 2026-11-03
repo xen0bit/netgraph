@@ -23,6 +23,7 @@ commands:
   forget MAC       remove one device and everything attributed to it
   vacuum           rebuild the file to reclaim all free space (stop the server first)
   enrich           look up the network of remote ends stored without one (-asn-file; the server does this when it loads one)
+  timeline         rebuild the Flight Recorder event index from the raw tables (-since)
 `
 
 func runDB(args []string) error {
@@ -38,6 +39,7 @@ func runDB(args []string) error {
 	asnFile := fs.String("asn-file", envOr("NETGRAPH_ASN_FILE", ""), "enrich: an iptoasn.com ip2asn-combined.tsv(.gz) (default: the table built into release binaries); $NETGRAPH_ASN_FILE")
 	dryRun := fs.Bool("dry-run", false, "purge/forget: count only, make no changes")
 	force := fs.Bool("force", false, "backup: replace an existing destination")
+	since := fs.String("since", "-14d", "timeline: rebuild events at or after this time")
 	migrateBackup := fs.String("backup", "", "migrate: write a backup here before upgrading")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -168,6 +170,22 @@ func runDB(args []string) error {
 			return err
 		}
 		fmt.Fprintf(os.Stderr, "looked up the network of %d rows\n", n)
+		return nil
+	case "timeline":
+		when, err := model.ParseTime(*since, time.Now())
+		if err != nil {
+			return err
+		}
+		st, err := store.Open(*db, cfg)
+		if err != nil {
+			return err
+		}
+		n, err := st.BackfillTimeline(context.Background(), when)
+		st.Close()
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(os.Stderr, "backfilled %d timeline events since %s\n", n, when.Format(time.RFC3339))
 		return nil
 	case "vacuum":
 		st, err := store.Open(*db, cfg)

@@ -21,6 +21,7 @@
       </div>
       <button id="zoomout" title="Zoom out (-)">−</button>
       <button id="live" class="toggle" aria-pressed="false" title="Follow now (l)">● Live</button>
+      <button id="recorder" class="toggle" aria-pressed="false" title="Recorded moments (t)">◷ Recorder</button>
     </div>
     <div class="right">
       <div class="search">
@@ -28,6 +29,8 @@
                aria-expanded="false" aria-autocomplete="list" autocomplete="off" spellcheck="false" placeholder="Find (f)">
         <ul id="search-results" role="listbox" hidden></ul>
       </div>
+      <button id="ask-open" title="Ask netgraph (?)">Ask</button>
+      <button id="whatif-open" title="Test a proposed policy against observed traffic">What-if</button>
       <button class="icon" id="theme" title="Toggle dark mode">◐</button>
     </div>
   </header>
@@ -36,6 +39,21 @@
     <canvas id="spark" height="56" role="img" aria-label="Traffic over the window; use the From and To fields to choose a window"></canvas>
     <div class="timeline-meta"><span id="spark-label"></span><span class="hint">drag to zoom into a slice</span></div>
   </section>
+
+  <section class="recorder" id="recorder-bar" hidden aria-label="Flight Recorder">
+    <button id="rec-play" class="icon" title="Play or pause">▶</button>
+    <button id="rec-back" class="icon" title="Step back">◀</button>
+    <button id="rec-fwd" class="icon" title="Step forward">▶</button>
+    <input type="range" id="rec-head" min="0" max="100" step="1" aria-label="Recorded moment">
+    <span id="rec-time" class="mono"></span>
+    <select id="rec-speed" aria-label="Playback speed"><option value="1">1×</option><option value="10">10×</option><option value="60">60×</option></select>
+    <select id="rec-lookback" aria-label="Frame lookback"><option value="300000">5m</option><option value="900000">15m</option><option value="3600000">1h</option></select>
+    <button id="rec-now">Now</button>
+    <button id="rec-diff" title="Mark A, then compare the current moment">Diff A</button>
+    <span id="rec-follow" class="muted" hidden></span>
+    <button id="rec-unfollow" hidden>Unfollow</button>
+  </section>
+  <section class="event-rail" id="event-rail" hidden aria-label="Events around this moment"></section>
 
   <section class="filters">
     <input id="filter" type="search" spellcheck="false" autocomplete="off"
@@ -53,6 +71,7 @@
     <button role="tab" data-tab="wifi">Wi-Fi</button>
     <button role="tab" data-tab="sensors">Sensors</button>
     <button role="tab" data-tab="anomalies">Anomalies</button>
+    <button role="tab" data-tab="incidents">Incidents</button>
   </nav>
 
   <main>
@@ -90,6 +109,7 @@
     <section id="view-facts" class="view" hidden><table id="t-facts"></table></section>
     <section id="view-wifi" class="view" hidden><table id="t-wifi"></table></section>
     <section id="view-sensors" class="view" hidden><table id="t-sensors"></table></section>
+    <section id="view-incidents" class="view" hidden><div class="table-tools"><label class="muted">Status <select id="incident-status" aria-label="Filter incidents by status"><option value="">all</option><option value="open">open</option><option value="acknowledged">acknowledged</option><option value="resolved">resolved</option></select></label></div><table id="t-incidents"></table></section>
     <section id="view-anomalies" class="view" hidden><p id="anomaly-note" class="muted"></p><div class="table-tools"><label class="muted">Severity <select id="anomaly-sev" aria-label="Filter anomalies by severity"><option value="">all</option><option value="high">high</option><option value="medium">medium</option><option value="low">low</option></select></label></div><table id="t-anomalies"></table><div id="mutes"></div></section>
     <aside id="panel" class="panel" hidden aria-label="Details">
       <button class="icon close" id="panel-close" title="Close (Esc)">✕</button>
@@ -98,6 +118,30 @@
   </main>
 
   <footer class="status"><span id="status" role="status" aria-live="polite"></span><button id="connect" type="button" hidden>Connect</button><span id="version"></span></footer>
+
+  <dialog id="whatif-dialog" class="whatif">
+    <h2>What-if change simulator</h2>
+    <p class="muted">Read-only. It evaluates a proposed policy against traffic that was actually observed in the current window.</p>
+    <textarea id="whatif-policy" spellcheck="false" aria-label="Policy JSON" rows="12"></textarea>
+    <div class="actions"><button id="whatif-run" type="button">Run simulation</button><span id="whatif-status" class="muted"></span></div>
+    <div id="whatif-result"></div>
+  </dialog>
+
+  <dialog id="ask-dialog" class="ask">
+    <h2>Ask netgraph</h2>
+    <form id="ask-form" autocomplete="off">
+      <input id="ask-q" type="text" aria-label="Question" placeholder="What did the printer do yesterday?" required>
+      <button type="submit">Ask</button>
+    </form>
+    <div id="ask-answer" aria-live="polite"></div>
+  </dialog>
+
+  <dialog id="autopsy-dialog" class="autopsy">
+    <form method="dialog"><button class="icon close" title="Close">✕</button></form>
+    <h2 id="autopsy-title">Incident autopsy</h2>
+    <p id="autopsy-meta" class="muted"></p>
+    <div id="autopsy-body"></div>
+  </dialog>
 
   <dialog id="token-dialog">
     <form method="dialog">

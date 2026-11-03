@@ -52,6 +52,9 @@ const state = {
   limits: {},
   // The entity whose details are open, so a link can reopen them.
   open: "",
+  // Flight Recorder: when on, the window ends at this moment and the event
+  // rail shows what happened just before it.
+  rec: { on: false, at: Date.now(), lookback: 5 * 60_000, follow: "", playing: false, diffA: 0 },
 };
 
 function loadHash() {
@@ -74,6 +77,13 @@ function loadHash() {
   const [st, col, dir] = (p.get("sort") || "").split(".");
   if (tables[st] && tables[st].keys[Number(col)] && (dir === "asc" || dir === "desc")) state.sort[st] = { col: Number(col), dir };
   state.open = p.get("open") || "";
+  state.rec.on = p.get("rec") === "1";
+  const recAt = num("rec_at");
+  if (recAt && recAt > 0) state.rec.at = recAt;
+  const recLook = num("rec_lookback");
+  if (recLook && recLook >= 10_000) state.rec.lookback = recLook;
+  state.rec.follow = p.get("follow") || "";
+  if (state.rec.on) state.to = state.rec.at;
 }
 
 function saveHash() {
@@ -87,6 +97,12 @@ function saveHash() {
   const so = state.sort[state.tab];
   if (so) p.set("sort", `${state.tab}.${so.col}.${so.dir}`);
   if (state.open) p.set("open", state.open);
+  if (state.rec.on) {
+    p.set("rec", "1");
+    p.set("rec_at", state.rec.at);
+    p.set("rec_lookback", state.rec.lookback);
+    if (state.rec.follow) p.set("follow", state.rec.follow);
+  }
   lastHash = p.toString();
   history.replaceState(null, "", "#" + lastHash);
 }
@@ -111,6 +127,14 @@ function parseFilter(s) {
 
 function params(extra = {}) {
   const p = new URLSearchParams({ from: state.to - state.span, to: state.to, ...parseFilter(state.filter), ...extra });
+  if (state.rec.follow) {
+    const [kind, ...rest] = state.rec.follow.split(":");
+    const key = rest.join(":");
+    if (kind === "device") p.set("device", key);
+    else if (kind === "domain" || kind === "site") p.set("domain", key);
+    else if (kind === "ip") p.set("ip", key);
+    else if (kind === "asn") p.set("asn", key);
+  }
   return p;
 }
 
@@ -183,7 +207,9 @@ async function send(method, path, body) {
       throw new Error(msg);
     }
     saveToken();
-    return;
+    if (resp.status === 204) return null;
+    const ct = resp.headers.get("content-type") || "";
+    return ct.includes("application/json") ? resp.json() : resp.text();
   }
 }
 
@@ -265,6 +291,7 @@ function setWindow(to, span, { live = false } = {}) {
   state.to = Math.round(to);
   state.span = Math.max(Math.round(span), 10_000);
   state.live = live;
+  if (state.rec.on) state.rec.at = state.to;
   refresh();
 }
 
@@ -287,10 +314,12 @@ async function refresh() {
   if (seq !== refreshSeq) return;
   renderSummary(summary, anomalies);
   renderSpark(series);
+  renderRecorder();
   await renderTab(seq);
+  if (state.rec.on) await renderRail(seq);
 }
 
-const tablePath = { devices: "devices", flows: "flows", destinations: "destinations", dns: "dns", facts: "facts", wifi: "wifi", sensors: "sensors", anomalies: "anomalies" };
+const tablePath = { devices: "devices", flows: "flows", destinations: "destinations", dns: "dns", facts: "facts", wifi: "wifi", sensors: "sensors", anomalies: "anomalies", incidents: "incidents" };
 
 async function renderTab(seq) {
   const t = state.tab;
@@ -299,6 +328,7 @@ async function renderTab(seq) {
     const path = tablePath[t];
     const extra = state.limits[t] ? { limit: state.limits[t] } : {};
     if (t === "destinations" && $("#dest-group")?.value) extra.group = $("#dest-group").value;
+    if (t === "incidents" && $("#incident-status")?.value) extra.status = $("#incident-status").value;
     let rows = await track(api(path, extra));
     if (seq !== refreshSeq) return;
     if (t === "anomalies") {
@@ -539,6 +569,13 @@ const tables = {
       if (narrow) { state.filter = narrow; $("#filter").value = narrow; }
       selectTab("graph").then(() => openEntity(id, { anomaly: a }));
     },
+  },
+  incidents: {
+    cols: ["Opened", "Status", "Severity", "Kind", "Title", "Entities"],
+    num: [],
+    row: (i) => [stamp(i.opened), badge(i.status), badge(i.severity), esc(i.kind), esc(i.title), esc((i.entities || []).join(", "))],
+    keys: [(i) => i.opened, (i) => i.status, (i) => i.severity, (i) => i.kind, (i) => i.title, (i) => (i.entities || []).join(" ")],
+    id: (i) => `incident:${i.id}`,
   },
   sensors: {
     cols: ["Sensor", "Version", "Interfaces", "First seen", "Last seen", "Packets", "Kernel drops", "Active flows", "Evicted", "Queued", "Sent", "Send errors"],
@@ -849,6 +886,7 @@ function fileStamp() {
 
 async function openEntity(id, { anomaly } = {}) {
   if (!id) return;
+  if (id.startsWith("incident:")) return openIncident(Number(id.slice("incident:".length)));
   const req = ++entityReq;
   const panel = $("#panel");
   panel.hidden = false;
@@ -902,7 +940,7 @@ async function openEntity(id, { anomaly } = {}) {
   const flagged = anomaly
     ? [anomaly.summary, ...Object.entries(anomaly.evidence || {}).map(([k, v]) => `${k}: ${v}`)]
     : state.graph?.nodes?.find((n) => n.id === id)?.attrs?.anomalies?.split("\n");
-  const anomalyBox = flagged ? `<div class="anomaly-box"><b>${anomaly ? `${esc(anomaly.severity)} ${esc(anomaly.kind.replaceAll("_", " "))}` : "Anomalies"}</b><ul>${flagged.map((l) => `<li>${esc(l)}</li>`).join("")}</ul>${anomaly ? `<button type="button" id="mute-anomaly">Mute this for 1 hour</button>` : ""}</div>` : "";
+  const anomalyBox = flagged ? `<div class="anomaly-box"><b>${anomaly ? `${esc(anomaly.severity)} ${esc(anomaly.kind.replaceAll("_", " "))}` : "Anomalies"}</b><ul>${flagged.map((l) => `<li>${esc(l)}</li>`).join("")}</ul>${anomaly ? `<button type="button" id="autopsy-anomaly">Autopsy</button> <button type="button" id="save-incident">Save incident</button> <button type="button" id="mute-anomaly">Mute this for 1 hour</button>` : ""}</div>` : "";
   $("#panel-body").innerHTML = `${anomalyBox}
     <h2>${esc(d.label || d.key)}</h2>
     <div class="muted mono">${esc(d.id)}</div>${rename}
@@ -910,7 +948,31 @@ async function openEntity(id, { anomaly } = {}) {
     ${facts ? `<h3>Relationships in this window</h3><ul>${facts}</ul>` : ""}
     ${flows ? `<h3>Connections</h3><ul>${flows}</ul>` : ""}
     ${timeline ? `<h3>Timeline</h3><ul>${timeline}</ul>` : ""}
-    <p><a data-filter="${esc(filterFor(d))}">Filter the window to this ${esc(d.kind)}</a></p>`;
+    <p><a data-filter="${esc(filterFor(d))}">Filter the window to this ${esc(d.kind)}</a> · <a data-follow="${esc(d.id)}">Follow in Recorder</a></p>`;
+  $("#autopsy-anomaly")?.addEventListener("click", async (e) => {
+    e.target.disabled = true;
+    try {
+      const a = await track(api("autopsy", {
+        kind: anomaly.kind, severity: anomaly.severity, ts: anomaly.ts,
+        device: anomaly.device || "", entity: anomaly.entity || "", summary: anomaly.summary || "",
+      }));
+      renderAutopsy(a);
+    } catch (err) {
+      setStatus(err.message, true);
+    } finally {
+      e.target.disabled = false;
+    }
+  });
+  $("#save-incident")?.addEventListener("click", async (e) => {
+    e.target.disabled = true;
+    try {
+      const inc = await send("POST", "incidents", { anomaly, title: anomaly.summary || anomaly.kind });
+      setStatus(`incident #${inc.id} saved`);
+    } catch (err) {
+      e.target.disabled = false;
+      setStatus(err.message, true);
+    }
+  });
   $("#mute-anomaly")?.addEventListener("click", async (e) => {
     e.target.disabled = true;
     try {
@@ -944,6 +1006,7 @@ async function openEntity(id, { anomaly } = {}) {
     const a = e.target.closest("a");
     if (!a) return;
     if (a.dataset.id) openEntity(a.dataset.id);
+    if (a.dataset.follow) { follow(a.dataset.follow); }
     if (a.dataset.filter) { state.filter = a.dataset.filter; $("#filter").value = state.filter; refresh(); }
   };
 }
@@ -979,6 +1042,7 @@ function openRest(id) {
     const a = e.target.closest("a");
     if (!a) return;
     if (a.dataset.id) openEntity(a.dataset.id);
+    if (a.dataset.follow) { follow(a.dataset.follow); }
     if (a.dataset.filter) { state.filter = a.dataset.filter; $("#filter").value = state.filter; refresh(); }
   };
 }
@@ -998,6 +1062,13 @@ function openLive() {
 }
 function setLive(on) {
   state.live = on;
+  if (on && state.rec.on) {
+    state.rec.on = false;
+    state.rec.playing = false;
+    $("#recorder-bar").hidden = true;
+    $("#event-rail").hidden = true;
+    $("#recorder").setAttribute("aria-pressed", "false");
+  }
   source?.close();
   source = null;
   clearInterval(liveTimer);
@@ -1012,6 +1083,259 @@ function setLive(on) {
   openLive();
   liveTimer = setInterval(refresh, 30_000);
   refresh();
+}
+
+// --- what-if -------------------------------------------------------------------------
+
+const whatifExample = {
+  version: 1,
+  zones: [{ name: "all", devices: ["any"] }],
+  defaults: { egress: "deny", ingress: "deny", intra_zone: "allow", dns: "allow" },
+  rules: [
+    { name: "web", from: "zone:all", to: "any", ports: ["443/tcp", "80/tcp"], action: "allow" },
+    { name: "dns", from: "zone:all", to: "any", ports: ["53/tcp", "53/udp"], action: "allow" },
+  ],
+  dns: { block: [], allow: [] },
+};
+
+function openWhatIf() {
+  const dlg = $("#whatif-dialog");
+  $("#whatif-policy").value = JSON.stringify(whatifExample, null, 2);
+  $("#whatif-result").innerHTML = "";
+  $("#whatif-status").textContent = "";
+  if (!dlg.open) dlg.showModal();
+}
+
+async function runWhatIf() {
+  const status = $("#whatif-status"), box = $("#whatif-result");
+  let policy;
+  try {
+    policy = JSON.parse($("#whatif-policy").value);
+  } catch (e) {
+    status.textContent = `invalid JSON: ${e.message}`;
+    return;
+  }
+  status.textContent = "Simulating…";
+  box.innerHTML = "";
+  try {
+    const r = await send("POST", "whatif", { policy, from: String(state.to - state.span), to: String(state.to) });
+    const s = r.summary || {};
+    status.textContent = `${s.connections || 0} connections evaluated`;
+    const impact = (x) => `<li><b>${esc(x.device_name || "unknown device")}</b> → ${esc(x.destination || "?")} <span class="mono">${esc(x.port || "")}</span> <span class="muted">${esc(x.reason || "")}${x.rule ? ` (${esc(x.rule)})` : ""}</span></li>`;
+    box.innerHTML = `<p><b>${s.blocked || 0}</b> blocked, <b>${s.essential || 0}</b> essential, <b>${s.unknown || 0}</b> unknown, <b>${s.unchanged || 0}</b> unchanged.</p>
+      ${(r.essential || []).length ? `<h3>Essential dependencies</h3><ul>${r.essential.map(impact).join("")}</ul>` : ""}
+      ${(r.blocked || []).length ? `<h3>Would be blocked</h3><ul>${r.blocked.slice(0, 100).map(impact).join("")}</ul>` : ""}
+      ${(r.unknown || []).length ? `<h3>Unknown</h3><ul>${r.unknown.slice(0, 50).map(impact).join("")}</ul>` : ""}
+      ${(r.gaps || []).map((g) => `<p class="muted">gap: ${esc(g)}</p>`).join("")}`;
+  } catch (e) {
+    status.textContent = e.message;
+  }
+}
+
+// --- ask -----------------------------------------------------------------------------
+
+function renderAnswer(a) {
+  const box = $("#ask-answer");
+  box.innerHTML = `<p><b>${esc(a.answer || "No answer.")}</b></p>
+    ${(a.claims || []).map((c) => `<p>${esc(c.text)} ${(c.evidence || []).map((e) => `<button class="cite" data-kind="${esc(e.kind)}" data-id="${esc(e.id)}" data-ts="${e.ts || 0}">${esc(e.kind)}</button>`).join(" ")}</p>`).join("")}
+    ${(a.gaps || []).length ? `<p class="muted">Gaps: ${esc(a.gaps.join("; "))}</p>` : ""}
+    ${(a.plan || []).length ? `<details><summary>How I answered</summary><ol>${a.plan.map((p) => `<li><span class="badge">${esc(p.tool)}</span> ${esc(Object.entries(p.args || {}).map(([k, v]) => `${k}=${v}`).join(" "))}</li>`).join("")}</ol></details>` : ""}
+    ${(a.followups || []).length ? `<p class="muted">Try: ${a.followups.map(esc).join(" · ")}</p>` : ""}`;
+  box.querySelectorAll(".cite").forEach((b) => {
+    b.onclick = () => {
+      const kind = b.dataset.kind, id = b.dataset.id, ts = Number(b.dataset.ts);
+      if (kind === "entity") openEntity(id);
+      else if (ts) { toggleRecorder(true); setRecAt(ts); }
+      $("#ask-dialog").close();
+    };
+  });
+}
+
+function openAsk() {
+  const dlg = $("#ask-dialog");
+  $("#ask-q").value = "";
+  $("#ask-answer").innerHTML = `<p class="muted">Ask about a device, a name, a moment, an anomaly, or what changed.</p>`;
+  if (!dlg.open) dlg.showModal();
+  setTimeout(() => $("#ask-q").focus(), 0);
+}
+
+// --- autopsy -------------------------------------------------------------------------
+
+async function openIncident(id) {
+  try {
+    const a = await track(api(`incidents/${id}/autopsy`));
+    renderAutopsy(a);
+  } catch (e) {
+    setStatus(e.message, true);
+  }
+}
+
+function renderAutopsy(a) {
+  const dlg = $("#autopsy-dialog");
+  $("#autopsy-title").textContent = `${a.anomaly?.kind?.replaceAll("_", " ") || (a.incident ? `Incident #${a.incident}` : "Incident")} autopsy`;
+  $("#autopsy-meta").textContent = `${stamp(a.from)} → ${stamp(a.to)} · ${a.scenes?.length || 0} scenes`;
+  const scenes = (a.scenes || []).map((s, i) => `<article class="scene" data-at="${s.at}">
+    <h3>${i + 1}. ${esc(s.title)}</h3>
+    <p>${esc(s.narrative)}</p>
+    ${(s.evidence || []).length ? `<ul class="evidence">${s.evidence.map((e) => `<li><span class="badge">${esc(e.kind)}</span> ${esc(e.text || e.id)}</li>`).join("")}</ul>` : ""}
+    <button type="button" data-open="${s.at}">Open this moment</button>
+  </article>`).join("");
+  $("#autopsy-body").innerHTML = scenes + (a.gaps || []).map((g) => `<p class="muted">gap: ${esc(g)}</p>`).join("");
+  $("#autopsy-body").querySelectorAll("[data-open]").forEach((b) => {
+    b.onclick = () => {
+      const ts = Number(b.dataset.open);
+      if (ts) { toggleRecorder(true); setRecAt(ts); }
+      dlg.close();
+    };
+  });
+  if (!dlg.open) dlg.showModal();
+}
+
+// --- Flight Recorder ------------------------------------------------------------------
+
+let recTimer = null;
+let recSeek = null;
+
+function renderRecorder() {
+  const bar = $("#recorder-bar");
+  if (!bar) return;
+  $("#recorder").setAttribute("aria-pressed", String(state.rec.on));
+  bar.hidden = !state.rec.on;
+  $("#event-rail").hidden = !state.rec.on;
+  if (!state.rec.on) return;
+  const now = Date.now();
+  const head = $("#rec-head");
+  head.min = String(now - 30 * units.d);
+  head.max = String(now);
+  head.step = "1000";
+  head.value = String(state.to);
+  $("#rec-time").textContent = stamp(state.to);
+  $("#rec-play").textContent = state.rec.playing ? "❚❚" : "▶";
+  $("#rec-lookback").value = String(state.rec.lookback);
+  const f = $("#rec-follow");
+  f.hidden = !state.rec.follow;
+  f.textContent = state.rec.follow ? `Following ${state.rec.follow}` : "";
+  $("#rec-unfollow").hidden = !state.rec.follow;
+  $("#rec-diff").textContent = state.rec.diffA ? "Diff B" : "Diff A";
+  if (state.live) $("#rec-time").textContent += " · live edge";
+}
+
+function setRecAt(ts, { refresh = true } = {}) {
+  state.rec.at = Math.max(0, Math.round(ts));
+  state.to = state.rec.at;
+  state.span = state.rec.lookback;
+  state.live = false;
+  if (refresh) refresh(); else renderRecorder();
+}
+
+function stopPlay() {
+  state.rec.playing = false;
+  clearInterval(recTimer);
+  recTimer = null;
+  renderRecorder();
+}
+
+function togglePlay() {
+  if (state.rec.playing) return stopPlay();
+  state.rec.playing = true;
+  state.rec.at = Math.min(state.rec.at, Date.now());
+  const speed = Number($("#rec-speed").value) || 1;
+  recTimer = setInterval(() => {
+    const next = state.rec.at + 1000 * speed;
+    if (next >= Date.now()) {
+      setRecAt(Date.now());
+      stopPlay();
+      return;
+    }
+    setRecAt(next);
+  }, 1000);
+  renderRecorder();
+}
+
+function toggleRecorder(on = !state.rec.on) {
+  state.rec.on = on;
+  if (on) {
+    state.rec.at = state.rec.at && state.rec.at > 0 ? state.rec.at : state.to;
+    if (state.rec.at > Date.now()) state.rec.at = Date.now();
+    state.to = state.rec.at;
+    state.span = state.rec.lookback;
+    state.live = false;
+  } else {
+    stopPlay();
+  }
+  renderRecorder();
+  refresh();
+}
+
+function follow(id) {
+  if (!id) return;
+  state.rec.follow = id;
+  state.rec.on = true;
+  state.rec.at = state.to;
+  state.rec.lookback = state.span > 0 && state.span <= units.h ? state.span : 5 * units.m;
+  state.span = state.rec.lookback;
+  state.live = false;
+  renderRecorder();
+  refresh();
+}
+
+async function renderRail(seq) {
+  const box = $("#event-rail");
+  if (!box) return;
+  if (!state.rec.on) { box.hidden = true; return; }
+  box.hidden = false;
+  let page;
+  try {
+    page = await track(api("timeline", { from: state.to - units.d, to: state.to, limit: 40, entity: state.rec.follow || "" }));
+  } catch (e) {
+    box.innerHTML = `<p class="muted">${esc(e.message)}</p>`;
+    return;
+  }
+  if (seq !== refreshSeq) return;
+  const events = page?.events || [];
+  if (!events.length) {
+    box.innerHTML = `<div class="rail-head"><b>Events</b><span class="muted">nothing recorded in the last day</span></div>`;
+    return;
+  }
+  box.innerHTML = `<div class="rail-head"><b>Events</b><span class="muted">last day · click to jump</span></div>
+    <ul class="rail-list">${events.map((e) => `<li><button class="rail-event" data-ts="${e.ts}" data-entity="${esc(e.entity || "")}">
+      <time>${clock(e.ts)}</time> ${badge(e.kind)} ${esc(e.title)}</button></li>`).join("")}</ul>`;
+  box.querySelectorAll(".rail-event").forEach((b) => {
+    b.onclick = () => {
+      const ts = Number(b.dataset.ts);
+      if (ts) setRecAt(ts);
+      if (b.dataset.entity) openEntity(b.dataset.entity);
+    };
+  });
+}
+
+async function renderDiffBox() {
+  const box = $("#event-rail");
+  if (!state.rec.diffA) {
+    state.rec.diffA = state.to;
+    setStatus(`diff A marked at ${stamp(state.to)}`);
+    renderRecorder();
+    return;
+  }
+  const a = state.rec.diffA;
+  state.rec.diffA = 0;
+  box.hidden = false;
+  box.innerHTML = `<div class="rail-head"><b>Diff</b><span class="muted">${esc(stamp(a))} → ${esc(stamp(state.to))}</span></div><p class="muted">Comparing…</p>`;
+  try {
+    const d = await api("diff", { at_a: a, at_b: state.to, lookback: state.rec.lookback });
+    const row = (kind, x) => `<li><span class="badge">${esc(kind)}</span> <b>${esc(x.kind)}</b> ${esc(x.label || x.key)}${x.before || x.after ? ` <span class="muted">${esc(x.before || "")}${x.before && x.after ? " → " : ""}${esc(x.after || "")}</span>` : ""}</li>`;
+    const lines = [
+      ...(d.added || []).map((x) => row("added", x)),
+      ...(d.removed || []).map((x) => row("removed", x)),
+      ...(d.changed || []).map((x) => row("changed", x)),
+    ];
+    box.innerHTML = `<div class="rail-head"><b>Diff</b><span class="muted">${esc(stamp(a))} → ${esc(stamp(state.to))}</span></div>
+      ${lines.length ? `<ul class="rail-list">${lines.join("")}</ul>` : `<p class="muted">No differences in devices, destinations, DNS, Wi-Fi, sensors or anomalies.</p>`}
+      ${(d.gaps || []).map((g) => `<p class="muted">gap: ${esc(g)}</p>`).join("")}`;
+  } catch (e) {
+    box.innerHTML = `<p class="muted">${esc(e.message)}</p>`;
+  }
+  renderRecorder();
 }
 
 // --- wiring ---------------------------------------------------------------------------
@@ -1107,6 +1431,23 @@ function init() {
   $("#fwd").onclick = () => setWindow(state.to + state.span / 2, state.span);
   $("#zoomout").onclick = () => setWindow(state.to + state.span / 2, state.span * 2, { live: state.live });
   $("#live").onclick = () => setLive(!state.live);
+  $("#recorder").onclick = () => toggleRecorder();
+  $("#rec-play").onclick = togglePlay;
+  $("#rec-back").onclick = () => setRecAt(state.rec.at - Math.max(1000, state.rec.lookback / 5));
+  $("#rec-fwd").onclick = () => setRecAt(Math.min(Date.now(), state.rec.at + Math.max(1000, state.rec.lookback / 5)));
+  $("#rec-now").onclick = () => setRecAt(Date.now());
+  $("#rec-diff").onclick = renderDiffBox;
+  $("#rec-unfollow").onclick = () => { state.rec.follow = ""; refresh(); };
+  $("#rec-head").oninput = () => {
+    clearTimeout(recSeek);
+    const ts = Number($("#rec-head").value);
+    recSeek = setTimeout(() => setRecAt(ts), 120);
+  };
+  $("#rec-lookback").onchange = () => {
+    state.rec.lookback = Number($("#rec-lookback").value) || 300000;
+    setRecAt(state.rec.at);
+  };
+  $("#rec-speed").onchange = () => { if (state.rec.playing) { stopPlay(); togglePlay(); } };
   for (const b of $$(".presets button")) b.onclick = () => setWindow(Date.now(), parseSpan(b.dataset.span), { live: state.live });
   const fromTo = () => {
     const f = new Date($("#from").value).getTime(), t = new Date($("#to").value).getTime();
@@ -1139,6 +1480,8 @@ function init() {
   if (sev) sev.onchange = () => refresh();
   const dg = $("#dest-group");
   if (dg) dg.onchange = () => refresh();
+  const inc = $("#incident-status");
+  if (inc) inc.onchange = () => refresh();
   $("#g-fit").onclick = () => diagram.fit();
   $("#g-svg").onclick = () => {
     const svg = $("#diagram svg");
@@ -1156,6 +1499,21 @@ function init() {
       : await api("graph", { ...graphOpts(), format: "d2" }, true);
     download(`netgraph-${fileStamp()}.d2`, script, "text/plain");
   };
+  $("#ask-open").onclick = openAsk;
+  $("#whatif-open").onclick = openWhatIf;
+  $("#whatif-run").onclick = runWhatIf;
+  $("#ask-form").onsubmit = async (e) => {
+    e.preventDefault();
+    const q = $("#ask-q").value.trim();
+    if (!q) return;
+    $("#ask-answer").innerHTML = `<p class="muted">Investigating…</p>`;
+    try {
+      const a = await send("POST", "ask", { q, from: String(state.to - state.span), to: String(state.to) });
+      renderAnswer(a);
+    } catch (err) {
+      $("#ask-answer").innerHTML = `<p class="muted">${esc(err.message)}</p>`;
+    }
+  };
   $("#panel-close").onclick = closePanel;
   $("#theme").onclick = () => {
     const next = theme() === "dark" ? "light" : "dark";
@@ -1170,7 +1528,10 @@ function init() {
     else if (k === "[") $("#back").click();
     else if (k === "]") $("#fwd").click();
     else if (k === "l") $("#live").click();
+    else if (k === "t") { e.preventDefault(); $("#recorder").click(); }
+    else if (k === " ") { if (state.rec.on && !e.target.matches("button, a, input, select, textarea")) { e.preventDefault(); togglePlay(); } }
     else if (k === "/") { e.preventDefault(); $("#filter").focus(); }
+    else if (k === "?") { e.preventDefault(); openAsk(); }
     else if (k === "f") { e.preventDefault(); $("#search").focus(); }
     else if (k >= "1" && Number(k) <= $$(".tabs button").length) selectTab($$(".tabs button")[Number(k) - 1].dataset.tab);
   });

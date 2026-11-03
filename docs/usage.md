@@ -87,10 +87,17 @@ TIME                 DEVICE           TYPE  NAME               RCODE     MS    A
 | `query sensors` | sensors and their counters (packets, kernel drops, events dropped) |
 | `query wifi` | Wi-Fi networks, security, channel and associated clients |
 | `query anomalies` | what stands out in the window, most severe first ([anomalies](concepts.md#anomalies)) |
+| `query frame -at TIME` | the network at a recorded moment, with a lookback |
+| `query timeline` | the event rail: device joins, DNS, flow opens/closes, observations |
+| `query story ID` | one entity's intervals, milestones and evidence |
+| `query diff -at-a ... -at-b ...` | what changed between two moments |
+| `whatif -policy FILE` | test a proposed policy against observed traffic; read-only |
+| `ask "question"` | answer from recorded evidence; prints claims and citations |
 | `graph -o FILE` | the window's graph: `.svg`, `.d2`, `.txt`, `.json`, or `-` for text on stdout |
 | `label MAC NAME...`, `label -clear MAC` | name a device by hand; it overrides DHCP, mDNS and every other source until cleared. With `-server` it goes through the API; without, it writes the database file (stop the server first) |
 | `import FILE.pcap...` | ingest captures directly (re-importing a file is a no-op) |
 | `db migrate`/`backup`/`retain`/`vacuum` | maintenance |
+| `db timeline -since -14d` | rebuild the Flight Recorder event index from existing raw data |
 | `db purge BEFORE` | delete everything older than `BEFORE` now, whatever the retention settings; `-dry-run` reports the counts only |
 | `db forget MAC` | remove one device and everything attributed to it (connections, lookups, facts, rollups, private address entities, Wi-Fi sync records); `-dry-run` previews it |
 | `db enrich -asn-file FILE` | look up the network of connections stored without an [ASN table](deployment.md#networks-and-countries) |

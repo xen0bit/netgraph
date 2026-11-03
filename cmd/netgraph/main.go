@@ -45,6 +45,10 @@ func main() {
 		err = runDB(os.Args[2:])
 	case "label":
 		err = runLabel(os.Args[2:])
+	case "whatif":
+		err = runWhatIf(os.Args[2:])
+	case "ask":
+		err = runAsk(os.Args[2:])
 	default:
 		fmt.Fprintf(os.Stderr, "netgraph: unknown command %q\n\n", os.Args[1])
 		usage()
@@ -68,6 +72,8 @@ commands:
   graph      render the graph for a time window (.svg, .d2, .txt, .json)
   tui        interactive terminal UI
   label      name a device by hand (or -clear the name)
+  whatif     test a proposed policy against observed traffic
+  ask        answer a question from recorded evidence, with citations
   import     ingest pcap/pcapng files directly
   db         database maintenance (migrate, backup, retain, vacuum)
   version    print version information
