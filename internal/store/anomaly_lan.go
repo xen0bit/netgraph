@@ -23,8 +23,8 @@ func (a *anomalies) arpConflicts(ctx context.Context) error {
 	// overlap is a conflict.
 	rows, err := a.s.r.QueryContext(ctx, `
 		SELECT ip.key, f1.src, f2.src,
-		       max(f1.first_seen, f2.first_seen) AS overlap_start,
-		       min(f1.last_seen, f2.last_seen) AS overlap_end
+		       max(f1.first_seen, f2.first_seen, ?) AS overlap_start,
+		       min(f1.last_seen, f2.last_seen, ?) AS overlap_end
 		FROM facts f1
 		JOIN facts f2 ON f2.dst = f1.dst AND f2.rel = 'has_ip' AND f2.src > f1.src
 		JOIN entities ip ON ip.id = f1.dst AND ip.kind = 'ip'
@@ -32,7 +32,7 @@ func (a *anomalies) arpConflicts(ctx context.Context) error {
 		  AND f1.first_seen < ? AND f1.last_seen >= ?
 		  AND f2.first_seen < ? AND f2.last_seen >= ?
 		  AND f1.first_seen < f2.last_seen AND f2.first_seen < f1.last_seen
-		ORDER BY ip.key, f1.src, f2.src, overlap_start`, a.to, a.from, a.to, a.from)
+		ORDER BY ip.key, f1.src, f2.src, overlap_start`, a.from, a.to, a.to, a.from, a.to, a.from)
 	if err != nil {
 		return err
 	}

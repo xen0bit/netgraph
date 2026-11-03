@@ -64,11 +64,11 @@ func (s *Store) EmergencyTrim(ctx context.Context, target int64, allowRollups bo
 				struct {
 					n *int64
 					q string
-				}{&r.Rollups, `DELETE FROM traffic_hourly WHERE bucket IN (SELECT bucket FROM traffic_hourly ORDER BY bucket LIMIT 5000)`},
+				}{&r.Rollups, `DELETE FROM traffic_hourly WHERE bucket IN (SELECT bucket FROM traffic_hourly ORDER BY bucket LIMIT 24)`},
 				struct {
 					n *int64
 					q string
-				}{&r.Rollups, `DELETE FROM dns_hourly WHERE bucket IN (SELECT bucket FROM dns_hourly ORDER BY bucket LIMIT 5000)`},
+				}{&r.Rollups, `DELETE FROM dns_hourly WHERE bucket IN (SELECT bucket FROM dns_hourly ORDER BY bucket LIMIT 24)`},
 			)
 		}
 		for _, st := range steps {
@@ -76,7 +76,7 @@ func (s *Store) EmergencyTrim(ctx context.Context, target int64, allowRollups bo
 				return r, err
 			}
 		}
-		if _, err := s.w.ExecContext(ctx, `PRAGMA incremental_vacuum`); err != nil {
+		if _, err := s.w.ExecContext(ctx, `PRAGMA incremental_vacuum(2000)`); err != nil {
 			return r, err
 		}
 		if _, err := s.w.ExecContext(ctx, `PRAGMA wal_checkpoint(TRUNCATE)`); err != nil {

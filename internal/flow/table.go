@@ -106,6 +106,7 @@ type entry struct {
 	app, sni, alpn, ja4, host, ua string
 
 	inspect bool
+	tbl     *Table
 	buf     []byte
 	segs    int
 	nextSeq uint32
@@ -120,11 +121,12 @@ type Table struct {
 	cfg  Config
 	emit func(*wire.Flow)
 
-	mu      sync.Mutex
-	flows   map[key]*entry
-	lru     *list.List // front = most recently used
-	nextID  uint64
-	evicted uint64
+	mu         sync.Mutex
+	flows      map[key]*entry
+	lru        *list.List // front = most recently used
+	nextID     uint64
+	evicted    uint64
+	inspecting int // entries allowed to hold inspection buffers
 }
 
 // New returns a table that hands each exported record to emit. emit is
@@ -150,9 +152,10 @@ func (t *Table) Evicted() uint64 {
 
 // Inspection limits: how much of a flow's opening the table looks at.
 const (
-	maxInspectBytes = 16 << 10
-	maxInspectSegs  = 8
-	maxQUICPackets  = 6
+	maxInspectBytes   = 16 << 10
+	maxInspectSegs    = 8
+	maxQUICPackets    = 6
+	maxInspectingFlow = 256 // ~4 MiB of opening buffers, a hard table-wide cap
 )
 
 // Add accounts one packet. It reports whether the packet opened a new flow.
@@ -174,7 +177,7 @@ func (t *Table) Add(p *Packet) (opened bool) {
 		if p.Proto == ProtoTCP && p.TCPFlags&(SYN|ACK) == SYN && (e.finSrc || e.finDst || e.rst) {
 			// A fresh SYN on a closed tuple is a new connection (port
 			// reuse); finish the old one first.
-			t.finish(k, e, e.last, "fin")
+			t.finish(k, e, e.last, e.closeReason())
 			opened = true
 			e = t.newEntry(p)
 			t.flows[k] = e
@@ -223,7 +226,11 @@ func (t *Table) Add(p *Packet) (opened bool) {
 
 func (t *Table) newEntry(p *Packet) *entry {
 	t.nextID++
-	e := &entry{id: t.nextID, proto: p.Proto, src: p.Src, dst: p.Dst, first: p.TS, last: p.TS, intervalStart: p.TS, inspect: true}
+	inspect := t.inspecting < maxInspectingFlow
+	if inspect {
+		t.inspecting++
+	}
+	e := &entry{id: t.nextID, proto: p.Proto, src: p.Src, dst: p.Dst, first: p.TS, last: p.TS, intervalStart: p.TS, inspect: inspect, tbl: t}
 	if reverse(p) {
 		e.src, e.dst = p.Dst, p.Src
 	}
@@ -282,12 +289,13 @@ func (t *Table) inspectPayload(e *entry, p *Packet) {
 		// Keep only in-order bytes. A retransmission overlapping what we
 		// have is trimmed; a gap ends inspection — on a LAN the opening
 		// segments essentially always arrive in order.
-		switch d := int32(p.Seq - e.nextSeq); {
+		switch d := int64(int32(p.Seq - e.nextSeq)); {
 		case d < 0:
-			if int(-d) >= len(pl) {
+			back := -d
+			if back >= int64(len(pl)) {
 				return
 			}
-			pl = pl[-d:]
+			pl = pl[back:]
 		case d > 0:
 			e.stopInspect()
 			return
@@ -366,6 +374,9 @@ func (e *entry) setHello(ch *decode.ClientHello) {
 }
 
 func (e *entry) stopInspect() {
+	if e.inspect && e.tbl != nil {
+		e.tbl.inspecting--
+	}
 	e.inspect = false
 	e.buf = nil
 	e.quic = nil
@@ -449,6 +460,7 @@ func (t *Table) finish(k key, e *entry, end time.Time, reason string) {
 		end = e.intervalStart
 	}
 	t.export(e, end, true, reason)
+	e.stopInspect()
 	t.lru.Remove(e.elem)
 	delete(t.flows, k)
 }

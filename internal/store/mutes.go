@@ -12,6 +12,20 @@ import (
 
 const maxMuteNote = 200
 
+// normalizeMute makes the API's accepted forms match what findings carry:
+// a bare MAC becomes device:<mac>, and kinds are lower-case.
+func normalizeMute(m *model.AnomalyMute) {
+	m.Kind = strings.ToLower(strings.TrimSpace(m.Kind))
+	m.Device = strings.TrimSpace(m.Device)
+	m.Entity = strings.TrimSpace(m.Entity)
+	if m.Device != "" {
+		raw := strings.TrimPrefix(m.Device, "device:")
+		if mac, ok := normMAC(raw); ok {
+			m.Device = model.EntityID(model.KindDevice, mac)
+		}
+	}
+}
+
 // SetAnomalyMute creates or replaces a mute. An empty Until means one day
 // from now. A mute with no kind and no device/entity would silence
 // everything, so it is rejected.
@@ -19,6 +33,7 @@ func (s *Store) SetAnomalyMute(ctx context.Context, m model.AnomalyMute) error {
 	if s.w == nil {
 		return errors.New("database is open read-only")
 	}
+	normalizeMute(&m)
 	if m.Kind == "" && m.Device == "" && m.Entity == "" {
 		return fmt.Errorf("%w: a mute needs a kind, device or entity", ErrInvalid)
 	}
@@ -47,6 +62,12 @@ func (s *Store) SetAnomalyMute(ctx context.Context, m model.AnomalyMute) error {
 func (s *Store) DeleteAnomalyMute(ctx context.Context, kind, device, entity string) error {
 	if s.w == nil {
 		return errors.New("database is open read-only")
+	}
+	m := model.AnomalyMute{Kind: kind, Device: device, Entity: entity}
+	normalizeMute(&m)
+	kind, device, entity = m.Kind, m.Device, m.Entity
+	if kind == "" && device == "" && entity == "" {
+		return fmt.Errorf("%w: a mute needs a kind, device or entity", ErrInvalid)
 	}
 	_, err := s.w.ExecContext(ctx, `DELETE FROM anomaly_mutes WHERE kind = ? AND device = ? AND entity = ?`, kind, device, entity)
 	if err == nil {

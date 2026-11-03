@@ -377,12 +377,14 @@ func (a *anomalies) newServices(ctx context.Context) error {
 	if len(now) == 0 {
 		return nil
 	}
-	// What each device served in the week before, from raw connections:
-	// the rollups cannot tell a session from a refused probe.
+	// What each device served in the week before. Rollups cannot tell a
+	// session from a refused probe, so this may miss a newly exposed port
+	// that saw only probes; unlike raw connections it survives a shorter
+	// -raw-retention, which is the common case.
 	before := map[string]bool{}
-	rows, err = a.s.r.QueryContext(ctx, `SELECT DISTINCT c.client_device, c.client_port, c.proto FROM connections c
-		WHERE c.direction = 'in' AND c.client_device != 0 AND c.last_seen >= ? AND c.first_seen < ? AND `+isSession,
-		a.from-anomalyBaseline.Milliseconds(), a.from)
+	rows, err = a.s.r.QueryContext(ctx, `SELECT DISTINCT client_device, remote_port, proto FROM traffic_hourly
+		WHERE direction = 'in' AND client_device != 0 AND bucket >= ? AND bucket < ? AND remote_port < ?`,
+		hourOf(a.from-anomalyBaseline.Milliseconds()), a.from, dynamicPorts)
 	if err != nil {
 		return err
 	}
@@ -449,6 +451,29 @@ func (a *anomalies) inboundSurges(ctx context.Context) error {
 	if len(now) == 0 {
 		return nil
 	}
+	// The busiest hour inside the window, not its average.
+	cur := map[int64]map[int64]float64{}
+	rows, err = a.s.r.QueryContext(ctx, `SELECT client_device, bucket, sum(flows) FROM traffic_hourly
+		WHERE bucket >= ? AND bucket < ? AND direction = 'in' AND client_device != 0 GROUP BY client_device, bucket HAVING sum(flows) > 0`,
+		hourOf(a.from), a.to)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var dev, bucket int64
+		var n float64
+		if err := rows.Scan(&dev, &bucket, &n); err != nil {
+			rows.Close()
+			return err
+		}
+		if cur[dev] == nil {
+			cur[dev] = map[int64]float64{}
+		}
+		cur[dev][bucket] = n
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
 	hours := map[int64][]float64{}
 	rows, err = a.s.r.QueryContext(ctx, `SELECT client_device, sum(flows) FROM traffic_hourly
 		WHERE bucket >= ? AND bucket + 3600000 <= ? AND direction = 'in' AND client_device != 0 GROUP BY client_device, bucket HAVING sum(flows) > 0`,
@@ -480,7 +505,15 @@ func (a *anomalies) inboundSurges(ctx context.Context) error {
 		if d == nil {
 			continue
 		}
-		rate := float64(c.n) / span
+		rate, ts := float64(c.n)/span, max(c.first, a.from)
+		if a.to-a.from >= time.Hour.Milliseconds() {
+			rate = 0
+			for bucket, n := range cur[dev] {
+				if n > rate {
+					rate, ts = n, max(bucket, a.from)
+				}
+			}
+		}
 		surge, high, peak := anomaly.Surge(rate, hours[dev])
 		if !surge {
 			continue
@@ -489,7 +522,7 @@ func (a *anomalies) inboundSurges(ctx context.Context) error {
 		if high {
 			sev = model.SeverityHigh
 		}
-		a.add(model.Anomaly{Kind: model.AnomalyInboundSurge, Severity: sev, TS: max(c.first, a.from), Device: d.id, DeviceName: d.name,
+		a.add(model.Anomaly{Kind: model.AnomalyInboundSurge, Severity: sev, TS: ts, Device: d.id, DeviceName: d.name,
 			Summary: fmt.Sprintf("%s accepted %d connections from outside (%.0f an hour, from %d addresses); its busiest hour in the last 7 days had %.0f",
 				d.name, c.n, rate, c.addrs, peak),
 			Evidence: map[string]string{"connections": strconv.Itoa(c.n), "per_hour": fmt.Sprintf("%.0f", rate), "addresses": strconv.Itoa(c.addrs),

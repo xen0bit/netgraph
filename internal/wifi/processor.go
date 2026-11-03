@@ -248,6 +248,16 @@ func (p *Processor) fragment(ts time.Time, f *Frame, llc []byte) {
 	key := fragKey{src: f.Src.String(), dst: f.Dst.String(), bssid: f.BSSID.String(), seq: f.Seq}
 	st := p.frags[key]
 	if st == nil {
+		if len(p.frags) >= 1024 {
+			var oldest fragKey
+			var at time.Time
+			for k, v := range p.frags {
+				if at.IsZero() || v.last.Before(at) {
+					oldest, at = k, v.last
+				}
+			}
+			delete(p.frags, oldest)
+		}
 		st = &fragState{first: nil, pending: map[uint8][]byte{}}
 		p.frags[key] = st
 	}
@@ -377,6 +387,7 @@ func (p *Processor) eapol(ts time.Time, f *Frame, msg *EAPOLKey) {
 			ANonce:     hex.EncodeToString(info.ANonce),
 			SNonce:     hex.EncodeToString(info.SNonce),
 			KeyVersion: info.Version,
+			Cipher:     info.Cipher,
 		}})
 	}
 	if g := info.GroupKey; g != nil && p.cfg.Emit != nil {

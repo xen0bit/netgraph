@@ -149,7 +149,7 @@ func tkipDecrypt(header, body, tk []byte, fromAP bool) ([]byte, error) {
 	iv16 := uint16(body[0])<<8 | uint16(body[2])
 	iv32 := binary.LittleEndian.Uint32(body[4:])
 	rc4key := tkipPhase2(tk[:16], tkipPhase1(tk[:16], header[10:16], iv32), iv16)
-	plain, err := wepOpen(rc4key[:], body[8:len(body)-4], body[len(body)-4:])
+	plain, err := wepOpen(rc4key[:], body[8:])
 	if err != nil {
 		return nil, err
 	}
@@ -162,18 +162,41 @@ func tkipDecrypt(header, body, tk []byte, fromAP bool) ([]byte, error) {
 	if fromAP {
 		micKey = tk[16:24]
 	}
-	want := michaelMIC(micKey, append(append([]byte(nil), header...), data...))
-	if subtle.ConstantTimeCompare(mic, want[:]) != 1 {
+	micInput := append(michaelHeader(header), data...)
+	if want := michaelMIC(micKey, micInput); subtle.ConstantTimeCompare(mic, want[:]) != 1 {
 		clear(plain)
 		return nil, fmt.Errorf("tkip: Michael MIC failed")
 	}
 	return data, nil
 }
 
+// michaelHeader builds the 16-byte Michael pseudo-header: DA, SA, priority
+// and three reserved zero bytes. It is not the over-the-air 802.11 header:
+// retransmissions and fragments change that, while the MSDU's addresses do
+// not.
+func michaelHeader(header []byte) []byte {
+	if len(header) < 24 {
+		return nil
+	}
+	da, sa := header[4:10], header[10:16]
+	switch {
+	case header[1]&0x02 != 0: // FromDS: source is A3
+		da, sa = header[4:10], header[16:22]
+	case header[1]&0x01 != 0: // ToDS: destination is A3
+		da, sa = header[16:22], header[10:16]
+	}
+	h := make([]byte, 0, 16)
+	h = append(h, da...)
+	h = append(h, sa...)
+	h = append(h, 0, 0, 0, 0) // priority and reserved
+	return h
+}
+
 // tkipSeal produces a TKIP body, for tests and an eventual active harness.
 func tkipSeal(header, plaintext, tk []byte, iv16 uint16, iv32 uint32) []byte {
 	rc4key := tkipPhase2(tk[:16], tkipPhase1(tk[:16], header[10:16], iv32), iv16)
-	mic := michaelMIC(tk[24:32], append(append([]byte(nil), header...), plaintext...))
+	micInput := append(michaelHeader(header), plaintext...)
+	mic := michaelMIC(tk[24:32], micInput)
 	plain := append(append([]byte(nil), plaintext...), mic[:]...)
 	body := make([]byte, 8, 8+len(plain)+4)
 	body[0] = byte(iv16 >> 8)
@@ -184,27 +207,34 @@ func tkipSeal(header, plaintext, tk []byte, iv16 uint16, iv32 uint32) []byte {
 	return append(body, wepSealRaw(rc4key[:], plain)...)
 }
 
-// wepOpen decrypts RC4-protected bytes and checks the 4-byte ICV.
-func wepOpen(key, ct, icv []byte) ([]byte, error) {
+// wepOpen decrypts RC4-protected bytes, including the encrypted 4-byte ICV,
+// and returns the plaintext without it. TKIP uses the same encapsulation
+// around its MSDU (data plus Michael MIC).
+func wepOpen(key, ct []byte) ([]byte, error) {
+	if len(ct) < 4 {
+		return nil, fmt.Errorf("tkip: short body")
+	}
 	rc, err := rc4.NewCipher(key)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]byte, len(ct))
-	rc.XORKeyStream(out, ct)
-	if crc32.ChecksumIEEE(out) != binary.LittleEndian.Uint32(icv) {
-		clear(out)
+	plain := make([]byte, len(ct))
+	rc.XORKeyStream(plain, ct)
+	data, icv := plain[:len(plain)-4], plain[len(plain)-4:]
+	if crc32.ChecksumIEEE(data) != binary.LittleEndian.Uint32(icv) {
+		clear(plain)
 		return nil, fmt.Errorf("tkip: integrity check failed")
 	}
-	return out, nil
+	return data, nil
 }
 
-// wepSealRaw encrypts bytes and appends the WEP ICV, for TKIP's payload.
+// wepSealRaw encrypts bytes and their WEP ICV, for TKIP's payload.
 func wepSealRaw(key, plain []byte) []byte {
-	rc, _ := rc4.NewCipher(key)
-	ct := make([]byte, len(plain))
-	rc.XORKeyStream(ct, plain)
 	var icv [4]byte
 	binary.LittleEndian.PutUint32(icv[:], crc32.ChecksumIEEE(plain))
-	return append(ct, icv[:]...)
+	buf := append(append([]byte(nil), plain...), icv[:]...)
+	rc, _ := rc4.NewCipher(key)
+	ct := make([]byte, len(buf))
+	rc.XORKeyStream(ct, buf)
+	return ct
 }

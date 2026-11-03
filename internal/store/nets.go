@@ -37,6 +37,15 @@ func newLocalNets() *localNets {
 	return &localNets{prefixes: map[string][]netip.Prefix{}, own: map[string]map[string][]netip.Addr{}}
 }
 
+// reset forgets every sensor's prefixes, so a rolled-back hello cannot keep
+// classifying traffic until the next restart.
+func (n *localNets) reset() {
+	n.mu.Lock()
+	n.prefixes = map[string][]netip.Prefix{}
+	n.own = map[string]map[string][]netip.Addr{}
+	n.mu.Unlock()
+}
+
 func (n *localNets) addHello(sensor string, h *wire.Hello) {
 	var ps []netip.Prefix
 	own := map[string][]netip.Addr{}
@@ -146,6 +155,15 @@ func (n *localNets) isBroadcast(a netip.Addr) bool {
 		}
 	}
 	return !covered && a.IsPrivate() && a.As4()[3] == 255
+}
+
+// reloadNets rebuilds the local-network map from committed sensor hellos,
+// after a failed batch may have applied one that did not commit.
+func (s *Store) reloadNets(ctx context.Context) {
+	s.nets.reset()
+	if err := s.loadSensors(ctx); err != nil {
+		s.log.Error("reload sensor prefixes", "err", err)
+	}
 }
 
 func (s *Store) loadSensors(ctx context.Context) error {

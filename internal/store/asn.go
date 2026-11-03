@@ -37,8 +37,8 @@ func (s *Store) EnrichASN(ctx context.Context) (int64, error) {
 	}{
 		{`SELECT flow_key, remote_ip, last_seen FROM connections WHERE remote_asn IS NULL LIMIT ?`,
 			`UPDATE connections SET remote_asn = ?, remote_cc = ? WHERE flow_key = ?`, 1},
-		{`SELECT bucket, client_device, client_ip, remote_ip, remote_port, proto, name, direction, remote_ip, bucket + 3600000 FROM traffic_hourly WHERE remote_asn IS NULL LIMIT ?`,
-			`UPDATE traffic_hourly SET remote_asn = ?, remote_cc = ? WHERE bucket = ? AND client_device = ? AND client_ip = ? AND remote_ip = ? AND remote_port = ? AND proto = ? AND name = ? AND direction = ?`, 8},
+		{`SELECT bucket, flow_key, remote_ip, bucket + 3600000 FROM traffic_hourly WHERE remote_asn IS NULL LIMIT ?`,
+			`UPDATE traffic_hourly SET remote_asn = ?, remote_cc = ? WHERE bucket = ? AND flow_key = ?`, 2},
 	} {
 		for {
 			n, err := s.enrichStep(ctx, db, t.sel, t.upd, t.keys)
@@ -51,6 +51,7 @@ func (s *Store) EnrichASN(ctx context.Context) (int64, error) {
 			}
 		}
 	}
+	s.invalidateAnomalies()
 	return total, nil
 }
 

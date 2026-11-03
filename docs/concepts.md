@@ -84,7 +84,10 @@ couple of seconds.
 
 **Precision.** Windows older than raw retention, or longer than
 `-exact-max`, are answered from hourly rollups: edges round to whole hours,
-connection states are not available, and `precision` says `hour`.
+connection states are not available, and `precision` says `hour`. Rollups
+keep one row per connection per hour, so a connection open across several
+hours is counted once (its bytes still spread over the hours it was active)
+and a name learned later does not split it into two.
 
 ## Correlation
 
@@ -216,6 +219,8 @@ Checks that need no history:
 | `brute_force` | an address outside opens at least 50 short sessions (under 10 s) to a login service on a device: SSH, Telnet, FTP, RDP, VNC, mail, databases. Web logins look like any page load, so they are not counted | medium, high from 500; low for 500 or more from at least 20 addresses with fewer each |
 | `arp_conflict` | two devices held one address at the same time for five minutes or more (a static misconfiguration or ARP spoofing, not an ordinary DHCP move) | medium; low when one MAC is private |
 | `rogue_dhcp` | a DHCP OFFER or ACK came from an address that is not the router or a sensor interface. Clients handed a different gateway or resolver are the damage | medium; high when no device here holds the server's address |
+| `wifi_deauth_flood` | one access point sends 20 or more deauthentication or disassociation frames in the window: knocking clients off, often to capture a handshake for an offline attack | medium; high from 100 |
+| `sensor_silent` | a sensor has not reported for two minutes while the window ends near now (a stopped, disconnected or wedged sensor) | medium; high from ten minutes |
 
 Checks that compare with history need a day of it: until the first sensor
 has reported for 24 hours the report says `learning` and they are skipped,
@@ -225,10 +230,10 @@ since everything is new to a network just met. They look back 7 days.
 |---|---|---|
 | `new_device` | a device uses an address on the LAN for the first time (the same event as a [new-device alert](deployment.md#new-device-alerts); not the router, not devices only heard over the air) | medium; low for a private (randomised) MAC, which phones rotate |
 | `new_destination` | a device with a day of history connects to a site, or an unnamed address, it had not in the last 7 days. A device that reached at most 30 destinations that week is predictable (a plug, a camera) and anything new from it counts; from a busier one only a new destination it uploaded 1 MB or more to | medium from a predictable device, high if also new to the whole network with 10 MB up; low from a busy one, medium if new to the network with 50 MB up. More than 10 for one device are summed up in one |
-| `upload_spike` | a device sends more per hour, on connections it opened, than in any hour of its last week, at least 4 times its median hour and at least 20 MB an hour. It needs 24 active hours of history | medium; high at 5 times its busiest hour and 200 MB an hour |
+| `upload_spike` | a device's busiest hour in the window, on connections it opened, sends more than in any hour of its last week, at least 4 times its median hour and at least 20 MB an hour. It needs 24 active hours of history | medium; high at 5 times its busiest hour and 200 MB an hour |
 | `rogue_ap` | a new access point broadcasts a network that the LAN's own devices (ones that used an address on it) associate with | medium |
 | `new_service` | a device holds sessions with clients outside on a port it had not served in the last 7 days, with at least 3 clients or 1 MB: a newly forwarded port or a container published by mistake. Dynamic ports (49152 and up), which peer-to-peer apps open, do not count | medium |
-| `inbound_surge` | a device accepts more connections from outside in an hour than 4 times its busiest hour of the last 7 days, and at least 1000. It needs 24 active hours of history | medium; high at 10 times and 10,000 an hour |
+| `inbound_surge` | a device accepts more connections from outside in its busiest hour of the window than 4 times its busiest hour of the last 7 days, and at least 1000. It needs 24 active hours of history | medium; high at 10 times and 10,000 an hour |
 
 The checks for servers here look only at connections opened from outside
 (direction `in`): traffic between devices here, such as a reverse proxy's

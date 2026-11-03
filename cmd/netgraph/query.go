@@ -20,6 +20,7 @@ what:
   summary      headline numbers for the window
   devices      local devices active in the window
   flows        connections, with the traffic each carried inside the window
+  destinations remote ends aggregated by name/address, busiest first
   dns          lookups and their answers
   facts        relationships that held in the window (addresses, hostnames,
                services, answers, fingerprints, ...)
@@ -53,6 +54,12 @@ func runQuery(args []string) error {
 	step := fs.String("step", "", "timeseries step, e.g. 5m (default: about 60 buckets)")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	f.visited(fs)
+	switch *out {
+	case "table", "json", "csv":
+	default:
+		return fmt.Errorf("-o: %q is not table, json or csv", *out)
 	}
 	filter, err := f.filter()
 	if err != nil {
@@ -88,6 +95,12 @@ func runQuery(args []string) error {
 			return err
 		}
 		v, t = fl, flowsTable(fl)
+	case "destinations":
+		ds, err := be.Destinations(ctx(), filter)
+		if err != nil {
+			return err
+		}
+		v, t = ds, destinationsTable(ds)
 	case "dns":
 		qs, err := be.DNS(ctx(), filter)
 		if err != nil {
@@ -185,7 +198,16 @@ func devicesTable(ds []model.Device) *table {
 		}
 		t.add(clip(d.Label, 28), d.MAC, clip(vendor, 24), join(d.IPs, 2), clip(join(d.Hostnames, 2), 32), clip(join(slices.Concat(d.Serves, d.Services), 3), 32),
 			strconv.Itoa(d.Flows), strconv.Itoa(d.DNSQueries), model.FormatBytes(d.BytesOut), model.FormatBytes(d.BytesIn),
-			ts(d.ActiveFrom)+" → "+ts(d.ActiveTo)[11:])
+			ts(d.ActiveFrom)+" → "+clock(d.ActiveTo))
+	}
+	return t
+}
+
+func destinationsTable(ds []model.Destination) *table {
+	t := &table{head: []string{"DESTINATION", "KIND", "CONNS", "DEVICES", "SENT", "RECV", "FIRST", "LAST"}}
+	for _, d := range ds {
+		t.add(clip(d.Label, 44), d.Kind, strconv.Itoa(d.Connections), strconv.Itoa(d.Devices),
+			model.FormatBytes(d.BytesOut), model.FormatBytes(d.BytesIn), clock(d.FirstSeen), clock(d.LastSeen))
 	}
 	return t
 }
@@ -205,7 +227,7 @@ func flowsTable(fl []model.Flow) *table {
 		}
 		client, server := f.Ends()
 		row := []string{ts(f.FirstSeen), f.Direction, clip(client, 28), clip(server, 32), clip(f.Name, 36), f.App, state,
-			model.FormatBytes(f.BytesOut), model.FormatBytes(f.BytesIn), ts(f.LastSeen)[11:]}
+			model.FormatBytes(f.BytesOut), model.FormatBytes(f.BytesIn), clock(f.LastSeen)}
 		if networks {
 			row = slices.Insert(row, 4, clip(f.Network(), 32))
 		}

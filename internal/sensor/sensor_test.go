@@ -665,3 +665,31 @@ func TestDNSOverTCPRetransmission(t *testing.T) {
 		t.Fatalf("retransmitted DNS message decoded %d times, want 1", n)
 	}
 }
+
+func TestTCPDNSSequenceBoundaryDoesNotWedge(t *testing.T) {
+	var out collector
+	p := NewProcessor(Config{}, &out)
+	f := &frame{
+		src: netip.MustParseAddr("192.168.1.2"), dst: netip.MustParseAddr("192.168.1.1"),
+		sport: 40000, dport: 53, seq: 100, payload: []byte{0, 0},
+	}
+	p.tcpDNSFrames(testutil.Base, f)
+	f.seq = 100 + 1<<31
+	p.tcpDNSFrames(testutil.Base, f)
+	f.seq = 100
+	f.seq -= 1 << 31
+	p.tcpDNSFrames(testutil.Base, f)
+
+	done := make(chan struct{})
+	go func() {
+		p.mu.Lock()
+		_ = len(p.tcpStreams)
+		p.mu.Unlock()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("tcpDNS left the processor locked after a sequence boundary")
+	}
+}

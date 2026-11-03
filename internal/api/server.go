@@ -64,6 +64,7 @@ type Server struct {
 	keys atomic.Pointer[wifi.Secrets]
 
 	ingestStats ingestMetrics
+	liveSubs    atomic.Int32
 }
 
 // SetWiFi replaces the Wi-Fi keys served to sensors, such as after the key
@@ -88,6 +89,7 @@ func New(cfg Config) *Server {
 	read("/api/v1/summary", s.summary)
 	read("/api/v1/devices", s.devices)
 	read("/api/v1/flows", s.flows)
+	read("/api/v1/destinations", s.destinations)
 	read("/api/v1/dns", s.dns)
 	read("/api/v1/facts", s.facts)
 	read("/api/v1/timeseries", s.timeseries)
@@ -110,6 +112,14 @@ func New(cfg Config) *Server {
 
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	w.Header().Set("X-Frame-Options", "DENY")
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'")
+	if r.Method == http.MethodHead && (r.URL.Path == "/api/v1/live" || r.URL.Path == "/api/v1/export") {
+		w.Header().Set("Allow", "GET")
+		httpError(w, http.StatusMethodNotAllowed, errors.New("HEAD is not supported for this endpoint"))
+		return
+	}
 	if r.URL.Path == "/api/v1/live" || !acceptsGzip(r) {
 		s.mux.ServeHTTP(w, r)
 		return
@@ -304,14 +314,27 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) filter(w http.ResponseWriter, r *http.Request) (model.Filter, bool) {
-	f, err := model.ParseFilter(r.URL.Query(), time.Now())
+	now := time.Now()
+	f, err := model.ParseFilter(r.URL.Query(), now)
 	if err != nil {
 		httpError(w, http.StatusBadRequest, err)
 		return f, false
 	}
-	if !f.From.IsZero() && !f.To.IsZero() && !f.From.Before(f.To) {
+	// Resolve the defaults here, not just in the store: a lone future
+	// "from" or a "to" before the implied start of the window must be a
+	// 400, not an empty or inverted window.
+	if f.To.IsZero() {
+		f.To = now
+	}
+	if f.From.IsZero() {
+		f.From = f.To.Add(-time.Hour)
+	}
+	if !f.From.Before(f.To) {
 		httpError(w, http.StatusBadRequest, errors.New("from must be before to"))
 		return f, false
+	}
+	if f.Limit < 0 {
+		f.Limit = 0
 	}
 	return f, true
 }
@@ -342,7 +365,7 @@ func (s *Server) fail(w http.ResponseWriter, err error) {
 		return
 	}
 	s.log.Error("query", "err", err)
-	httpError(w, http.StatusInternalServerError, err)
+	httpError(w, http.StatusInternalServerError, errors.New("query failed"))
 }
 
 func (s *Server) summary(w http.ResponseWriter, r *http.Request) {
@@ -352,6 +375,9 @@ func (s *Server) devices(w http.ResponseWriter, r *http.Request) {
 	answer(s, w, r, s.cfg.Store.Devices)
 }
 func (s *Server) flows(w http.ResponseWriter, r *http.Request) { answer(s, w, r, s.cfg.Store.Flows) }
+func (s *Server) destinations(w http.ResponseWriter, r *http.Request) {
+	answer(s, w, r, s.cfg.Store.Destinations)
+}
 func (s *Server) dns(w http.ResponseWriter, r *http.Request)   { answer(s, w, r, s.cfg.Store.DNS) }
 func (s *Server) facts(w http.ResponseWriter, r *http.Request) { answer(s, w, r, s.cfg.Store.Facts) }
 
@@ -516,9 +542,28 @@ func (s *Server) graph(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
+	if r.Method == http.MethodHead {
+		switch q.Get("format") {
+		case "svg":
+			w.Header().Set("Content-Type", "image/svg+xml")
+		case "d2", "txt", "text":
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		default:
+			w.Header().Set("Content-Type", "application/json")
+		}
+		return
+	}
 	g, err := s.cfg.Store.Graph(r.Context(), f, model.ParseGraphOptions(q))
 	if err != nil {
 		s.fail(w, err)
+		return
+	}
+	if layout := q.Get("layout"); layout != "" && layout != "elk" && layout != "dagre" {
+		httpError(w, http.StatusBadRequest, fmt.Errorf("layout: %q is not elk or dagre", layout))
+		return
+	}
+	if len(g.Nodes) > 2000 || len(g.Edges) > 5000 {
+		httpError(w, http.StatusBadRequest, fmt.Errorf("graph has %d nodes and %d edges; narrow the window or filter it", len(g.Nodes), len(g.Edges)))
 		return
 	}
 	theme := q.Get("theme")
@@ -551,11 +596,18 @@ func (s *Server) graph(w http.ResponseWriter, r *http.Request) {
 
 // live streams ingested events as server-sent events.
 func (s *Server) live(w http.ResponseWriter, r *http.Request) {
+	if n := s.liveSubs.Add(1); n > 100 {
+		s.liveSubs.Add(-1)
+		httpError(w, http.StatusServiceUnavailable, errors.New("too many live listeners"))
+		return
+	}
+	defer s.liveSubs.Add(-1)
 	fl, ok := w.(http.Flusher)
 	if !ok {
 		httpError(w, http.StatusInternalServerError, errors.New("streaming unsupported"))
 		return
 	}
+	rc := http.NewResponseController(w)
 	w.Header().Set("Content-Type", "text/event-stream")
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("X-Accel-Buffering", "no")
@@ -575,7 +627,10 @@ func (s *Server) live(w http.ResponseWriter, r *http.Request) {
 			b, _ := json.Marshal(evs)
 			fmt.Fprintf(w, "event: ingest\ndata: %s\n\n", b)
 		}
-		fl.Flush()
+		_ = rc.SetWriteDeadline(time.Now().Add(30 * time.Second))
+		if err := rc.Flush(); err != nil {
+			return
+		}
 	}
 }
 
@@ -604,23 +659,29 @@ func (s *Server) web(w http.ResponseWriter, r *http.Request) {
 	if strings.HasSuffix(p, ".wasm") {
 		w.Header().Set("Content-Type", "application/wasm")
 		w.Header().Set("Vary", "Accept-Encoding")
+		w.Header().Set("Cache-Control", "no-cache")
 		if f, err := s.cfg.Web.Open(p + ".gz"); err == nil {
 			defer f.Close()
-			if strings.Contains(r.Header.Get("Accept-Encoding"), "gzip") {
+			if st, serr := f.Stat(); serr == nil && acceptsGzip(r) {
 				w.Header().Set("Content-Encoding", "gzip")
+				w.Header().Set("Content-Length", strconv.FormatInt(st.Size(), 10))
 				io.Copy(w, f)
 				return
 			}
-			if zr, err := gzip.NewReader(f); err == nil {
+			if zr, zerr := gzip.NewReader(f); zerr == nil {
+				defer zr.Close()
 				io.Copy(w, zr)
 				return
 			}
+			httpError(w, http.StatusInternalServerError, errors.New("web UI asset is corrupt"))
+			return
 		}
 	}
-	if _, err := fs.Stat(s.cfg.Web, p); err != nil {
-		p = "index.html" // client-side routes
+	st, err := fs.Stat(s.cfg.Web, p)
+	if err != nil || st.IsDir() {
+		p = "index.html" // client-side routes, never a directory listing
 	}
-	if p == "index.html" {
+	if p == "index.html" || strings.HasSuffix(p, ".js") || strings.HasSuffix(p, ".css") {
 		w.Header().Set("Cache-Control", "no-cache")
 	}
 	http.ServeFileFS(w, r, s.cfg.Web, p)

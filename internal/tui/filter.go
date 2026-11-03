@@ -11,7 +11,7 @@ import (
 // parseFilter reads "key:value" tokens; a bare word filters by domain.
 func parseFilter(s string) (model.Filter, error) {
 	var f model.Filter
-	for _, tok := range strings.Fields(s) {
+	for _, tok := range splitFilter(s) {
 		k, v, ok := strings.Cut(tok, ":")
 		if !ok || strings.Count(tok, ":") > 1 && k != "device" && k != "ip" {
 			// A bare word, or an IPv6 address / MAC typed bare.
@@ -71,12 +71,58 @@ func parseFilter(s string) (model.Filter, error) {
 	return f, nil
 }
 
+// splitFilter splits on spaces that are not inside single or double quotes,
+// and honours backslash escapes, so a device label with spaces survives the
+// round trip through the filter editor.
+func splitFilter(s string) []string {
+	var out []string
+	var b strings.Builder
+	var quote rune
+	escaped := false
+	for _, r := range s {
+		switch {
+		case escaped:
+			b.WriteRune(r)
+			escaped = false
+		case r == '\\':
+			escaped = true
+		case quote != 0:
+			if r == quote {
+				quote = 0
+			} else {
+				b.WriteRune(r)
+			}
+		case r == '"' || r == '\'':
+			quote = r
+		case r == ' ' || r == '\t':
+			if b.Len() > 0 {
+				out = append(out, b.String())
+				b.Reset()
+			}
+		default:
+			b.WriteRune(r)
+		}
+	}
+	if b.Len() > 0 {
+		out = append(out, b.String())
+	}
+	return out
+}
+
+// quoteFilterValue wraps a value containing whitespace or quotes.
+func quoteFilterValue(v string) string {
+	if !strings.ContainsAny(v, " \t\"\\") {
+		return v
+	}
+	return `"` + strings.NewReplacer(`\`, `\\`, `"`, `\"`).Replace(v) + `"`
+}
+
 // filterString renders a filter back into the tokens parseFilter reads.
 func filterString(f model.Filter) string {
 	var parts []string
 	add := func(k, v string) {
 		if v != "" {
-			parts = append(parts, k+":"+v)
+			parts = append(parts, k+":"+quoteFilterValue(v))
 		}
 	}
 	add("device", f.Device)

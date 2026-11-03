@@ -84,9 +84,13 @@ func (c *Client) do(ctx context.Context, method, path string, q url.Values, payl
 		return nil, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 256<<20))
+	const maxBody = 256 << 20
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody+1))
 	if err != nil {
 		return nil, err
+	}
+	if len(body) > maxBody {
+		return nil, fmt.Errorf("response larger than %d bytes", maxBody)
 	}
 	if resp.StatusCode/100 != 2 {
 		var e struct{ Error string }
@@ -120,6 +124,11 @@ func (c *Client) Devices(ctx context.Context, f model.Filter) ([]model.Device, e
 func (c *Client) Flows(ctx context.Context, f model.Filter) ([]model.Flow, error) {
 	var v []model.Flow
 	return v, c.getJSON(ctx, "/api/v1/flows", f.Values(), &v)
+}
+
+func (c *Client) Destinations(ctx context.Context, f model.Filter) ([]model.Destination, error) {
+	var v []model.Destination
+	return v, c.getJSON(ctx, "/api/v1/destinations", f.Values(), &v)
 }
 
 func (c *Client) DNS(ctx context.Context, f model.Filter) ([]model.DNSQuery, error) {

@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gopacket/gopacket/afpacket"
@@ -84,13 +85,21 @@ type liveSource struct {
 	name string
 	h    *afpacket.TPacket
 	link int
+	mu   sync.Mutex // guards the socket across ReadPacket, Close and Stats
 }
 
 func (s *liveSource) Name() string  { return s.name }
 func (s *liveSource) LinkType() int { return s.link }
-func (s *liveSource) Close() error  { s.h.Close(); return nil }
+func (s *liveSource) Close() error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.h.Close()
+	return nil
+}
 
 func (s *liveSource) ReadPacket() ([]byte, time.Time, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	data, ci, err := s.h.ZeroCopyReadPacketData()
 	if err != nil {
 		if errors.Is(err, afpacket.ErrTimeout) || errors.Is(err, afpacket.ErrPoll) {
@@ -102,6 +111,8 @@ func (s *liveSource) ReadPacket() ([]byte, time.Time, error) {
 }
 
 func (s *liveSource) Stats() (uint64, uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	_, v3, err := s.h.SocketStats()
 	if err != nil {
 		return 0, 0

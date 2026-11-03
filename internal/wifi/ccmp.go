@@ -184,10 +184,14 @@ func pad16(b []byte) []byte {
 // ciphertext and the 8-byte MIC. header is the 802.11 MAC header (without the
 // CCMP header), exactly as transmitted.
 func ccmpDecrypt(header, body, tk []byte) ([]byte, error) {
-	if len(tk) != 16 {
+	if len(tk) != 16 && len(tk) != 32 {
 		return nil, fmt.Errorf("ccmp: temporal key length %d", len(tk))
 	}
-	if len(body) < 16 {
+	tagLen := 8
+	if len(tk) == 32 {
+		tagLen = 16 // CCMP-256
+	}
+	if len(body) < 8+tagLen {
 		return nil, fmt.Errorf("ccmp: short body")
 	}
 	hdr := body[:8]
@@ -205,7 +209,7 @@ func ccmpDecrypt(header, body, tk []byte) ([]byte, error) {
 	nonce[10] = hdr[4]
 	nonce[11] = hdr[1]
 	nonce[12] = hdr[0]
-	return ccmOpen(tk, nonce, body[8:], aad, 8)
+	return ccmOpen(tk, nonce, body[8:], aad, tagLen)
 }
 
 // ccmpSeal is the inverse of ccmpDecrypt, used by tests and by an eventual

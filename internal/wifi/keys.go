@@ -143,13 +143,13 @@ func pairwiseCipher(chosen string, sec Security) string {
 	if chosen != "" {
 		return chosen
 	}
-	if sec.UsesCCMP() || sec.UsesTKIP() {
-		return ""
-	}
 	for _, c := range sec.Pairwise {
-		if c == "GCMP-128" || c == "GCMP-256" {
+		if c == "CCMP-256" || c == "GCMP-128" || c == "GCMP-256" {
 			return c
 		}
+	}
+	if sec.UsesCCMP() || sec.UsesTKIP() {
+		return ""
 	}
 	return ""
 }
@@ -542,7 +542,7 @@ func (k *Keyring) setNetwork(bssid, ssid string, s Security) {
 	key := strings.ToLower(bssid)
 	k.mu.Lock()
 	if len(k.networks) > 50_000 {
-		clear(k.networks)
+		evict(k.networks, 45_000)
 	}
 	old := k.networks[key]
 	if ssid == "" {
@@ -561,6 +561,18 @@ func (k *Keyring) pmkFor(ssid string) []byte {
 	k.mu.RLock()
 	defer k.mu.RUnlock()
 	return append([]byte(nil), k.pmks[strings.ToLower(ssid)]...)
+}
+
+// evict removes arbitrary entries until m holds at most keep. Map order is
+// random, which is enough for a cache under memory pressure; the alternative
+// (clearing it) loses every key at once.
+func evict[K comparable, V any](m map[K]V, keep int) {
+	for k := range m {
+		if len(m) <= keep {
+			return
+		}
+		delete(m, k)
+	}
 }
 
 func pairKey(ap, sta net.HardwareAddr) string {
@@ -593,7 +605,7 @@ func (k *Keyring) ProcessEAPOL(f *Frame, msg *EAPOLKey) HandshakeInfo {
 	hs := k.handshakes[key]
 	if hs == nil {
 		if len(k.handshakes) > 50_000 {
-			clear(k.handshakes)
+			evict(k.handshakes, 45_000)
 		}
 		hs = &handshake{}
 		k.handshakes[key] = hs
@@ -672,6 +684,12 @@ func (k *Keyring) ProcessEAPOL(f *Frame, msg *EAPOLKey) HandshakeInfo {
 // derived then. This is how a restarted or additional sensor recovers keys
 // from the server without re-capturing the 4-way handshake.
 func (k *Keyring) LoadHandshake(bssid, sta, ssid string, anonce, snonce []byte, keyVersion int) (bool, error) {
+	return k.LoadHandshakeCipher(bssid, sta, ssid, anonce, snonce, keyVersion, "")
+}
+
+// LoadHandshakeCipher is LoadHandshake with the pairwise cipher the station
+// chose in message 2, so a re-derived key does not guess from the beacon.
+func (k *Keyring) LoadHandshakeCipher(bssid, sta, ssid string, anonce, snonce []byte, keyVersion int, cipher string) (bool, error) {
 	if len(anonce) != 32 || len(snonce) != 32 {
 		return false, fmt.Errorf("wifi: handshake nonce must be 32 bytes")
 	}
@@ -700,7 +718,9 @@ func (k *Keyring) LoadHandshake(bssid, sta, ssid string, anonce, snonce []byte, 
 	if err != nil {
 		return false, err
 	}
-	k.install(key, src, splitPTK(ptk, keyVersion == 1))
+	installedKey := splitPTK(ptk, keyVersion == 1)
+	installedKey.Cipher = cipher
+	k.install(key, src, installedKey)
 	return true, nil
 }
 
@@ -708,8 +728,15 @@ func (k *Keyring) LoadHandshake(bssid, sta, ssid string, anonce, snonce []byte, 
 func (k *Keyring) install(key string, src pairSource, ptk *PTK) {
 	k.mu.Lock()
 	if len(k.pairs) > 50_000 {
-		clear(k.pairs)
-		clear(k.pairNet)
+		// Evict some, not all: clearing the map drops every client's
+		// working key at once during a guest-network MAC rotation.
+		for old := range k.pairs {
+			if len(k.pairs) <= 45_000 {
+				break
+			}
+			delete(k.pairs, old)
+			delete(k.pairNet, old)
+		}
 	}
 	k.pairs[key] = ptk
 	k.pairNet[key] = src
@@ -750,13 +777,14 @@ func (k *Keyring) Decrypt(f *Frame) ([]byte, string, error) {
 			if f.Src != nil && k.ptk(ap, f.Src.String()) != nil {
 				return nil, "", errRelayed
 			}
+			_, sec, _ := k.Network(ap)
+			if strings.HasPrefix(sec.Group, "GCMP") {
+				out, err := gcmpDecrypt(f.rawHeader(), body, gk.tk)
+				return out, sec.Group, err
+			}
 			if gk.tkip {
 				out, err := tkipDecrypt(f.rawHeader(), body, gk.tk, true)
 				return out, "TKIP", err
-			}
-			if _, sec, _ := k.Network(ap); strings.HasPrefix(sec.Group, "GCMP") {
-				out, err := gcmpDecrypt(f.rawHeader(), body, gk.tk)
-				return out, sec.Group, err
 			}
 			out, err := ccmpDecrypt(f.rawHeader(), body, gk.tk)
 			return out, "CCMP", err
@@ -788,6 +816,12 @@ func (k *Keyring) Decrypt(f *Frame) ([]byte, string, error) {
 					return nil, "", fmt.Errorf("wifi: no 256-bit temporal key")
 				}
 				out, err := gcmpDecrypt(f.rawHeader(), body, ptk.TK256)
+				return out, c, err
+			case "CCMP-256":
+				if len(ptk.TK256) != 32 {
+					return nil, "", fmt.Errorf("wifi: no 256-bit temporal key")
+				}
+				out, err := ccmpDecrypt(f.rawHeader(), body, ptk.TK256)
 				return out, c, err
 			}
 			out, err := ccmpDecrypt(f.rawHeader(), body, ptk.TK)

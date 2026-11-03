@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -71,10 +72,11 @@ type Model struct {
 	gview   viewport.Model
 	outRows []outlineRow
 
-	seq     int // drops results of superseded requests
-	loading int
-	err     error
-	status  string
+	seq       int // drops results of superseded requests
+	loading   int
+	entitySeq int
+	err       error
+	status    string
 
 	cursor [numTabs]int
 	offset [numTabs]int
@@ -157,6 +159,7 @@ type graphTextMsg struct {
 }
 
 type entityMsg struct {
+	seq int
 	d   *model.EntityDetail
 	err error
 }
@@ -261,6 +264,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case entityMsg:
+		if msg.seq != m.entitySeq {
+			return m, nil // a newer Enter replaced this request
+		}
 		m.loading = max(m.loading-1, 0)
 		if msg.err != nil {
 			m.status = "detail: " + msg.err.Error()
@@ -434,8 +440,12 @@ func (m Model) onKey(k tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "enter":
 		if id := m.selectedEntity(); id != "" {
 			m.loading++
-			be, f := m.be, m.window()
-			return m, func() tea.Msg { d, err := be.Entity(context.Background(), id, f); return entityMsg{d, err} }
+			m.entitySeq++
+			seq, be, f := m.entitySeq, m.be, m.window()
+			return m, func() tea.Msg {
+				d, err := be.Entity(context.Background(), id, f)
+				return entityMsg{seq: seq, d: d, err: err}
+			}
 		}
 		return m, nil
 	}
@@ -523,8 +533,10 @@ func (m *Model) resetCursors() {
 
 func (m Model) rows() int {
 	switch m.tab {
-	case tabDevices, tabSummary:
+	case tabDevices:
 		return len(m.devices)
+	case tabSummary:
+		return len(m.summaryDevices())
 	case tabFlows:
 		return len(m.flows)
 	case tabDNS:
@@ -541,6 +553,22 @@ func (m *Model) clampCursor() {
 	n := m.rows()
 	c := &m.cursor[m.tab]
 	*c = max(min(*c, n-1), 0)
+	o := &m.offset[m.tab]
+	*o = max(min(*o, n-1), 0)
+	if *c < *o {
+		*o = *c
+	}
+}
+
+// summaryDevices is the busiest ten devices, the same list the Summary tab
+// draws and the cursor selects from.
+func (m Model) summaryDevices() []model.Device {
+	ds := append([]model.Device(nil), m.devices...)
+	sort.SliceStable(ds, func(i, j int) bool { return ds[i].BytesIn+ds[i].BytesOut > ds[j].BytesIn+ds[j].BytesOut })
+	if len(ds) > 10 {
+		ds = ds[:10]
+	}
+	return ds
 }
 
 func (m *Model) moveCursor(key string) {
@@ -575,9 +603,14 @@ func (m *Model) moveCursor(key string) {
 func (m Model) selectedEntity() string {
 	c := m.cursor[m.tab]
 	switch m.tab {
-	case tabDevices, tabSummary:
+	case tabDevices:
 		if c < len(m.devices) {
 			return m.devices[c].ID
+		}
+	case tabSummary:
+		ds := m.summaryDevices()
+		if c < len(ds) {
+			return ds[c].ID
 		}
 	case tabFlows:
 		if c < len(m.flows) {

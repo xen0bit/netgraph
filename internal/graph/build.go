@@ -248,8 +248,12 @@ func Build(in Input, o model.GraphOptions) *model.Graph {
 				src = model.EntityID(model.KindIP, q.ClientIP)
 			}
 			dom := b.nameID(q.QName)
-			if o.TopN > 0 && len(in.Flows) > 0 && !keptDest[dom] && !b.answersKept(q, keptDest) {
-				continue // a lookup that led nowhere the graph shows
+			if o.TopN > 0 && len(in.Flows) > 0 && q.RCode == "NOERROR" && len(q.Answers) > 0 &&
+				!keptDest[dom] && !b.answersKept(q, keptDest) {
+				// Answered lookups that led nowhere the graph shows are
+				// folded away; NXDOMAIN and unanswered lookups stay as
+				// their own dashed edges (a failed lookup is evidence).
+				continue
 			}
 			b.sourceNode(src, devices)
 			b.nameNode(q.QName)

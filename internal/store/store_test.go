@@ -729,3 +729,155 @@ func TestSearch(t *testing.T) {
 		t.Errorf("by automatic name after a label: %v", got)
 	}
 }
+
+func TestIngestMalformedBindingDoesNotWedge(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "ng.db"), Config{Now: func() time.Time { return testutil.Base.Add(10 * time.Minute) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	ev := wire.Event{Seq: 1, Type: wire.TypeBinding, TS: testutil.Base,
+		Binding: &wire.Binding{MAC: "aa:bb:cc:00:00:01", IP: netip.MustParseAddr("0.0.0.0"), Source: "arp"}}
+	if _, err := st.Ingest(ctx, "router", "boot", []wire.Event{ev}); err != nil {
+		t.Fatalf("malformed binding: %v", err)
+	}
+	// The ingest mutex must still be free.
+	done := make(chan struct{})
+	go func() {
+		_, _ = st.Ingest(ctx, "router", "boot", []wire.Event{{Seq: 2, Type: wire.TypeBinding, TS: testutil.Base,
+			Binding: &wire.Binding{MAC: "aa:bb:cc:00:00:01", IP: netip.MustParseAddr("192.168.1.9"), Source: "arp"}}})
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ingest stayed locked after a malformed binding")
+	}
+}
+
+func TestTimeseriesRejectsInvalidWindows(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "ng.db"), Config{Now: func() time.Time { return testutil.Base.Add(time.Hour) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	now := testutil.Base.Add(time.Hour)
+	for _, tc := range []struct {
+		name string
+		f    model.Filter
+		step time.Duration
+	}{
+		{"reversed", model.Filter{From: now, To: now.Add(-time.Hour)}, 0},
+		{"empty", model.Filter{From: now, To: now}, 0},
+		{"sub-millisecond", model.Filter{From: now.Add(-time.Hour), To: now}, time.Nanosecond},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if _, err := st.Timeseries(ctx, tc.f, tc.step); !errors.Is(err, ErrInvalid) {
+				t.Fatalf("got %v, want ErrInvalid", err)
+			}
+		})
+	}
+}
+
+func TestHourlyRollupCountsCarriedConnectionOnce(t *testing.T) {
+	base := testutil.Base
+	st, err := Open(filepath.Join(t.TempDir(), "ng.db"), Config{
+		RawRetention: time.Hour,
+		Now:          func() time.Time { return base.Add(5 * time.Hour) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	client := netip.MustParseAddr("192.168.1.10")
+	remote := netip.MustParseAddr("93.184.216.34")
+	mk := func(seq uint64, start time.Duration, final bool) wire.Event {
+		return wire.Event{Seq: seq, Type: wire.TypeFlow, TS: base.Add(start), Flow: &wire.Flow{
+			ID: 1, Proto: 6, Src: client, SrcPort: 40000, Dst: remote, DstPort: 443, SrcMAC: "aa:bb:cc:00:00:01",
+			FirstSeen: base, Start: base.Add(start), End: base.Add(start + 30*time.Minute),
+			BytesOut: 100, BytesIn: 200, PktsOut: 1, PktsIn: 2, Final: final,
+		}}
+	}
+	events := []wire.Event{mk(1, 0, false), mk(2, time.Hour, false), mk(3, 2*time.Hour, true)}
+	if _, err := st.Ingest(context.Background(), "router", "boot", events); err != nil {
+		t.Fatal(err)
+	}
+	f := win(0, 3*time.Hour)
+	flows, err := st.Flows(context.Background(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(flows) != 1 || flows[0].Connections != 1 || flows[0].BytesOut != 300 || flows[0].BytesIn != 600 {
+		t.Fatalf("hourly flows = %+v", flows)
+	}
+	sum, err := st.Summary(context.Background(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sum.Precision != model.PrecisionHour || sum.Flows != 1 {
+		t.Fatalf("hourly summary = %+v", sum)
+	}
+	devs, err := st.Devices(context.Background(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(devs) != 1 || devs[0].Flows != 1 {
+		t.Fatalf("hourly devices = %+v", devs)
+	}
+}
+
+func TestGraphKeepsLookupsWithoutConnections(t *testing.T) {
+	base := testutil.Base
+	st, err := Open(filepath.Join(t.TempDir(), "ng.db"), Config{Now: func() time.Time { return base.Add(10 * time.Minute) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	client := netip.MustParseAddr("192.168.1.10")
+	ev := wire.Event{Seq: 1, Type: wire.TypeDNS, TS: base, DNS: &wire.DNS{
+		Client: client, ClientMAC: "aa:bb:cc:00:00:01", Server: netip.MustParseAddr("192.168.1.1"),
+		Proto: "udp", ID: 1, QName: "missing.example", QType: "A", RCode: "NXDOMAIN",
+	}}
+	if _, err := st.Ingest(context.Background(), "router", "boot", []wire.Event{ev}); err != nil {
+		t.Fatal(err)
+	}
+	g, err := st.Graph(context.Background(), win(0, 10*time.Minute), model.DefaultGraphOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var found bool
+	for _, e := range g.Edges {
+		if e.Rel == model.RelQueried && (e.To == model.EntityID(model.KindDomain, "missing.example") ||
+			e.To == model.EntityID(model.KindSite, "missing.example")) {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("DNS-only graph dropped the lookup: %+v", g)
+	}
+}
+
+func TestDestinations(t *testing.T) {
+	st, _, _ := homeStore(t)
+	ds, err := st.Destinations(context.Background(), win(0, time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ds) == 0 || ds[0].Connections == 0 || ds[0].BytesOut+ds[0].BytesIn == 0 {
+		t.Fatalf("destinations = %+v", ds)
+	}
+}
+
+func TestOpenReadOnlyWhileWriterOpen(t *testing.T) {
+	st, _, _ := homeStore(t)
+	ro, err := OpenReadOnly(st.Path(), Config{Now: st.cfg.Now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ro.Close()
+	if _, err := ro.Summary(context.Background(), win(0, time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+}

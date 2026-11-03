@@ -33,14 +33,28 @@ type IngestResult struct {
 // already ingested for this sensor boot are skipped, so a batch retried
 // after a lost response is not counted twice. The batch is one
 // transaction: it is stored entirely or not at all.
-func (s *Store) Ingest(ctx context.Context, sensor, boot string, events []wire.Event) (IngestResult, error) {
+func (s *Store) Ingest(ctx context.Context, sensor, boot string, events []wire.Event) (res IngestResult, err error) {
 	if s.w == nil {
 		return IngestResult{}, errors.New("database is open read-only")
 	}
 	if sensor == "" {
 		return IngestResult{}, errors.New("missing sensor name")
 	}
+	// A panic while decoding one event must cost that batch, not wedge the
+	// store: the mutex below guards both ingest and retention.
 	s.mu.Lock()
+	defer s.mu.Unlock()
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("ingest panic: %v", r)
+			// Caches may now describe rows that were rolled back.
+			s.ing = newIngester(s)
+			if werr := s.ing.warm(context.WithoutCancel(ctx)); werr != nil {
+				s.log.Error("rewarm ingest caches", "err", werr)
+			}
+			s.reloadNets(context.WithoutCancel(ctx))
+		}
+	}()
 	res, live, err := s.ing.batch(ctx, sensor, boot, events)
 	if err != nil {
 		// Caches may now describe rows that were rolled back.
@@ -48,12 +62,11 @@ func (s *Store) Ingest(ctx context.Context, sensor, boot string, events []wire.E
 		if werr := s.ing.warm(ctx); werr != nil {
 			s.log.Error("rewarm ingest caches", "err", werr)
 		}
-		s.mu.Unlock()
+		s.reloadNets(ctx)
 		return res, err
 	}
 	s.sub.publish(live)
-	s.mu.Unlock()
-	s.invalidateAnomalies()
+	s.invalidateAnomaliesThrottled()
 	if s.cfg.OnNewDevice != nil {
 		for _, d := range res.NewDevices {
 			s.cfg.OnNewDevice(d)
@@ -139,6 +152,7 @@ type binding struct {
 
 type trafficKey struct {
 	bucket      int64
+	flowKey     string
 	device      int64
 	client      string
 	remote      string
@@ -180,6 +194,8 @@ func newIngester(s *Store) *ingester {
 // Correlation limits.
 const (
 	answerGrace      = 10 * 60 * 1000 // ms an answer stays usable past its TTL: clients cache past TTL and reuse connections
+	maxDNSTTL        = 7 * 24 * 3600  // s; a wire TTL beyond this keeps rows and caches alive for years
+	maxDHCPLeaseSecs = 30 * 24 * 3600 // s; a bogus lease must not own an address for centuries
 	answersPerIP     = 8
 	maxAnswerCache   = 200_000
 	maxFlowNameCache = 100_000
@@ -231,6 +247,7 @@ func (g *ingester) batch(ctx context.Context, sensor, boot string, events []wire
 	g.tx = tx
 	g.live = g.live[:0]
 	g.joined = g.joined[:0]
+	defer tx.Rollback() // a no-op after a successful commit
 	defer func() { g.tx = nil }()
 
 	now := ms(g.s.cfg.Now())
@@ -247,6 +264,7 @@ func (g *ingester) batch(ctx context.Context, sensor, boot string, events []wire
 			return res, nil, err
 		}
 	}
+	persisted := last
 	maxSeq := last
 	for i := range events {
 		ev := &events[i]
@@ -260,8 +278,12 @@ func (g *ingester) batch(ctx context.Context, sensor, boot string, events []wire
 		}
 		res.Accepted++
 		maxSeq = max(maxSeq, int64(ev.Seq))
+		// Advance here, not only at the end of the batch: a batch that
+		// repeats a sequence number (a retry concatenated by a producer)
+		// must apply it once.
+		last = maxSeq
 	}
-	if boot != "" && maxSeq > last {
+	if boot != "" && maxSeq > persisted {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO ingest_seq (sensor_id, boot, last_seq, updated) VALUES (?, ?, ?, ?)
 			ON CONFLICT (sensor_id, boot) DO UPDATE SET last_seq = excluded.last_seq, updated = excluded.updated`, sid, boot, maxSeq, now); err != nil {
 			tx.Rollback()
@@ -538,9 +560,30 @@ func (g *ingester) fact(ctx context.Context, rel string, src, dst int64, ts, unt
 		default:
 			return err
 		}
+		cached := true
 		if old := g.facts[k]; old == nil || old.last <= f.last {
 			g.facts[k] = f
+		} else {
+			// The cache holds a newer period. Updating this older one in
+			// memory would never reach the database: flush it directly.
+			cached = false
 		}
+		f.first = min(f.first, ts)
+		f.last = max(f.last, until)
+		f.cnt++
+		for k, v := range attrs {
+			if f.attrs == nil {
+				f.attrs = map[string]string{}
+			}
+			f.attrs[k] = v
+		}
+		if !cached {
+			b, _ := json.Marshal(f.attrs)
+			_, err := g.tx.ExecContext(ctx, `UPDATE facts SET first_seen = ?, last_seen = ?, count = ?, attrs = ? WHERE id = ?`, f.first, f.last, f.cnt, string(b), f.id)
+			return err
+		}
+		f.dirty = true
+		return nil
 	}
 	f.first = min(f.first, ts)
 	f.last = max(f.last, until)
@@ -720,7 +763,9 @@ func (g *ingester) observation(ctx context.Context, sid, ts int64, typ string, d
 const MaxRecordSpan = 10 * time.Minute
 
 func (g *ingester) flow(ctx context.Context, sid int64, sensor, boot string, f *wire.Flow) error {
-	if span := f.End.Sub(f.Start); span > MaxRecordSpan {
+	if span := f.End.Sub(f.Start); span > 24*time.Hour {
+		return nil // implausible: do not split into thousands of rows
+	} else if span > MaxRecordSpan {
 		n := int64((span + MaxRecordSpan - 1) / MaxRecordSpan)
 		total := *f
 		var done [4]uint64
@@ -753,8 +798,15 @@ func (g *ingester) flow(ctx context.Context, sid int64, sensor, boot string, f *
 	return g.flowRecord(ctx, sid, sensor, boot, f)
 }
 
+// flowKey scopes a sensor's flow id to one boot. Length prefixes keep
+// arbitrary sensor and boot names (which may contain colons) from colliding.
+func flowKey(sensor, boot string, id uint64) string {
+	return strconv.Itoa(len(sensor)) + ":" + sensor + ":" +
+		strconv.Itoa(len(boot)) + ":" + boot + ":" + strconv.FormatUint(id, 10)
+}
+
 func (g *ingester) flowRecord(ctx context.Context, sid int64, sensor, boot string, f *wire.Flow) error {
-	key := sensor + ":" + boot + ":" + strconv.FormatUint(f.ID, 10)
+	key := flowKey(sensor, boot, f.ID)
 	nets := g.s.nets
 	srcLocal, dstLocal := nets.isLocal(f.Src) || f.Src.IsUnspecified(), nets.isLocal(f.Dst)
 	client, cport, cmac := f.Src, f.SrcPort, f.SrcMAC
@@ -784,6 +836,9 @@ func (g *ingester) flowRecord(ctx context.Context, sid int64, sensor, boot strin
 	}
 	multicast := isGroupAddr(remote) || nets.isBroadcast(remote)
 	start, end, first := ms(f.Start), ms(f.End), ms(f.FirstSeen)
+	if end < start || end-start > 24*3600*1000 {
+		return nil // a sensor cannot legitimately report a day-long interval record
+	}
 
 	dev, devMAC, err := g.deviceFor(ctx, client, cmac, end)
 	if err != nil {
@@ -914,7 +969,7 @@ func (g *ingester) flowRecord(ctx context.Context, sid int64, sensor, boot strin
 	if inbound {
 		sport = cport
 	}
-	g.addTraffic(trafficKey{device: dev, client: client.String(), remote: remote.String(), port: int(sport), proto: int(f.Proto), name: name, app: f.App, multicast: multicast, dir: dir},
+	g.addTraffic(trafficKey{flowKey: key, device: dev, client: client.String(), remote: remote.String(), port: int(sport), proto: int(f.Proto), name: name, app: f.App, multicast: multicast, dir: dir},
 		start, end, first, int64(f.BytesOut), int64(f.BytesIn), rasn, rcc)
 	if start == first || f.Final {
 		detail := fmt.Sprintf("%s → %s %s", client, firstNonEmpty(name, remote.String()), portProto(int(rport), f.Proto))
@@ -1069,9 +1124,10 @@ func (g *ingester) dns(ctx context.Context, sid, ts int64, d *wire.DNS) error {
 		return err
 	}
 	for _, a := range d.Answers {
-		expires := ts + int64(a.TTL)*1000
+		ttl := min(a.TTL, maxDNSTTL)
+		expires := ts + int64(ttl)*1000
 		if _, err := g.tx.ExecContext(ctx, `INSERT INTO dns_answers (dns_id, ts, expires, client_ip, qname, name, type, data, ttl) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			id, ts, expires, d.Client.String(), d.QName, a.Name, a.Type, a.Data, a.TTL); err != nil {
+			id, ts, expires, d.Client.String(), d.QName, a.Name, a.Type, a.Data, ttl); err != nil {
 			return err
 		}
 		switch a.Type {
@@ -1087,7 +1143,7 @@ func (g *ingester) dns(ctx context.Context, sid, ts int64, d *wire.DNS) error {
 			if err != nil {
 				return err
 			}
-			if err := g.fact(ctx, model.RelCNAME, from, to, ts, expires, "dns", map[string]string{"ttl": strconv.Itoa(int(a.TTL))}); err != nil {
+			if err := g.fact(ctx, model.RelCNAME, from, to, ts, expires, "dns", map[string]string{"ttl": strconv.Itoa(int(ttl))}); err != nil {
 				return err
 			}
 		case "A", "AAAA", "HTTPS", "SVCB":
@@ -1100,7 +1156,7 @@ func (g *ingester) dns(ctx context.Context, sid, ts int64, d *wire.DNS) error {
 			if err != nil {
 				return err
 			}
-			attrs := map[string]string{"ttl": strconv.Itoa(int(a.TTL)), "type": a.Type}
+			attrs := map[string]string{"ttl": strconv.Itoa(int(ttl)), "type": a.Type}
 			if a.Name != d.QName {
 				attrs["via"] = a.Name
 			}
@@ -1113,13 +1169,26 @@ func (g *ingester) dns(ctx context.Context, sid, ts int64, d *wire.DNS) error {
 }
 
 func (g *ingester) binding(ctx context.Context, sid, ts int64, b *wire.Binding) error {
-	if err := g.hasIP(ctx, b.MAC, b.IP, ts, ts, b.Source); err != nil {
+	mac, ok := normMAC(b.MAC)
+	if !ok {
+		return nil // not a MAC we can attribute
+	}
+	// An invalid, unspecified or multicast address says nothing about a
+	// device, and hasIP deliberately creates no entity for it.
+	if !b.IP.IsValid() || b.IP.IsUnspecified() || b.IP.IsMulticast() {
+		return nil
+	}
+	if err := g.hasIP(ctx, mac, b.IP, ts, ts, b.Source); err != nil {
 		return err
 	}
-	if b.Router {
-		g.setAttr(model.KindDevice, b.MAC, "role", "router")
+	dev := g.row(model.KindDevice, mac)
+	if dev == nil {
+		return nil
 	}
-	return g.observation(ctx, sid, ts, "binding", g.row(model.KindDevice, b.MAC).id, b.IP, b)
+	if b.Router {
+		g.setAttr(model.KindDevice, mac, "role", "router")
+	}
+	return g.observation(ctx, sid, ts, "binding", dev.id, b.IP, b)
 }
 
 func (g *ingester) hostname(ctx context.Context, dev int64, mac, name string, ts int64, source string, pri int) error {
@@ -1181,7 +1250,7 @@ func (g *ingester) dhcp(ctx context.Context, sid, ts int64, d *wire.DHCP) error 
 	if d.VendorClass != "" {
 		g.setAttr(model.KindDevice, d.MAC, "dhcp_vendor_class", d.VendorClass)
 	}
-	lease := int64(d.LeaseSecs) * 1000
+	lease := int64(min(d.LeaseSecs, maxDHCPLeaseSecs)) * 1000
 	switch d.MsgType {
 	case "ACK", "REPLY":
 		for _, ip := range append([]netip.Addr{d.YourIP}, d.Addresses...) {
@@ -1510,13 +1579,13 @@ func (g *ingester) wifiKey(ctx context.Context, sid, ts int64, w *wire.WiFiKey) 
 		return nil // malformed; nonces are 32 bytes = 64 hex digits
 	}
 	_, err := g.tx.ExecContext(ctx, `
-		INSERT INTO wifi_handshakes (bssid, sta, ssid, anonce, snonce, key_version, sensor_id, ts)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO wifi_handshakes (bssid, sta, ssid, anonce, snonce, key_version, cipher, sensor_id, ts)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(bssid, sta) DO UPDATE SET
 			ssid = excluded.ssid, anonce = excluded.anonce, snonce = excluded.snonce,
-			key_version = excluded.key_version, sensor_id = excluded.sensor_id, ts = excluded.ts
+			key_version = excluded.key_version, cipher = excluded.cipher, sensor_id = excluded.sensor_id, ts = excluded.ts
 		WHERE excluded.ts >= wifi_handshakes.ts`,
-		bssid, sta, w.SSID, strings.ToLower(w.ANonce), strings.ToLower(w.SNonce), w.KeyVersion, sid, ts)
+		bssid, sta, w.SSID, strings.ToLower(w.ANonce), strings.ToLower(w.SNonce), w.KeyVersion, w.Cipher, sid, ts)
 	return err
 }
 
@@ -1585,8 +1654,9 @@ const hourMS = 3600 * 1000
 
 func hourOf(t int64) int64 { return t - ((t%hourMS)+hourMS)%hourMS }
 
-// addTraffic spreads a record's bytes over the hours it covers and counts
-// the flow once, in the hour it began.
+// addTraffic spreads a record's bytes over the hours it covers. Every hour
+// gets a row, so an open connection is visible as active there; the flow is
+// counted as opened only in the hour it began.
 func (g *ingester) addTraffic(k trafficKey, start, end, first, bout, bin int64, rasn any, cc string) {
 	add := func(bucket, flows, bo, bi int64) {
 		kk := k
@@ -1621,14 +1691,15 @@ func (g *ingester) addTraffic(k trafficKey, start, end, first, bout, bin int64, 
 
 func (g *ingester) flushRollupsTx(ctx context.Context) error {
 	for k, a := range g.traffic {
-		if _, err := g.tx.ExecContext(ctx, `INSERT INTO traffic_hourly (bucket, client_device, client_ip, remote_ip, remote_port, proto, name, direction, app, multicast, flows, bytes_out, bytes_in, remote_asn, remote_cc)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-			ON CONFLICT (bucket, client_device, client_ip, remote_ip, remote_port, proto, name, direction) DO UPDATE SET
+		if _, err := g.tx.ExecContext(ctx, `INSERT INTO traffic_hourly (bucket, flow_key, client_device, client_ip, remote_ip, remote_port, proto, name, direction, app, multicast, flows, bytes_out, bytes_in, remote_asn, remote_cc)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT (bucket, flow_key) DO UPDATE SET
 			flows = flows + excluded.flows, bytes_out = bytes_out + excluded.bytes_out, bytes_in = bytes_in + excluded.bytes_in,
+			name = CASE WHEN excluded.name != '' THEN excluded.name ELSE name END,
 			app = CASE WHEN excluded.app != '' THEN excluded.app ELSE app END,
 			remote_cc = CASE WHEN remote_asn IS NULL THEN excluded.remote_cc ELSE remote_cc END,
 			remote_asn = coalesce(remote_asn, excluded.remote_asn)`,
-			k.bucket, k.device, k.client, k.remote, k.port, k.proto, k.name, k.dir, k.app, boolInt(k.multicast), a.flows, a.bout, a.bin, a.asn, a.cc); err != nil {
+			k.bucket, k.flowKey, k.device, k.client, k.remote, k.port, k.proto, k.name, k.dir, k.app, boolInt(k.multicast), a.flows, a.bout, a.bin, a.asn, a.cc); err != nil {
 			return err
 		}
 	}

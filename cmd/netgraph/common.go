@@ -60,6 +60,7 @@ type filterFlags struct {
 	app, dir, asn, country    string
 	port, limit, offset       int
 	multicast                 bool
+	fromSet, toSet            bool
 }
 
 func (f *filterFlags) register(fs *flag.FlagSet) {
@@ -79,15 +80,30 @@ func (f *filterFlags) register(fs *flag.FlagSet) {
 	fs.IntVar(&f.offset, "offset", 0, "rows to skip, for paging")
 }
 
+// visited records which window flags the user gave explicitly, so -to
+// without -from means the hour before -to rather than the hour before now.
+func (f *filterFlags) visited(fs *flag.FlagSet) {
+	fs.Visit(func(fl *flag.Flag) {
+		switch fl.Name {
+		case "from":
+			f.fromSet = true
+		case "to":
+			f.toSet = true
+		}
+	})
+}
+
 func (f *filterFlags) filter() (model.Filter, error) {
 	now := time.Now()
-	from, err := model.ParseTime(f.from, now)
-	if err != nil {
-		return model.Filter{}, fmt.Errorf("-from: %w", err)
-	}
 	to, err := model.ParseTime(f.to, now)
 	if err != nil {
 		return model.Filter{}, fmt.Errorf("-to: %w", err)
+	}
+	from := to.Add(-time.Hour)
+	if f.fromSet || !f.toSet {
+		if from, err = model.ParseTime(f.from, now); err != nil {
+			return model.Filter{}, fmt.Errorf("-from: %w", err)
+		}
 	}
 	if !from.Before(to) {
 		return model.Filter{}, errors.New("-from must be before -to")
@@ -172,7 +188,13 @@ func (t *table) write(w io.Writer, format string) error {
 	case "csv":
 		cw := csv.NewWriter(w)
 		_ = cw.Write(t.head)
-		_ = cw.WriteAll(t.rows)
+		for _, r := range t.rows {
+			cells := make([]string, len(r))
+			for i, c := range r {
+				cells[i] = model.CSVText(c)
+			}
+			_ = cw.Write(cells)
+		}
 		return cw.Error()
 	default:
 		tw := tabwriter.NewWriter(w, 2, 4, 2, ' ', 0)
@@ -195,6 +217,14 @@ func ts(msec int64) string {
 		return "-"
 	}
 	return time.UnixMilli(msec).Local().Format("2006-01-02 15:04:05")
+}
+
+// clock is the time part of ts, empty for an unset time.
+func clock(msec int64) string {
+	if msec == 0 {
+		return ""
+	}
+	return time.UnixMilli(msec).Local().Format("15:04:05")
 }
 
 func clip(s string, n int) string {

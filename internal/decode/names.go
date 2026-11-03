@@ -16,14 +16,21 @@ import (
 func Answers(m *DNSMsg) []wire.Answer {
 	var out []wire.Answer
 	for i := range m.Answers {
+		if len(out) >= 256 {
+			break // a 64 KiB response full of hints is not worth an event
+		}
 		rr := &m.Answers[i]
 		if rr.Type == TypeOPT {
 			continue
 		}
 		t := TypeName(rr.Type)
-		out = append(out, wire.Answer{Name: strings.ToLower(rr.Name), Type: t, TTL: rr.TTL, Data: rr.Data()})
+		name := strings.ToLower(rr.Name)
+		out = append(out, wire.Answer{Name: name, Type: t, TTL: rr.TTL, Data: rr.Data()})
 		for _, h := range rr.Hints {
-			out = append(out, wire.Answer{Name: strings.ToLower(rr.Name), Type: t, TTL: rr.TTL, Data: h.String()})
+			if len(out) >= 256 {
+				break
+			}
+			out = append(out, wire.Answer{Name: name, Type: t, TTL: rr.TTL, Data: h.String()})
 		}
 	}
 	return out

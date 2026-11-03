@@ -178,10 +178,13 @@ func cleanText(b []byte) string {
 // capability field, whose privacy bit means "encrypted" on its own (WEP).
 func securityFromIEs(ies IEs, capability uint16) Security {
 	var s Security
-	haveRSN, wpaVendor := false, false
-	if body, ok := ies.find(ieRSN); ok && len(body) >= 2 {
-		if r, err := parseSuiteIE(body, true); err == nil {
-			s, haveRSN = r, true
+	haveRSN, rsnPresent, wpaVendor := false, false, false
+	if body, ok := ies.find(ieRSN); ok {
+		rsnPresent = true
+		if len(body) >= 2 {
+			if r, err := parseSuiteIE(body, true); err == nil {
+				s, haveRSN = r, true
+			}
 		}
 	}
 	if !haveRSN {
@@ -189,6 +192,7 @@ func securityFromIEs(ies IEs, capability uint16) Security {
 			if ie.ID != ieVendor || len(ie.Body) < 6 || binary.BigEndian.Uint32(append([]byte{0}, ie.Body[:3]...)) != ouiMicrosoft || ie.Body[3] != 1 {
 				continue
 			}
+			rsnPresent = true
 			if r, err := parseSuiteIE(ie.Body[4:], false); err == nil {
 				s, haveRSN, wpaVendor = r, true, true
 				break
@@ -197,6 +201,13 @@ func securityFromIEs(ies IEs, capability uint16) Security {
 	}
 	privacy := capability&0x0010 != 0
 	if !haveRSN {
+		if rsnPresent {
+			// A present but unparsable security element must not be
+			// mistaken for an unencrypted (or WEP) network: that would
+			// downgrade decryption and can fabricate an evil-twin alert.
+			s.Kind = WPA2
+			return s
+		}
 		if privacy {
 			s.Kind = WEP
 			s.Group = "WEP"

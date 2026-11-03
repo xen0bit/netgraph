@@ -90,9 +90,17 @@ func (s *Server) export(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err != nil {
+		// Headers are already committed. Abort the connection so the
+		// client sees a failed transfer instead of a plausibly complete
+		// CSV missing an unknown suffix.
 		s.log.Error("export csv", "kind", kind, "err", err)
+		panic(http.ErrAbortHandler)
 	}
 	cw.Flush()
+	if err := cw.Error(); err != nil {
+		s.log.Error("export csv flush", "kind", kind, "err", err)
+		panic(http.ErrAbortHandler)
+	}
 }
 
 func exportLimit(n, max int) int {
@@ -220,16 +228,4 @@ func isTimeField(name string) bool {
 
 // csvText neutralises a cell a spreadsheet could run as a formula, including
 // one hidden behind leading whitespace.
-func csvText(s string) string {
-	for _, c := range s {
-		switch c {
-		case ' ', '\t', '\r', '\n':
-			continue
-		case '=', '+', '-', '@':
-			return "'" + s
-		default:
-			return s
-		}
-	}
-	return s
-}
+func csvText(s string) string { return model.CSVText(s) }

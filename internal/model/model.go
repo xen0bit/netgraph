@@ -7,6 +7,7 @@ package model
 import (
 	"context"
 	"fmt"
+	"net/netip"
 	"net/url"
 	"strconv"
 	"strings"
@@ -20,6 +21,7 @@ type Backend interface {
 	Summary(ctx context.Context, f Filter) (*Summary, error)
 	Devices(ctx context.Context, f Filter) ([]Device, error)
 	Flows(ctx context.Context, f Filter) ([]Flow, error)
+	Destinations(ctx context.Context, f Filter) ([]Destination, error)
 	DNS(ctx context.Context, f Filter) ([]DNSQuery, error)
 	Facts(ctx context.Context, f Filter) ([]Fact, error)
 	Timeseries(ctx context.Context, f Filter, step time.Duration) (*Timeseries, error)
@@ -49,11 +51,15 @@ type Filter struct {
 
 	Device string // MAC, hostname or label of the local device
 	IP     string // address or CIDR, either side of a flow
-	Domain string // DNS name, SNI or HTTP host
-	Port   int    // the server's port: the service
-	Proto  string // tcp, udp, icmp, or a protocol number
-	App    string // tls, quic, http, dns, ...
-	Dir    string // out, in, local or external
+	Domain string // DNS name, SNI or HTTP host: glob or substring
+	// DomainExact and DomainSuffix are internal exact forms used by entity
+	// details, which must not be truncated by a broad substring match.
+	DomainExact  string
+	DomainSuffix string
+	Port         int    // the server's port: the service
+	Proto        string // tcp, udp, icmp, or a protocol number
+	App          string // tls, quic, http, dns, ...
+	Dir          string // out, in, local or external
 	// The remote end's network (autonomous system number) and country
 	// (ISO 3166 alpha-2), from the server's ASN table.
 	ASN     uint32
@@ -131,6 +137,21 @@ const (
 	DirLocal    = "local"    // both ends are here
 	DirExternal = "external" // neither end is (traffic passing through)
 )
+
+// Destination is a remote end aggregated over a window: one name or address
+// with its connections and traffic, for the destinations table.
+type Destination struct {
+	Key         string   `json:"key"`
+	Kind        string   `json:"kind"` // name or ip
+	Label       string   `json:"label"`
+	Connections int      `json:"connections"`
+	Devices     int      `json:"devices"`
+	BytesOut    uint64   `json:"bytes_out"`
+	BytesIn     uint64   `json:"bytes_in"`
+	FirstSeen   int64    `json:"first_seen"`
+	LastSeen    int64    `json:"last_seen"`
+	Ports       []string `json:"ports,omitempty"`
+}
 
 // Flow is one connection's activity inside the window.
 //
@@ -494,19 +515,21 @@ type Sensor struct {
 
 // Anomaly kinds.
 const (
-	AnomalyNewDevice      = "new_device"      // a device used an address on the LAN for the first time
-	AnomalyNewDestination = "new_destination" // a device reached a site it never had
-	AnomalyUploadSpike    = "upload_spike"    // a device sent far more than its history
-	AnomalyBeacon         = "beacon"          // a device connects somewhere on a fixed period
-	AnomalyDNSFailures    = "dns_failures"    // many lookups of names that do not exist
-	AnomalyDNSTunnel      = "dns_tunnel"      // many long, unique names under one site
-	AnomalyRogueAP        = "rogue_ap"        // a network name with an unexpected access point
-	AnomalyScan           = "scan"            // an address outside tried many ports, or one port on many hosts
-	AnomalyBruteForce     = "brute_force"     // many short sessions to a login service from outside
-	AnomalyNewService     = "new_service"     // a device here started serving a port to clients outside
-	AnomalyInboundSurge   = "inbound_surge"   // far more connections from outside than in any recent hour
-	AnomalyARPConflict    = "arp_conflict"    // two devices held one address at the same time
-	AnomalyRogueDHCP      = "rogue_dhcp"      // a DHCP server that is not the router answered on the LAN
+	AnomalyNewDevice      = "new_device"        // a device used an address on the LAN for the first time
+	AnomalyNewDestination = "new_destination"   // a device reached a site it never had
+	AnomalyUploadSpike    = "upload_spike"      // a device sent far more than its history
+	AnomalyBeacon         = "beacon"            // a device connects somewhere on a fixed period
+	AnomalyDNSFailures    = "dns_failures"      // many lookups of names that do not exist
+	AnomalyDNSTunnel      = "dns_tunnel"        // many long, unique names under one site
+	AnomalyRogueAP        = "rogue_ap"          // a network name with an unexpected access point
+	AnomalyScan           = "scan"              // an address outside tried many ports, or one port on many hosts
+	AnomalyBruteForce     = "brute_force"       // many short sessions to a login service from outside
+	AnomalyNewService     = "new_service"       // a device here started serving a port to clients outside
+	AnomalyInboundSurge   = "inbound_surge"     // far more connections from outside than in any recent hour
+	AnomalyARPConflict    = "arp_conflict"      // two devices held one address at the same time
+	AnomalyRogueDHCP      = "rogue_dhcp"        // a DHCP server that is not the router answered on the LAN
+	AnomalyDeauthFlood    = "wifi_deauth_flood" // many deauthentications from one access point
+	AnomalySensorSilent   = "sensor_silent"     // a sensor stopped reporting
 )
 
 // Anomaly severities, least to most.
@@ -632,15 +655,25 @@ func ParseFilter(v url.Values, now time.Time) (Filter, error) {
 		}
 	}
 	f.Device, f.IP, f.Domain = v.Get("device"), v.Get("ip"), v.Get("domain")
-	f.Proto, f.App = v.Get("proto"), v.Get("app")
+	f.Proto, f.App = strings.ToLower(v.Get("proto")), v.Get("app")
+	if f.Proto != "" && !validProto(f.Proto) {
+		return f, fmt.Errorf("proto: %q is not a protocol name or 0-255", f.Proto)
+	}
 	switch f.Dir = v.Get("dir"); f.Dir {
 	case "", DirOut, DirIn, DirLocal, DirExternal:
 	default:
 		return f, fmt.Errorf("dir: %q is not out, in, local or external", f.Dir)
 	}
 	if s := v.Get("port"); s != "" {
-		if f.Port, err = strconv.Atoi(s); err != nil {
-			return f, fmt.Errorf("port: %w", err)
+		if f.Port, err = strconv.Atoi(s); err != nil || f.Port < 0 || f.Port > 65535 {
+			return f, fmt.Errorf("port: %q is not a port number", s)
+		}
+	}
+	if f.IP != "" {
+		if _, err := netip.ParsePrefix(f.IP); err != nil {
+			if _, aerr := netip.ParseAddr(f.IP); aerr != nil {
+				return f, fmt.Errorf("ip: %q is not an address or CIDR", f.IP)
+			}
 		}
 	}
 	if s := v.Get("asn"); s != "" {
@@ -665,6 +698,15 @@ func ParseFilter(v url.Values, now time.Time) (Filter, error) {
 		}
 	}
 	return f, nil
+}
+
+func validProto(p string) bool {
+	switch p {
+	case "tcp", "udp", "icmp", "icmpv6":
+		return true
+	}
+	n, err := strconv.Atoi(p)
+	return err == nil && n >= 0 && n <= 255
 }
 
 // ParseASN parses an autonomous system number, "13335" or "AS13335".

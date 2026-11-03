@@ -105,6 +105,11 @@ asn.update:
 test:
 	$(GO) test -race ./...
 
+## test32: run the packet and decoder tests as a 32-bit process
+.PHONY: test32
+test32:
+	CGO_ENABLED=0 GOARCH=386 $(GO) test ./internal/capture ./internal/decode ./internal/sensor ./internal/flow
+
 ## fuzz: run every fuzz target briefly (FUZZTIME=20s)
 FUZZTIME ?= 20s
 .PHONY: fuzz

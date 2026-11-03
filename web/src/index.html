@@ -33,7 +33,7 @@
   </header>
 
   <section class="timeline" aria-label="Traffic over the window">
-    <canvas id="spark" height="56"></canvas>
+    <canvas id="spark" height="56" role="img" aria-label="Traffic over the window; use the From and To fields to choose a window"></canvas>
     <div class="timeline-meta"><span id="spark-label"></span><span class="hint">drag to zoom into a slice</span></div>
   </section>
 
@@ -47,6 +47,7 @@
     <button role="tab" data-tab="graph" aria-selected="true">Graph</button>
     <button role="tab" data-tab="devices">Devices</button>
     <button role="tab" data-tab="flows">Connections</button>
+    <button role="tab" data-tab="destinations">Destinations</button>
     <button role="tab" data-tab="dns">DNS</button>
     <button role="tab" data-tab="facts">Facts</button>
     <button role="tab" data-tab="wifi">Wi-Fi</button>
@@ -84,18 +85,19 @@
     </section>
     <section id="view-devices" class="view" hidden><table id="t-devices"></table></section>
     <section id="view-flows" class="view" hidden><table id="t-flows"></table></section>
+    <section id="view-destinations" class="view" hidden><table id="t-destinations"></table></section>
     <section id="view-dns" class="view" hidden><table id="t-dns"></table></section>
     <section id="view-facts" class="view" hidden><table id="t-facts"></table></section>
     <section id="view-wifi" class="view" hidden><table id="t-wifi"></table></section>
     <section id="view-sensors" class="view" hidden><table id="t-sensors"></table></section>
-    <section id="view-anomalies" class="view" hidden><p id="anomaly-note" class="muted"></p><table id="t-anomalies"></table></section>
+    <section id="view-anomalies" class="view" hidden><p id="anomaly-note" class="muted"></p><table id="t-anomalies"></table><div id="mutes"></div></section>
     <aside id="panel" class="panel" hidden aria-label="Details">
       <button class="icon close" id="panel-close" title="Close (Esc)">✕</button>
       <div id="panel-body"></div>
     </aside>
   </main>
 
-  <footer class="status"><span id="status"></span><button id="connect" type="button" hidden>Connect</button><span id="version"></span></footer>
+  <footer class="status"><span id="status" role="status" aria-live="polite"></span><button id="connect" type="button" hidden>Connect</button><span id="version"></span></footer>
 
   <dialog id="token-dialog">
     <form method="dialog">

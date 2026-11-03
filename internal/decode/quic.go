@@ -127,7 +127,7 @@ func ParseQUICInitial(datagram []byte) (*QUICInitial, error) {
 	r := reader{b: datagram, off: 5}
 	dcid := r.bytes(int(r.u8()))
 	r.skip(int(r.u8())) // scid
-	r.skip(int(r.varint()))
+	r.skip(r.varintInt())
 	length := r.varint()
 	if r.err || len(dcid) == 0 || len(dcid) > 20 || length > uint64(r.left()) || length < 20 {
 		return nil, errQUIC
@@ -195,14 +195,14 @@ func cryptoFrames(p []byte) ([]CryptoFrag, error) {
 			}
 		case 0x06: // CRYPTO
 			off := r.varint()
-			data := r.bytes(int(r.varint()))
+			data := r.bytes(r.varintInt())
 			if !r.err {
 				out = append(out, CryptoFrag{Offset: off, Data: data})
 			}
 		case 0x1c: // CONNECTION_CLOSE
 			r.varint()
 			r.varint()
-			r.skip(int(r.varint()))
+			r.skip(r.varintInt())
 		default:
 			// Any other frame is not allowed in an Initial; stop rather
 			// than misparse.
@@ -225,7 +225,7 @@ type CryptoStream struct {
 // Add records fragments; it ignores them once maxHelloBytes is buffered.
 func (c *CryptoStream) Add(frags []CryptoFrag) {
 	for _, f := range frags {
-		if c.size+len(f.Data) > maxHelloBytes || f.Offset > maxHelloBytes {
+		if c.size+len(f.Data) > maxHelloBytes || f.Offset > maxHelloBytes || len(c.frags) >= 64 {
 			return
 		}
 		c.frags = append(c.frags, CryptoFrag{Offset: f.Offset, Data: append([]byte(nil), f.Data...)})

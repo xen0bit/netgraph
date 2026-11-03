@@ -226,13 +226,22 @@ func decodeRData(msg []byte, off int, rr *RR) {
 			}
 		}
 	case TypeTXT:
+		total := 0
 		for i := 0; i < len(d); {
 			l := int(d[i])
 			i++
 			if i+l > len(d) {
 				break
 			}
-			rr.TXT = append(rr.TXT, string(d[i:i+l]))
+			s := cleanText(d[i : i+l])
+			if len(s) > total+2048 {
+				s = s[:max(0, 2048-total)]
+			}
+			rr.TXT = append(rr.TXT, s)
+			total += len(s)
+			if total >= 2048 || len(rr.TXT) >= 32 {
+				break
+			}
 			i += l
 		}
 	case TypeSVCB, TypeHTTPS:
@@ -269,11 +278,11 @@ func decodeSVCB(msg []byte, off int, rr *RR) {
 		v := d[i : i+l]
 		switch key {
 		case 4: // ipv4hint
-			for j := 0; j+4 <= len(v); j += 4 {
+			for j := 0; j+4 <= len(v) && len(rr.Hints) < 32; j += 4 {
 				rr.Hints = append(rr.Hints, netip.AddrFrom4([4]byte(v[j:j+4])))
 			}
 		case 6: // ipv6hint
-			for j := 0; j+16 <= len(v); j += 16 {
+			for j := 0; j+16 <= len(v) && len(rr.Hints) < 32; j += 16 {
 				rr.Hints = append(rr.Hints, netip.AddrFrom16([16]byte(v[j:j+16])))
 			}
 		}
