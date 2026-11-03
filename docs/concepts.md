@@ -219,11 +219,11 @@ Checks that need no history:
 | `brute_force` | an address outside opens at least 50 short sessions (under 10 s) to a login service on a device: SSH, Telnet, FTP, RDP, VNC, mail, databases. Web logins look like any page load, so they are not counted | medium, high from 500; low for 500 or more from at least 20 addresses with fewer each |
 | `arp_conflict` | two devices held one address at the same time for five minutes or more (a static misconfiguration or ARP spoofing, not an ordinary DHCP move) | medium; low when one MAC is private |
 | `rogue_dhcp` | a DHCP OFFER or ACK came from an address that is not the router or a sensor interface. Clients handed a different gateway or resolver are the damage | medium; high when no device here holds the server's address |
-| `wifi_deauth_flood` | one access point sends 20 or more deauthentication or disassociation frames in the window: knocking clients off, often to capture a handshake for an offline attack | medium; high from 100 |
+| `wifi_deauth_flood` | one access point sends 10 or more deauthentication or disassociation frames within five seconds: knocking clients off, often to capture a handshake for an offline attack | medium; high from 50 in the burst |
 | `sensor_silent` | a sensor has not reported for two minutes while the window ends near now (a stopped, disconnected or wedged sensor) | medium; high from ten minutes |
 
 Checks that compare with history need a day of it: until the first sensor
-has reported for 24 hours the report says `learning` and they are skipped,
+has reported for 24 hours the report says `learning` and they are skipped. The report also includes `history_ms` and `baseline_ms`, so the UI can show that some checks compare against a seven-day baseline.
 since everything is new to a network just met. They look back 7 days.
 
 | Kind | Fires when | Severity |

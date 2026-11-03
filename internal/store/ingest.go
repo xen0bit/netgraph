@@ -1578,14 +1578,17 @@ func (g *ingester) wifiKey(ctx context.Context, sid, ts int64, w *wire.WiFiKey) 
 	if !ok1 || !ok2 || w.SSID == "" || len(w.ANonce) != 64 || len(w.SNonce) != 64 {
 		return nil // malformed; nonces are 32 bytes = 64 hex digits
 	}
+	received := g.s.cfg.Now().UnixMilli()
 	_, err := g.tx.ExecContext(ctx, `
-		INSERT INTO wifi_handshakes (bssid, sta, ssid, anonce, snonce, key_version, cipher, sensor_id, ts)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO wifi_handshakes (bssid, sta, ssid, anonce, snonce, key_version, cipher, sensor_id, ts, received)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(bssid, sta) DO UPDATE SET
 			ssid = excluded.ssid, anonce = excluded.anonce, snonce = excluded.snonce,
-			key_version = excluded.key_version, cipher = excluded.cipher, sensor_id = excluded.sensor_id, ts = excluded.ts
-		WHERE excluded.ts >= wifi_handshakes.ts`,
-		bssid, sta, w.SSID, strings.ToLower(w.ANonce), strings.ToLower(w.SNonce), w.KeyVersion, w.Cipher, sid, ts)
+			key_version = excluded.key_version, cipher = excluded.cipher, sensor_id = excluded.sensor_id, ts = excluded.ts,
+			received = excluded.received
+		WHERE excluded.ts > wifi_handshakes.ts OR
+			(excluded.ts = wifi_handshakes.ts AND excluded.received >= wifi_handshakes.received)`,
+		bssid, sta, w.SSID, strings.ToLower(w.ANonce), strings.ToLower(w.SNonce), w.KeyVersion, w.Cipher, sid, ts, received)
 	return err
 }
 
@@ -1604,16 +1607,19 @@ func (g *ingester) wifiGTK(ctx context.Context, sid, ts int64, w *wire.WiFiGTK) 
 		!hexLen(w.ANonce, 32, 32) || !hexLen(w.SNonce, 32, 32) || !hexLen(w.IV, 16, 16) || !hexLen(w.KeyData, 1, 512) {
 		return nil
 	}
+	received := g.s.cfg.Now().UnixMilli()
 	_, err := g.tx.ExecContext(ctx, `
-		INSERT INTO wifi_group_keys (bssid, key_id, sta, ssid, anonce, snonce, descriptor, key_info, key_length, iv, key_data, sensor_id, ts)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO wifi_group_keys (bssid, key_id, sta, ssid, anonce, snonce, descriptor, key_info, key_length, iv, key_data, sensor_id, ts, received)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(bssid, key_id) DO UPDATE SET
 			sta = excluded.sta, ssid = excluded.ssid, anonce = excluded.anonce, snonce = excluded.snonce,
 			descriptor = excluded.descriptor, key_info = excluded.key_info, key_length = excluded.key_length,
-			iv = excluded.iv, key_data = excluded.key_data, sensor_id = excluded.sensor_id, ts = excluded.ts
-		WHERE excluded.ts >= wifi_group_keys.ts`,
+			iv = excluded.iv, key_data = excluded.key_data, sensor_id = excluded.sensor_id, ts = excluded.ts,
+			received = excluded.received
+		WHERE excluded.ts > wifi_group_keys.ts OR
+			(excluded.ts = wifi_group_keys.ts AND excluded.received >= wifi_group_keys.received)`,
 		bssid, w.KeyID, sta, w.SSID, strings.ToLower(w.ANonce), strings.ToLower(w.SNonce), w.Descriptor, w.KeyInfo, w.KeyLength,
-		strings.ToLower(w.IV), strings.ToLower(w.KeyData), sid, ts)
+		strings.ToLower(w.IV), strings.ToLower(w.KeyData), sid, ts, received)
 	return err
 }
 

@@ -30,7 +30,7 @@ are unix milliseconds.
 |---|---|
 | `GET /api/v1/summary` | `{devices, flows, inbound, peak_connections, dns_queries, domains, remote_ips, bytes_out, bytes_in, precision, ...}`; bytes are what devices here sent and received |
 | `GET /api/v1/devices` | `[{id, mac, label, user_label, auto_label, vendor, vendor_short, randomized, role, ips, hostnames, services, serves, fingerprints, user_agents, flows, inbound, dns_queries, bytes_out, bytes_in, remotes, active_from, active_to, first_seen, last_seen}]`; `serves` lists the ports clients connected to (`443/tcp`), `inbound` how many connections came in from outside |
-| `GET /api/v1/destinations` | `[{key, kind, label, connections, devices, bytes_out, bytes_in, first_seen, last_seen}]`: remote ends aggregated by name, or by address when no name is known, busiest first. Uses the window and filters. |
+| `GET /api/v1/destinations` | `[{key, kind, label, connections, devices, bytes_out, bytes_in, first_seen, last_seen, ports, remote_ips}]`: remote ends aggregated by name, or by address when no name is known, busiest first. One name with several addresses is one row; `ports` is `443/tcp` style and `remote_ips` lists the addresses. Uses the window and filters. |
 | `GET /api/v1/flows` | `[{key, proto, client_ip, client_port, server_ip, server_port, device, device_name, device_mac, remote_ip, remote_port, peer_device, peer_name, direction, app, name, sni, http_host, qname, alpn, ja4, user_agent, asn, as_org, country, first_seen, last_seen, state, closed, end_reason, bytes_out, bytes_in, pkts_out, pkts_in, connections}]`, busiest first (see [Flows](#flows)) |
 | `GET /api/v1/dns` | `[{ts, client_ip, device, device_name, server, qname, qtype, rcode, latency_ms, count, answers: [{name, type, data, ttl, expires}]}]`, newest first; `count` is set on hourly rollup rows |
 | `GET /api/v1/facts` | `[{rel, src, src_label, dst, dst_label, first_seen, last_seen, count, source, attrs}]`; facts support the window and the `device`, `domain` and `ip` filters only |
@@ -38,12 +38,13 @@ are unix milliseconds.
 | `GET /api/v1/graph` | `{from, to, precision, truncated, nodes: [{id, kind, label, sub, local, bytes_out, bytes_in, attrs}], edges: [{from, to, rel, count, bytes_out, bytes_in, carried, opened, closed, peak, ports, ttl, first_seen, last_seen, attrs}]}` |
 | `GET /api/v1/graph?format=svg\|d2\|txt` | the graph drawn by the server; `theme=dark`, `layout=elk\|dagre` |
 | `GET /api/v1/entity?id=device:3c:22:fb:01:02:03` | `{id, kind, key, label, attrs, device, facts, flows, dns, timeline: [{ts, type, detail}]}` |
+| `GET /api/v1/entity?id=sensor:router` | a sensor's version, interfaces and last reported counters (`attrs`), so `sensor_silent` and the Sensors table can open one |
 | `GET /api/v1/sensors` | `[{name, version, interfaces, first_seen, last_seen, stats}]` |
 | `GET /api/v1/wifi` | `[{bssid, ssid, security, channel, clients, first_seen, last_seen}]`, from monitor-mode sensors |
 | `GET /api/v1/live` | server-sent events: `event: ingest` with `[{type, ts, detail}]` per batch |
 | `PUT /api/v1/devices/{mac}/label` | names a device by hand: body `{"label": "Living room TV"}` (JSON required; at most 64 printable characters), `{"label": ""}` restores the automatic name. `204`, or `400`/`404`. Read token |
 | `GET /api/v1/search?q=alice&limit=20` | `[{id, kind, key, label, last_seen}]`: devices (by MAC, name or label), addresses, DNS names and networks whose key starts with `q` or whose name contains it; exact keys first, then devices, then the most recently seen. `q` needs two characters; `kind:q` (`device:3c:22`) searches one kind. `limit` is at most 100 (default 20). Read token |
-| `GET /api/v1/export?kind=flows` | CSV of every field the API returns for that table (`devices`, `flows`, `dns`, `facts`, `anomalies`, `wifi`). It uses the same window and filters and streams most kinds from the database, so it is not limited to what the browser loaded. Safety caps: connections and facts 100,000 rows, lookups 50,000, Wi-Fi networks 10,000, devices and anomalies materialised in memory. Read token |
+| `GET /api/v1/export?kind=flows` | CSV of every field the API returns for that table (`devices`, `flows`, `dns`, `facts`, `anomalies`, `wifi`). It uses the same window and filters and streams most kinds from the database, so it is not limited to what the browser loaded. Default safety caps: connections and facts 100,000 rows, lookups 50,000, Wi-Fi networks 10,000, devices and anomalies materialised in memory. Add `all=1` to stream every matching row (hard ceiling 5,000,000); the web "All CSV" uses it. Read token |
 | `GET /api/v1/anomalies` | the window's [anomalies](concepts.md#anomalies), most severe first: `{from, to, since, learning, anomalies: [{kind, severity, ts, device, device_name, entity, summary, evidence}]}`. Only the `device` filter applies. Read token |
 | `GET /api/v1/anomalies/mutes` | `{mutes: [{kind, device, entity, until, note, created}]}`, active mutes only. Read token |
 | `POST /api/v1/anomalies/mute` | JSON body (`Content-Type: application/json`) `{kind, device, entity, until, note}`; empty fields are wildcards, `until` is unix ms (default one day). Read token |
@@ -128,8 +129,10 @@ curl -X POST -H "Authorization: Bearer $NETGRAPH_TOKEN" -H "X-Netgraph-Sensor: t
 
 `GET /api/v1/wifi/keys` returns what a sensor needs to decrypt Wi-Fi. It is
 authorised with the **ingest** token (it is sensor infrastructure), and
-sensors call it automatically on startup and every minute. The response is
-`{pmks, wep, handshakes, group_keys}`:
+sensors call it automatically on startup and every minute. `since=MS`
+restricts handshakes and group keys to records the server received at or
+after that unix-millisecond time; PMKs and WEP keys are always complete. The
+response is `{pmks, wep, handshakes, group_keys}`:
 
 - `pmks`: `[{ssid, pmk}]`, the 32-byte PMK (hex) for each network in the
   server's `-wifi-key-file`. Passphrases are not sent; the server derives

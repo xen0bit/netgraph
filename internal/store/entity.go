@@ -31,6 +31,9 @@ func (s *Store) Entity(ctx context.Context, id string, f model.Filter) (*model.E
 	if kind == model.KindSite {
 		return s.siteEntity(ctx, id, key, f)
 	}
+	if kind == model.KindSensor {
+		return s.sensorEntity(ctx, id, key, f)
+	}
 	from, to := s.window(f)
 	d := &model.EntityDetail{ID: id, Kind: kind, Key: key}
 	var eid int64
@@ -176,6 +179,31 @@ func (s *Store) siteEntity(ctx context.Context, id, site string, f model.Filter)
 	return d, err
 }
 
+// sensorEntity describes a sensor's health. Sensors are not entities in the
+// store (they are infrastructure, not LAN devices), but an anomaly or a link
+// should still be able to open one.
+func (s *Store) sensorEntity(ctx context.Context, id, name string, f model.Filter) (*model.EntityDetail, error) {
+	sensors, err := s.Sensors(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, sn := range sensors {
+		if sn.Name != name {
+			continue
+		}
+		d := &model.EntityDetail{ID: id, Kind: model.KindSensor, Key: name, Label: name,
+			FirstSeen: sn.FirstSeen, LastSeen: sn.LastSeen, Attrs: map[string]string{"version": sn.Version}}
+		if len(sn.Interfaces) > 0 {
+			d.Attrs["interfaces"] = strings.Join(sn.Interfaces, ", ")
+		}
+		for k, v := range sn.Stats {
+			d.Attrs[k] = fmt.Sprint(v)
+		}
+		return d, nil
+	}
+	return nil, ErrNotFound
+}
+
 func filterFlows(in []model.Flow, keep func(model.Flow) bool) []model.Flow {
 	var out []model.Flow
 	for _, f := range in {
@@ -236,7 +264,7 @@ func (s *Store) timeline(ctx context.Context, kind, key string, eid int64, d *mo
 		if kind == model.KindIP {
 			col, arg = "ip", key
 		}
-		rows, err := s.r.QueryContext(ctx, `SELECT ts, type, data FROM observations WHERE `+col+` = ? AND ts >= ? AND ts < ? ORDER BY ts LIMIT 500`, arg, from, to)
+		rows, err := s.r.QueryContext(ctx, `SELECT ts, type, data FROM observations WHERE `+col+` = ? AND ts >= ? AND ts < ? ORDER BY ts DESC LIMIT 500`, arg, from, to)
 		if err != nil {
 			return nil, err
 		}

@@ -137,37 +137,71 @@ func michaelBlock(l, r, v uint32) (uint32, uint32) {
 // selects the Michael key for the direction: a frame from the access point
 // uses the AP's TX MIC key, one from the station uses its RX MIC key.
 func tkipDecrypt(header, body, tk []byte, fromAP bool) ([]byte, error) {
+	data, _, err := tkipOpen(header, body, tk, fromAP, true)
+	return data, err
+}
+
+// tkipMIC is the state needed to verify a fragmented MSDU's Michael MIC
+// after reassembly. TKIP fragments each carry their own WEP ICV, but the
+// MIC covers the complete MSDU and appears only at the end.
+type tkipMIC struct {
+	key    [8]byte
+	header [16]byte
+}
+
+func (m *tkipMIC) verify(msdu []byte) bool {
+	if len(msdu) < 8 {
+		return false
+	}
+	data, mic := msdu[:len(msdu)-8], msdu[len(msdu)-8:]
+	want := michaelMIC(m.key[:], append(append([]byte(nil), m.header[:]...), data...))
+	return subtle.ConstantTimeCompare(mic, want[:]) == 1
+}
+
+// tkipOpen decrypts a TKIP frame. When verify is false it returns the
+// plaintext including any trailing MIC bytes and the state to check later;
+// a fragment is only part of the MSDU, so its final eight bytes are not
+// necessarily a MIC.
+func tkipOpen(header, body, tk []byte, fromAP, verify bool) ([]byte, *tkipMIC, error) {
 	if len(tk) < 32 {
-		return nil, fmt.Errorf("tkip: temporal key length %d", len(tk))
+		return nil, nil, fmt.Errorf("tkip: temporal key length %d", len(tk))
 	}
 	if len(header) < 24 || len(body) < 8+8+4 {
-		return nil, fmt.Errorf("tkip: short frame")
+		return nil, nil, fmt.Errorf("tkip: short frame")
 	}
 	if body[3]&0x20 == 0 {
-		return nil, fmt.Errorf("tkip: missing extended IV")
+		return nil, nil, fmt.Errorf("tkip: missing extended IV")
 	}
 	iv16 := uint16(body[0])<<8 | uint16(body[2])
 	iv32 := binary.LittleEndian.Uint32(body[4:])
 	rc4key := tkipPhase2(tk[:16], tkipPhase1(tk[:16], header[10:16], iv32), iv16)
 	plain, err := wepOpen(rc4key[:], body[8:])
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	if len(plain) < 8 {
-		return nil, fmt.Errorf("tkip: short plaintext")
-	}
-	data := plain[:len(plain)-8]
-	mic := plain[len(plain)-8:]
 	micKey := tk[24:32]
 	if fromAP {
 		micKey = tk[16:24]
 	}
-	micInput := append(michaelHeader(header), data...)
+	hdr := michaelHeader(header)
+	var state tkipMIC
+	copy(state.key[:], micKey)
+	copy(state.header[:], hdr)
+	if !verify {
+		return plain, &state, nil
+	}
+	if len(plain) < 8 {
+		clear(plain)
+		return nil, nil, fmt.Errorf("tkip: short plaintext")
+	}
+	data := plain[:len(plain)-8]
+	mic := plain[len(plain)-8:]
+	micInput := append(append([]byte(nil), hdr...), data...)
 	if want := michaelMIC(micKey, micInput); subtle.ConstantTimeCompare(mic, want[:]) != 1 {
 		clear(plain)
-		return nil, fmt.Errorf("tkip: Michael MIC failed")
+		return nil, nil, fmt.Errorf("tkip: Michael MIC failed")
 	}
-	return data, nil
+	return data, nil, nil
 }
 
 // michaelHeader builds the 16-byte Michael pseudo-header: DA, SA, priority

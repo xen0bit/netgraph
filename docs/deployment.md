@@ -57,7 +57,8 @@ netgraph serve -db /var/lib/netgraph/netgraph.db -listen :8443
 | `-exact-max` | `48h` | longer windows are answered from hourly rollups |
 | `-fact-gap` | `1h` | silence after which a relationship starts a new period |
 | `-asn-file` | `$NETGRAPH_ASN_FILE`; release builds: built in | an ASN table: the network and country of remote addresses ([networks](#networks-and-countries)); `none` for no table |
-| `-alert-webhook` | `$NETGRAPH_ALERT_WEBHOOK` | POST a JSON alert when a new device joins, and optionally for anomalies ([alerts](#new-device-alerts)) |
+| `-alert-webhook` | `$NETGRAPH_ALERT_WEBHOOK` | POST a JSON alert when a new device joins, and optionally for anomalies and scheduled reports ([alerts](#new-device-alerts)) |
+| `-report-every` | off | with `-alert-webhook`, POST a summary report every interval, for example `24h` |
 | `-alert-learn` | `24h` | learn the network this long after the first sensor connects before alerting on new devices |
 | `-alert-anomalies` | | also POST anomalies at or above this severity: `low`, `medium` or `high`; repeats of one finding are cooled down for an hour |
 | `-alert-anomaly-kinds` | | comma-separated finding kinds to alert on, such as `scan,rogue_dhcp`; empty means all |
@@ -227,7 +228,7 @@ netgraph-sensor run -iface br-lan -server https://netgraph.lan:8443 -token-file 
 | `-ring-mb` | `8` | AF_PACKET ring per interface |
 | `-rdns` | on | reverse DNS for local hosts while they are observed (live capture only) |
 | `-rdns-timeout`, `-rdns-workers`, `-rdns-ttl` | `2s`, `4`, `1h` | lookup bound, concurrency and answer cache |
-| `-wifi-hop`, `-wifi-channels`, `-wifi-dwell` | off, common 2.4/5 GHz, `250ms` | channel hopping on monitor interfaces |
+| `-wifi-hop`, `-wifi-channels`, `-wifi-frequencies`, `-wifi-6ghz`, `-wifi-dwell` | off, common 2.4/5 GHz, `250ms` | channel hopping on monitor interfaces. `-wifi-frequencies` selects by MHz (needed for 6 GHz, whose channel numbers overlap 5 GHz); `-wifi-6ghz` adds the 20 MHz 6 GHz plan |
 | `-wifi-data` | off | emit one event per data frame (noisy; management and handshakes are always reported) |
 
 Before starting a sensor, `netgraph-sensor check -iface br-lan -server
@@ -294,6 +295,8 @@ The sensor never changes the interface type; it only sets the channel (with
 ```sh
 netgraph-sensor run -iface wlan1 -server https://netgraph.lan:8443 \
   -wifi-hop -wifi-channels 1,6,11,36,40,44,48,149
+  # 6 GHz: pin the interface, or hop by frequency (channel numbers are ambiguous)
+  -wifi-hop -wifi-frequencies 5955,5975,6115,6135
 ```
 
 **Hopping vs. pinning.** `-wifi-hop` tunes the wireless extensions ioctl
@@ -327,7 +330,8 @@ the ingest token. A sensor fetches them into memory before it starts
 capturing and again every minute. After editing the file, send the server
 `SIGHUP` (`kill -HUP`, or `docker kill -s HUP <container>`) to reload it
 without a restart; a file that fails to parse is logged and the previous
-keys stay in use. The change reaches every sensor within a minute, and a
+keys stay in use. SIGHUP also re-reads the ingest and read token files, so a
+leaked token can be rotated without downtime. The change reaches every sensor within a minute, and a
 removed network's keys are dropped from the sensors' memory. Because
 the PMKs travel to the sensors, serve over HTTPS (`-tls-cert`) or a TLS
 proxy unless the sensor link is trusted; the server warns otherwise. One

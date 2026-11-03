@@ -107,6 +107,16 @@ func channelForFreq(freq int) int {
 }
 
 // FrequencyForChannel is channelForFreq in reverse, for channel hopping.
+// FrequencyForChannel6GHz maps a 6 GHz channel number to its centre in MHz.
+// Channel numbers are not unique across bands, so callers that know the band
+// must use this instead of FrequencyForChannel.
+func FrequencyForChannel6GHz(ch int) int {
+	if ch >= 1 && ch <= 233 {
+		return 5950 + ch*5
+	}
+	return 0
+}
+
 func FrequencyForChannel(ch int) int {
 	switch {
 	case ch == 14:

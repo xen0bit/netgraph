@@ -297,13 +297,18 @@ async function renderTab(seq) {
   try {
     if (t === "graph") return await renderGraph(seq);
     const path = tablePath[t];
-    let rows = await track(api(path, state.limits[t] ? { limit: state.limits[t] } : {}));
+    const extra = state.limits[t] ? { limit: state.limits[t] } : {};
+    if (t === "destinations" && $("#dest-group")?.value) extra.group = $("#dest-group").value;
+    let rows = await track(api(path, extra));
     if (seq !== refreshSeq) return;
     if (t === "anomalies") {
+      const days = rows?.baseline_ms ? Math.round(rows.baseline_ms / 86400000) : 7;
       $("#anomaly-note").textContent = rows?.learning
-        ? "Learning the network: until it has a day of history, only the checks that need none run (beacons, failed lookups, DNS tunnels, access points, scans, password guessing). New devices, new destinations, upload spikes, new services and inbound surges follow."
-        : "";
+        ? `Learning the network: history checks start after a day. Destination and traffic baselines look back ${days} days; only checks that need no history run now.`
+        : `History checks active. Baselines look back ${days} days.`;
       rows = rows?.anomalies;
+      const sev = $("#anomaly-sev")?.value;
+      if (sev) rows = (rows || []).filter((a) => a.severity === sev);
       renderMutes();
     }
     state.data[t] = rows || [];
@@ -447,7 +452,9 @@ const tables = {
   destinations: {
     cols: ["Destination", "Kind", "Connections", "Devices", "Sent", "Received", "First seen", "Last seen"],
     num: [2, 3, 4, 5],
-    row: (d) => [esc(d.label), badge(d.kind), d.connections, d.devices, bytes(d.bytes_out), bytes(d.bytes_in), stamp(d.first_seen), stamp(d.last_seen)],
+    row: (d) => [esc(d.label) + (d.remote_ips?.length > 1 ? `<div class="sub">${esc(d.remote_ips.join(", "))}</div>` : ""),
+      badge(d.kind) + (d.ports?.length ? `<div class="sub mono">${esc(d.ports.join(", "))}</div>` : ""),
+      d.connections, d.devices, bytes(d.bytes_out), bytes(d.bytes_in), stamp(d.first_seen), stamp(d.last_seen)],
     keys: [(d) => d.label, (d) => d.kind, (d) => d.connections, (d) => d.devices, (d) => d.bytes_out, (d) => d.bytes_in, (d) => d.first_seen, (d) => d.last_seen],
     id: (d) => d.kind === "ip" ? `ip:${d.key}` : `domain:${d.key}`,
   },
@@ -468,7 +475,7 @@ const tables = {
         client, `<span class="muted">→</span>`, server,
         esc(f.name) + (f.sni && f.qname && f.sni !== f.qname ? `<div class="sub">dns: ${esc(f.qname)}</div>` : ""),
         esc(f.app),
-        badge(f.state, f.state) + (f.closed ? badge(f.end_reason || "closed", "closed") : ""),
+        badge(f.state, f.state) + (f.closed ? badge(f.truncated ? "truncated" : f.end_reason || "closed", "closed") : ""),
         bytes(f.bytes_out), bytes(f.bytes_in), clock(f.last_seen),
       ];
     },
@@ -534,13 +541,15 @@ const tables = {
     },
   },
   sensors: {
-    cols: ["Sensor", "Version", "Interfaces", "First seen", "Last seen", "Packets", "Kernel drops", "Events dropped"],
-    num: [5, 6, 7],
+    cols: ["Sensor", "Version", "Interfaces", "First seen", "Last seen", "Packets", "Kernel drops", "Active flows", "Evicted", "Queued", "Sent", "Send errors"],
+    num: [5, 6, 7, 8, 9, 10, 11],
     row: (s) => [esc(s.name), esc(s.version), esc((s.interfaces || []).join(", ")), stamp(s.first_seen), stamp(s.last_seen),
-      s.stats?.packets ?? "", s.stats?.kernel_drops ?? "", s.stats?.events_dropped ?? ""],
+      s.stats?.packets ?? "", s.stats?.kernel_drops ?? "", s.stats?.flows_active ?? "", s.stats?.flows_evicted ?? "",
+      s.stats?.events_queued ?? "", s.stats?.batches_sent ?? "", s.stats?.send_errors ?? ""],
     keys: [(s) => s.name, (s) => s.version, (s) => (s.interfaces || []).join(" "), (s) => s.first_seen, (s) => s.last_seen,
-      (s) => s.stats?.packets, (s) => s.stats?.kernel_drops, (s) => s.stats?.events_dropped],
-    id: () => null,
+      (s) => s.stats?.packets, (s) => s.stats?.kernel_drops, (s) => s.stats?.flows_active, (s) => s.stats?.flows_evicted,
+      (s) => s.stats?.events_queued, (s) => s.stats?.batches_sent, (s) => s.stats?.send_errors],
+    id: (s) => `sensor:${s.name}`,
   },
 };
 
@@ -628,6 +637,7 @@ async function renderMutes() {
 }
 
 async function loadMore(t) {
+  if (t === "destinations" && $("#dest-group")?.value) return;
   const [def, max] = limits[t] || [];
   const asked = state.limits[t] || def;
   if (!def || asked >= max) return;
@@ -646,7 +656,7 @@ async function loadMore(t) {
 
 function exportAll(t) {
   if (!tablePath[t] || t === "sensors") return;
-  return track(api("export", { kind: t }, true)).then((text) => {
+  return track(api("export", { kind: t, all: "1" }, true)).then((text) => {
     download(`netgraph-${t}-${fileStamp()}.csv`, text, "text/csv");
   }).catch(() => {});
 }
@@ -677,10 +687,17 @@ function renderTable(t) {
   tools.querySelector(".count").textContent = `${all.length} ${all.length === 1 ? "row" : "rows"}` +
     (capped ? ` · the first ${asked}${so ? "; sorting covers these only" : ""}` : "");
   const more = tools.querySelector("[data-more]");
-  more.hidden = !capped || asked >= max;
+  const grouped = t === "destinations" && $("#dest-group")?.value;
+  more.hidden = !capped || asked >= max || Boolean(grouped);
   more.onclick = () => loadMore(t);
   tools.querySelector("[data-csv]").disabled = !rows.length;
   tools.querySelector("[data-csv]").onclick = () => download(`netgraph-${t}-${fileStamp()}.csv`, toCSV(rows), "text/csv");
+  tools.querySelector("[data-copy-json]").onclick = async () => {
+    try {
+      await navigator.clipboard.writeText(JSON.stringify(rows, null, 2));
+      setStatus(`${rows.length} rows copied`);
+    } catch (e) { setStatus(`copy failed: ${e.message}`); }
+  };
   const exportBtn = tools.querySelector("[data-export]");
   exportBtn.hidden = !tablePath[t] || t === "sensors";
   exportBtn.onclick = () => exportAll(t);
@@ -713,6 +730,7 @@ function tableTools(t, table) {
     tools.id = `tt-${t}`;
     tools.className = "table-tools";
     tools.innerHTML = `<span class="count"></span><button data-more hidden>Load more</button><span class="spacer"></span>
+      <button data-copy-json title="Copy these rows as JSON">Copy JSON</button>
       <button data-export title="Download every row in this window, every field, as CSV">All CSV</button>
       <button data-csv title="Download these rows, every field, as CSV">CSV</button>`;
     table.before(tools);
@@ -1098,7 +1116,18 @@ function init() {
   $("#to").onchange = fromTo;
   let typing;
   $("#filter").oninput = () => { clearTimeout(typing); typing = setTimeout(() => { state.filter = $("#filter").value; refresh(); }, 400); };
-  for (const b of $$(".tabs button")) b.onclick = () => selectTab(b.dataset.tab);
+  const tabButtons = $$(".tabs button");
+  for (const [i, b] of tabButtons.entries()) {
+    b.onclick = () => selectTab(b.dataset.tab);
+    b.onkeydown = (e) => {
+      if (e.key !== "ArrowRight" && e.key !== "ArrowLeft" && e.key !== "Home" && e.key !== "End") return;
+      e.preventDefault();
+      const n = e.key === "Home" ? 0 : e.key === "End" ? tabButtons.length - 1
+        : (i + (e.key === "ArrowRight" ? 1 : -1) + tabButtons.length) % tabButtons.length;
+      tabButtons[n].focus();
+      selectTab(tabButtons[n].dataset.tab);
+    };
+  }
   $("#summary").onclick = (e) => { const a = e.target.closest("[data-tab]"); if (a) selectTab(a.dataset.tab); };
   for (const [id, k] of [["#g-collapse", "collapse"], ["#g-dns", "dns"], ["#g-sites", "sites"], ["#g-anomalies", "anomalies"], ["#g-networks", "networks"], ["#g-identity", "identity"]]) {
     $(id).onchange = () => { state.gopts[k] = $(id).checked; refresh(); };
@@ -1106,6 +1135,10 @@ function init() {
   $("#g-top").onchange = () => { state.gopts.top = Number($("#g-top").value) || 15; refresh(); };
   $("#g-layout").onchange = () => { state.layout = $("#g-layout").value; refresh(); };
   $("#connect").onclick = () => askToken().then((t) => { if (t) refresh(); });
+  const sev = $("#anomaly-sev");
+  if (sev) sev.onchange = () => refresh();
+  const dg = $("#dest-group");
+  if (dg) dg.onchange = () => refresh();
   $("#g-fit").onclick = () => diagram.fit();
   $("#g-svg").onclick = () => {
     const svg = $("#diagram svg");

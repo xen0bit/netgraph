@@ -19,6 +19,31 @@ import (
 //
 //	iw dev wlan0 interface add mon0 type monitor
 //	ip link set mon0 up
+func SetFrequency(iface string, mhz int) error {
+	if mhz < 2400 || mhz > 7125 {
+		return fmt.Errorf("wifi: frequency %d MHz", mhz)
+	}
+	if len(iface) == 0 || len(iface) > 15 {
+		return fmt.Errorf("wifi: interface name %q", iface)
+	}
+	fd, err := unix.Socket(unix.AF_INET, unix.SOCK_DGRAM|unix.SOCK_CLOEXEC, 0)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = unix.Close(fd) }()
+	var req [32]byte
+	copy(req[:16], iface)
+	binary.NativeEndian.PutUint32(req[16:], uint32(mhz))
+	binary.NativeEndian.PutUint16(req[20:], 6) // MHz * 10^6 = Hz
+	req[22] = 0
+	req[23] = 0x01 // IW_FREQ_FIXED
+	const siocsiwfreq = 0x8b04
+	if _, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(fd), siocsiwfreq, uintptr(unsafe.Pointer(&req[0]))); errno != 0 {
+		return fmt.Errorf("wifi: set %s to %d MHz: %w", iface, mhz, errno)
+	}
+	return nil
+}
+
 func SetChannel(iface string, channel int) error {
 	if channel <= 0 {
 		return fmt.Errorf("wifi: channel %d", channel)

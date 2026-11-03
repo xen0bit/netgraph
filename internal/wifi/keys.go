@@ -759,35 +759,37 @@ func (k *Keyring) ptk(ap, sta string) *PTK {
 	return k.pairs[strings.ToLower(ap+"|"+sta)]
 }
 
-// Decrypt decrypts a protected data frame. It returns the plaintext LLC
-// payload and a short method name, or an error explaining what is missing.
-func (k *Keyring) Decrypt(f *Frame) ([]byte, string, error) {
+// decrypt is Decrypt with an option for a MAC fragment. TKIP's Michael MIC
+// covers the whole MSDU, so a fragmented TKIP frame must not verify it until
+// the pieces are joined. A non-nil tkipMIC tells the caller to verify it
+// after reassembly; the returned plaintext then still includes the MIC bytes.
+func (k *Keyring) decrypt(f *Frame, fragment bool) ([]byte, string, *tkipMIC, error) {
 	if !f.Protected {
 		_, payload, err := f.LLC()
-		return payload, "none", err
+		return payload, "none", nil, err
 	}
 	body := f.Body
 	if len(body) < 8 {
-		return nil, "", fmt.Errorf("wifi: short protected frame")
+		return nil, "", nil, fmt.Errorf("wifi: short protected frame")
 	}
 	ap := f.BSSID.String()
 	if f.FromDS && !f.ToDS && len(f.Dst) == 6 && f.Dst[0]&1 != 0 {
 		// Broadcast/multicast from the AP: the group key, by key ID.
 		if gk := k.group(ap, int(body[3]>>6)); gk != nil {
 			if f.Src != nil && k.ptk(ap, f.Src.String()) != nil {
-				return nil, "", errRelayed
+				return nil, "", nil, errRelayed
 			}
 			_, sec, _ := k.Network(ap)
 			if strings.HasPrefix(sec.Group, "GCMP") {
 				out, err := gcmpDecrypt(f.rawHeader(), body, gk.tk)
-				return out, sec.Group, err
+				return out, sec.Group, nil, err
 			}
 			if gk.tkip {
-				out, err := tkipDecrypt(f.rawHeader(), body, gk.tk, true)
-				return out, "TKIP", err
+				out, mic, err := tkipOpen(f.rawHeader(), body, gk.tk, true, !fragment)
+				return out, "TKIP", mic, err
 			}
 			out, err := ccmpDecrypt(f.rawHeader(), body, gk.tk)
-			return out, "CCMP", err
+			return out, "CCMP", nil, err
 		}
 	}
 	var sta string
@@ -803,29 +805,29 @@ func (k *Keyring) Decrypt(f *Frame) ([]byte, string, error) {
 	if sta != "" {
 		if ptk := k.ptk(ap, sta); ptk != nil {
 			if ptk.TKIP {
-				out, err := tkipDecrypt(f.rawHeader(), body, ptk.TK, f.FromDS && !f.ToDS)
-				return out, "TKIP", err
+				out, mic, err := tkipOpen(f.rawHeader(), body, ptk.TK, f.FromDS && !f.ToDS, !fragment)
+				return out, "TKIP", mic, err
 			}
 			_, sec, _ := k.Network(ap)
 			switch c := pairwiseCipher(ptk.Cipher, sec); c {
 			case "GCMP-128":
 				out, err := gcmpDecrypt(f.rawHeader(), body, ptk.TK)
-				return out, c, err
+				return out, c, nil, err
 			case "GCMP-256":
 				if len(ptk.TK256) != 32 {
-					return nil, "", fmt.Errorf("wifi: no 256-bit temporal key")
+					return nil, "", nil, fmt.Errorf("wifi: no 256-bit temporal key")
 				}
 				out, err := gcmpDecrypt(f.rawHeader(), body, ptk.TK256)
-				return out, c, err
+				return out, c, nil, err
 			case "CCMP-256":
 				if len(ptk.TK256) != 32 {
-					return nil, "", fmt.Errorf("wifi: no 256-bit temporal key")
+					return nil, "", nil, fmt.Errorf("wifi: no 256-bit temporal key")
 				}
 				out, err := ccmpDecrypt(f.rawHeader(), body, ptk.TK256)
-				return out, c, err
+				return out, c, nil, err
 			}
 			out, err := ccmpDecrypt(f.rawHeader(), body, ptk.TK)
-			return out, "CCMP", err
+			return out, "CCMP", nil, err
 		}
 	}
 	// WEP has no handshake: try the configured keys.
@@ -833,7 +835,13 @@ func (k *Keyring) Decrypt(f *Frame) ([]byte, string, error) {
 	keys := k.wep
 	k.mu.RUnlock()
 	out, err := wepDecrypt(body, keys)
-	return out, "WEP", err
+	return out, "WEP", nil, err
+}
+
+// Decrypt decrypts a complete protected data frame.
+func (k *Keyring) Decrypt(f *Frame) ([]byte, string, error) {
+	out, cipher, _, err := k.decrypt(f, false)
+	return out, cipher, err
 }
 
 // rawHeader returns the MAC header bytes, which Decrypt needs for AAD and

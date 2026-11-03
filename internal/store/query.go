@@ -71,6 +71,9 @@ func (s *Store) precision(from, to int64) string {
 }
 
 func limit(f model.Filter, def, maxN int) int {
+	if f.All {
+		return 5_000_000 // a streaming export ceiling, not a UI page
+	}
 	switch {
 	case f.Limit <= 0:
 		return def
@@ -401,6 +404,7 @@ func (s *Store) flowsWhere(ctx context.Context, f model.Filter, extra string, ex
 			return nil, err
 		}
 		setEnds(&fl, localIP, localPort)
+		fl.Truncated = fl.EndReason == "evict"
 		fl.Proto = ProtoName(proto)
 		fl.BytesOut, fl.BytesIn, fl.PktsOut, fl.PktsIn = uint64(bo+0.5), uint64(bi+0.5), uint64(po+0.5), uint64(pi+0.5)
 		fl.Name = firstNonEmpty(fl.SNI, fl.HTTPHost, fl.QName)
@@ -621,11 +625,11 @@ func (s *Store) Destinations(ctx context.Context, f model.Filter) ([]model.Desti
 	}
 	key := "coalesce(nullif(sni, ''), nullif(http_host, ''), nullif(qname, ''), remote_ip)"
 	rows, err := s.r.QueryContext(ctx, `SELECT `+key+` AS k,
-		CASE WHEN `+key+` = remote_ip THEN 'ip' ELSE 'name' END,
 		count(*), count(DISTINCT client_device),
 		sum(`+connBytes("bytes_out", from, to)+`), sum(`+connBytes("bytes_in", from, to)+`),
-		min(first_seen), max(last_seen)
-		FROM connections c WHERE `+w.sql()+` GROUP BY k, remote_ip
+		min(first_seen), max(last_seen), coalesce(group_concat(DISTINCT remote_ip), ''),
+		coalesce(group_concat(DISTINCT remote_port || ':' || proto), '')
+		FROM connections c WHERE `+w.sql()+` GROUP BY k
 		ORDER BY sum(`+connBytes("bytes_out", from, to)+` + `+connBytes("bytes_in", from, to)+`) DESC, k LIMIT ?`, append(w.args, limit(f, 1000, 100000))...)
 	if err != nil {
 		return nil, err
@@ -635,10 +639,13 @@ func (s *Store) Destinations(ctx context.Context, f model.Filter) ([]model.Desti
 	for rows.Next() {
 		var d model.Destination
 		var bo, bi float64
-		if err := rows.Scan(&d.Key, &d.Kind, &d.Connections, &d.Devices, &bo, &bi, &d.FirstSeen, &d.LastSeen); err != nil {
+		var ips, ports string
+		if err := rows.Scan(&d.Key, &d.Connections, &d.Devices, &bo, &bi, &d.FirstSeen, &d.LastSeen, &ips, &ports); err != nil {
 			return nil, err
 		}
-		d.Label = d.Key
+		d.Label, d.Kind = d.Key, destinationKind(d.Key)
+		d.RemoteIPs = splitList(ips)
+		d.Ports = destinationPorts(ports)
 		d.BytesOut, d.BytesIn = uint64(bo+0.5), uint64(bi+0.5)
 		out = append(out, d)
 	}
@@ -652,9 +659,9 @@ func (s *Store) destinationsHourly(ctx context.Context, f model.Filter, from, to
 		return nil, err
 	}
 	rows, err := s.r.QueryContext(ctx, `SELECT coalesce(nullif(name, ''), remote_ip) AS k,
-		CASE WHEN coalesce(nullif(name, ''), remote_ip) = remote_ip THEN 'ip' ELSE 'name' END,
-		count(DISTINCT flow_key), count(DISTINCT client_device), sum(bytes_out), sum(bytes_in), min(bucket), max(bucket)
-		FROM traffic_hourly WHERE `+w.sql()+` GROUP BY k, remote_ip
+		count(DISTINCT flow_key), count(DISTINCT client_device), sum(bytes_out), sum(bytes_in), min(bucket), max(bucket),
+		coalesce(group_concat(DISTINCT remote_ip), ''), coalesce(group_concat(DISTINCT remote_port || ':' || proto), '')
+		FROM traffic_hourly WHERE `+w.sql()+` GROUP BY k
 		ORDER BY sum(bytes_out + bytes_in) DESC, k LIMIT ?`, append(w.args, limit(f, 1000, 100000))...)
 	if err != nil {
 		return nil, err
@@ -664,15 +671,60 @@ func (s *Store) destinationsHourly(ctx context.Context, f model.Filter, from, to
 	for rows.Next() {
 		var d model.Destination
 		var bo, bi uint64
-		if err := rows.Scan(&d.Key, &d.Kind, &d.Connections, &d.Devices, &bo, &bi, &d.FirstSeen, &d.LastSeen); err != nil {
+		var ips, ports string
+		if err := rows.Scan(&d.Key, &d.Connections, &d.Devices, &bo, &bi, &d.FirstSeen, &d.LastSeen, &ips, &ports); err != nil {
 			return nil, err
 		}
-		d.Label = d.Key
+		d.Label, d.Kind = d.Key, destinationKind(d.Key)
+		d.RemoteIPs = splitList(ips)
+		d.Ports = destinationPorts(ports)
 		d.BytesOut, d.BytesIn = bo, bi
 		d.LastSeen += hourMS
 		out = append(out, d)
 	}
 	return out, rows.Err()
+}
+
+func destinationKind(key string) string {
+	if _, err := netip.ParseAddr(key); err == nil {
+		return "ip"
+	}
+	return "name"
+}
+
+func splitList(s string) []string {
+	if s == "" {
+		return nil
+	}
+	parts := strings.Split(s, ",")
+	slices.Sort(parts)
+	return slices.Compact(parts)
+}
+
+// destinationPorts turns "443:6,53:17" into "443/tcp,53/udp".
+func destinationPorts(s string) []string {
+	if s == "" {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, p := range strings.Split(s, ",") {
+		port, proto, ok := strings.Cut(p, ":")
+		if !ok {
+			continue
+		}
+		n, err := strconv.Atoi(proto)
+		if err != nil {
+			continue
+		}
+		v := port + "/" + ProtoName(n)
+		if !seen[v] {
+			seen[v] = true
+			out = append(out, v)
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 
 // --- dns --------------------------------------------------------------------
@@ -1832,7 +1884,14 @@ func (s *Store) WiFi(ctx context.Context, f model.Filter) ([]model.WiFiNetwork, 
 // re-derive pairwise keys on startup. It returns public nonces only, never a
 // key: a caller still needs the network's passphrase to derive anything.
 func (s *Store) WiFiHandshakes(ctx context.Context) ([]wire.WiFiKey, error) {
-	rows, err := s.r.QueryContext(ctx, `SELECT bssid, sta, ssid, anonce, snonce, key_version, cipher FROM wifi_handshakes ORDER BY ts DESC LIMIT 50000`)
+	return s.WiFiHandshakesSince(ctx, 0)
+}
+
+// WiFiHandshakesSince returns records the server received at or after since
+// (unix ms; zero means all). Sensors use it for incremental syncs.
+func (s *Store) WiFiHandshakesSince(ctx context.Context, since int64) ([]wire.WiFiKey, error) {
+	rows, err := s.r.QueryContext(ctx, `SELECT bssid, sta, ssid, anonce, snonce, key_version, cipher FROM wifi_handshakes
+		WHERE ? = 0 OR received >= ? ORDER BY received DESC, ts DESC LIMIT 50000`, since, since)
 	if err != nil {
 		return nil, err
 	}
@@ -1851,8 +1910,14 @@ func (s *Store) WiFiHandshakes(ctx context.Context) ([]wire.WiFiKey, error) {
 // WiFiGroupKeys returns the stored group-key records (still wrapped) for
 // sensors to unwrap with their own PMKs.
 func (s *Store) WiFiGroupKeys(ctx context.Context) ([]wire.WiFiGTK, error) {
+	return s.WiFiGroupKeysSince(ctx, 0)
+}
+
+// WiFiGroupKeysSince is WiFiGroupKeys restricted to records the server
+// received at or after since (unix ms; zero means all).
+func (s *Store) WiFiGroupKeysSince(ctx context.Context, since int64) ([]wire.WiFiGTK, error) {
 	rows, err := s.r.QueryContext(ctx, `SELECT bssid, key_id, sta, ssid, anonce, snonce, descriptor, key_info, key_length, iv, key_data, ts
-		FROM wifi_group_keys ORDER BY ts DESC LIMIT 50000`)
+		FROM wifi_group_keys WHERE ? = 0 OR received >= ? ORDER BY received DESC, ts DESC LIMIT 50000`, since, since)
 	if err != nil {
 		return nil, err
 	}

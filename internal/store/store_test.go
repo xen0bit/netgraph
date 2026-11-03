@@ -881,3 +881,111 @@ func TestOpenReadOnlyWhileWriterOpen(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestTimelineKeepsLatestObservations(t *testing.T) {
+	base := testutil.Base
+	st, err := Open(filepath.Join(t.TempDir(), "ng.db"), Config{Now: func() time.Time { return base.Add(time.Hour) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	mac := "aa:bb:cc:00:00:77"
+	ev := wire.Event{Seq: 1, Type: wire.TypeBinding, TS: base,
+		Binding: &wire.Binding{MAC: mac, IP: netip.MustParseAddr("192.168.1.77"), Source: "arp"}}
+	if _, err := st.Ingest(ctx, "router", "boot", []wire.Event{ev}); err != nil {
+		t.Fatal(err)
+	}
+	var dev int64
+	if err := st.r.QueryRow(`SELECT id FROM entities WHERE kind = 'device' AND key = ?`, mac).Scan(&dev); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 510; i++ {
+		data := fmt.Sprintf(`{"source":"s%03d","ip":"192.168.1.77"}`, i)
+		if _, err := st.w.Exec(`INSERT INTO observations (sensor_id, ts, type, device, ip, data) VALUES (1, ?, 'binding', ?, '192.168.1.77', ?)`,
+			base.Add(time.Duration(i)*time.Second).UnixMilli(), dev, data); err != nil {
+			t.Fatal(err)
+		}
+	}
+	d, err := st.Entity(ctx, model.EntityID(model.KindDevice, mac), win(0, time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Timeline) == 0 {
+		t.Fatal("empty timeline")
+	}
+	last := d.Timeline[len(d.Timeline)-1].Detail
+	if !strings.Contains(last, "s509") {
+		t.Fatalf("timeline kept the oldest observations; last = %q", last)
+	}
+}
+
+func TestDestinationsAggregatesOneName(t *testing.T) {
+	base := testutil.Base
+	st, err := Open(filepath.Join(t.TempDir(), "ng.db"), Config{Now: func() time.Time { return base.Add(time.Hour) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	client := netip.MustParseAddr("192.168.1.10")
+	mk := func(seq uint64, remote string) wire.Event {
+		return wire.Event{Seq: seq, Type: wire.TypeFlow, TS: base, Flow: &wire.Flow{
+			ID: seq, Proto: 6, Src: client, SrcPort: 40000 + uint16(seq), Dst: netip.MustParseAddr(remote), DstPort: 443,
+			SrcMAC: "aa:bb:cc:00:00:01", FirstSeen: base, Start: base, End: base.Add(time.Minute),
+			BytesOut: 100, BytesIn: 200, PktsOut: 1, PktsIn: 2, Final: true, SNI: "one.example.com",
+		}}
+	}
+	if _, err := st.Ingest(context.Background(), "router", "boot", []wire.Event{mk(1, "93.184.216.34"), mk(2, "93.184.216.35")}); err != nil {
+		t.Fatal(err)
+	}
+	ds, err := st.Destinations(context.Background(), win(0, time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ds) != 1 || ds[0].Key != "one.example.com" || len(ds[0].RemoteIPs) != 2 || ds[0].Connections != 2 {
+		t.Fatalf("destinations = %+v", ds)
+	}
+}
+
+func TestWiFiKeyReceiptOrdering(t *testing.T) {
+	now := testutil.Base
+	st, err := Open(filepath.Join(t.TempDir(), "ng.db"), Config{Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	a, b := strings.Repeat("11", 32), strings.Repeat("22", 32)
+	mk := func(seq uint64, ts time.Time, anonce string) wire.Event {
+		return wire.Event{Seq: seq, Type: wire.TypeWiFiKey, TS: ts, WiFiKey: &wire.WiFiKey{
+			BSSID: "aa:bb:cc:00:00:01", STA: "3c:22:fb:01:02:03", SSID: "home",
+			ANonce: anonce, SNonce: strings.Repeat("33", 32), KeyVersion: 2,
+		}}
+	}
+	// Newer capture first; then an older event arrives after a restart.
+	if _, err := st.Ingest(ctx, "s1", "boot1", []wire.Event{mk(1, testutil.Base.Add(time.Minute), a)}); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(time.Hour)
+	if _, err := st.Ingest(ctx, "s2", "boot2", []wire.Event{mk(1, testutil.Base, b)}); err != nil {
+		t.Fatal(err)
+	}
+	hs, err := st.WiFiHandshakes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(hs) != 1 || hs[0].ANonce != a {
+		t.Fatalf("delayed handshake overwrote newer one: %+v", hs)
+	}
+}
+
+func TestSensorEntity(t *testing.T) {
+	st, _, _ := homeStore(t)
+	d, err := st.Entity(context.Background(), model.EntityID(model.KindSensor, "router"), win(0, time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Kind != model.KindSensor || d.Label != "router" {
+		t.Fatalf("sensor entity = %+v", d)
+	}
+}

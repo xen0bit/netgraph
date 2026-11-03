@@ -85,12 +85,12 @@
     </section>
     <section id="view-devices" class="view" hidden><table id="t-devices"></table></section>
     <section id="view-flows" class="view" hidden><table id="t-flows"></table></section>
-    <section id="view-destinations" class="view" hidden><table id="t-destinations"></table></section>
+    <section id="view-destinations" class="view" hidden><div class="table-tools"><label class="muted">Group <select id="dest-group" aria-label="Group destinations"><option value="">by name</option><option value="site">by site</option></select></label></div><table id="t-destinations"></table></section>
     <section id="view-dns" class="view" hidden><table id="t-dns"></table></section>
     <section id="view-facts" class="view" hidden><table id="t-facts"></table></section>
     <section id="view-wifi" class="view" hidden><table id="t-wifi"></table></section>
     <section id="view-sensors" class="view" hidden><table id="t-sensors"></table></section>
-    <section id="view-anomalies" class="view" hidden><p id="anomaly-note" class="muted"></p><table id="t-anomalies"></table><div id="mutes"></div></section>
+    <section id="view-anomalies" class="view" hidden><p id="anomaly-note" class="muted"></p><div class="table-tools"><label class="muted">Severity <select id="anomaly-sev" aria-label="Filter anomalies by severity"><option value="">all</option><option value="high">high</option><option value="medium">medium</option><option value="low">low</option></select></label></div><table id="t-anomalies"></table><div id="mutes"></div></section>
     <aside id="panel" class="panel" hidden aria-label="Details">
       <button class="icon close" id="panel-close" title="Close (Esc)">✕</button>
       <div id="panel-body"></div>

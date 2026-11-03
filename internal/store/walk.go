@@ -68,6 +68,7 @@ func (s *Store) WalkFlows(ctx context.Context, f model.Filter, yield func(model.
 			return err
 		}
 		setEnds(&fl, localIP, localPort)
+		fl.Truncated = fl.EndReason == "evict"
 		fl.Proto = ProtoName(proto)
 		fl.BytesOut, fl.BytesIn, fl.PktsOut, fl.PktsIn = uint64(bo+0.5), uint64(bi+0.5), uint64(po+0.5), uint64(pi+0.5)
 		fl.Name = firstNonEmpty(fl.SNI, fl.HTTPHost, fl.QName)

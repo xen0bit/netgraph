@@ -69,6 +69,7 @@ type Payload struct {
 type notice struct {
 	device  *store.NewDevice
 	anomaly *model.Anomaly
+	report  string
 }
 
 // Notifier delivers alerts. Notify is safe for concurrent use.
@@ -130,6 +131,17 @@ func (n *Notifier) Notify(d store.NewDevice) {
 // NotifyAnomaly enqueues an anomaly finding at or above AnomalyMin, with a
 // cooldown per finding so a condition that persists in every window does not
 // page once a minute.
+// NotifyReport queues a periodic summary. Unlike anomalies it has no
+// cooldown: the caller decides the schedule.
+func (n *Notifier) NotifyReport(text string) {
+	select {
+	case n.queue <- notice{report: text}:
+	default:
+		n.dropped.Add(1)
+		n.log.Warn("alert queue full; dropping report")
+	}
+}
+
 func (n *Notifier) NotifyAnomaly(a model.Anomaly) {
 	if n.cfg.AnomalyMin == "" || model.SeverityRank(a.Severity) < model.SeverityRank(n.cfg.AnomalyMin) {
 		return
@@ -181,6 +193,8 @@ func (n *Notifier) Run(ctx context.Context) {
 				n.deliver(ctx, NewPayload(*m.device), "new device", m.device.MAC)
 			case m.anomaly != nil:
 				n.deliver(ctx, NewAnomalyPayload(*m.anomaly), "anomaly", m.anomaly.Summary)
+			case m.report != "":
+				n.deliver(ctx, NewReportPayload(m.report), "report", m.report)
 			}
 		}
 	}
@@ -282,6 +296,13 @@ func NewAnomalyPayload(a model.Anomaly) Payload {
 		text += fmt.Sprintf(" (%s)", safeText(a.DeviceName))
 	}
 	p := Payload{Event: "anomaly", Text: text, Content: text, Anomaly: &a}
+	p.AllowedMentions.Parse = []string{}
+	return p
+}
+
+// NewReportPayload builds the webhook body for a periodic summary.
+func NewReportPayload(text string) Payload {
+	p := Payload{Event: "report", Text: text, Content: text}
 	p.AllowedMentions.Parse = []string{}
 	return p
 }

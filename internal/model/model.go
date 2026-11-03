@@ -56,10 +56,13 @@ type Filter struct {
 	// details, which must not be truncated by a broad substring match.
 	DomainExact  string
 	DomainSuffix string
-	Port         int    // the server's port: the service
-	Proto        string // tcp, udp, icmp, or a protocol number
-	App          string // tls, quic, http, dns, ...
-	Dir          string // out, in, local or external
+	// All asks the store for every matching row, for streaming exports.
+	// It is not a user-facing filter and still has a hard safety ceiling.
+	All   bool
+	Port  int    // the server's port: the service
+	Proto string // tcp, udp, icmp, or a protocol number
+	App   string // tls, quic, http, dns, ...
+	Dir   string // out, in, local or external
 	// The remote end's network (autonomous system number) and country
 	// (ISO 3166 alpha-2), from the server's ASN table.
 	ASN     uint32
@@ -151,6 +154,7 @@ type Destination struct {
 	FirstSeen   int64    `json:"first_seen"`
 	LastSeen    int64    `json:"last_seen"`
 	Ports       []string `json:"ports,omitempty"`
+	RemoteIPs   []string `json:"remote_ips,omitempty"`
 }
 
 // Flow is one connection's activity inside the window.
@@ -185,14 +189,17 @@ type Flow struct {
 	JA4        string `json:"ja4,omitempty"`
 	UserAgent  string `json:"user_agent,omitempty"`
 	// The remote end's network, when the server has an ASN table.
-	ASN         uint32 `json:"asn,omitempty"`
-	ASOrg       string `json:"as_org,omitempty"`
-	Country     string `json:"country,omitempty"`
-	FirstSeen   int64  `json:"first_seen"` // ms; when the connection opened
-	LastSeen    int64  `json:"last_seen"`  // ms; its last record
-	State       string `json:"state"`
-	Closed      bool   `json:"closed"` // it ended inside the window
-	EndReason   string `json:"end_reason,omitempty"`
+	ASN       uint32 `json:"asn,omitempty"`
+	ASOrg     string `json:"as_org,omitempty"`
+	Country   string `json:"country,omitempty"`
+	FirstSeen int64  `json:"first_seen"` // ms; when the connection opened
+	LastSeen  int64  `json:"last_seen"`  // ms; its last record
+	State     string `json:"state"`
+	Closed    bool   `json:"closed"` // it ended inside the window
+	EndReason string `json:"end_reason,omitempty"`
+	// Truncated means the sensor dropped its state (the flow table was
+	// full), not that the connection closed cleanly.
+	Truncated   bool   `json:"truncated,omitempty"`
 	BytesOut    uint64 `json:"bytes_out"` // inside the window
 	BytesIn     uint64 `json:"bytes_in"`
 	PktsOut     uint64 `json:"pkts_out"`
@@ -344,8 +351,9 @@ const (
 	KindASN = "asn"
 	// Graph only: the names under one registrable domain (Sites), and the
 	// destinations of one device that Top N summarised.
-	KindSite  = "site"
-	KindOther = "other"
+	KindSite   = "site"
+	KindSensor = "sensor"
+	KindOther  = "other"
 )
 
 // EntityID builds an entity ID.
@@ -569,11 +577,13 @@ type Anomaly struct {
 // need a day of it before the window; until then Learning is set and only
 // the checks that need no history run.
 type AnomalyReport struct {
-	FromMS    int64     `json:"from"`
-	ToMS      int64     `json:"to"`
-	SinceMS   int64     `json:"since,omitempty"` // when the first sensor first reported
-	Learning  bool      `json:"learning,omitempty"`
-	Anomalies []Anomaly `json:"anomalies"`
+	FromMS     int64     `json:"from"`
+	ToMS       int64     `json:"to"`
+	SinceMS    int64     `json:"since,omitempty"` // when the first sensor first reported
+	HistoryMS  int64     `json:"history_ms,omitempty"`
+	BaselineMS int64     `json:"baseline_ms,omitempty"`
+	Learning   bool      `json:"learning,omitempty"`
+	Anomalies  []Anomaly `json:"anomalies"`
 }
 
 // AnomalyMute suppresses matching findings until Until (ms). Empty Kind,

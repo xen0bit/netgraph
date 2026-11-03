@@ -65,6 +65,7 @@ type fragState struct {
 	total        int
 	pendingBytes int
 	last         time.Time
+	mic          *tkipMIC // fragmented TKIP: verify after reassembly
 }
 
 // NewProcessor returns a processor. A nil Keyring means no network can be
@@ -197,8 +198,10 @@ func (p *Processor) suppress(ts time.Time, parts ...string) bool {
 
 func (p *Processor) data(ts time.Time, f *Frame) {
 	llc := f.Body
+	var mic *tkipMIC
 	if f.Protected {
-		plain, _, err := p.keys.Decrypt(f)
+		fragment := f.MoreFrag || f.FragNumber != 0
+		plain, _, m, err := p.keys.decrypt(f, fragment)
 		if errors.Is(err, errRelayed) {
 			return
 		}
@@ -210,10 +213,10 @@ func (p *Processor) data(ts time.Time, f *Frame) {
 			}
 			return
 		}
-		llc = plain
+		llc, mic = plain, m
 	}
 	if f.MoreFrag || f.FragNumber != 0 {
-		p.fragment(ts, f, llc)
+		p.fragment(ts, f, llc, mic)
 		return
 	}
 	p.payload(ts, f, llc)
@@ -243,7 +246,7 @@ func (p *Processor) payload(ts time.Time, f *Frame, llc []byte) {
 // protected fragment) has already been decrypted; the pieces are joined
 // before SNAP/LLC handling. A gap drops the partial frame rather than
 // handing the network a corrupted packet.
-func (p *Processor) fragment(ts time.Time, f *Frame, llc []byte) {
+func (p *Processor) fragment(ts time.Time, f *Frame, llc []byte, mic *tkipMIC) {
 	p.pruneFrags(ts)
 	key := fragKey{src: f.Src.String(), dst: f.Dst.String(), bssid: f.BSSID.String(), seq: f.Seq}
 	st := p.frags[key]
@@ -262,6 +265,9 @@ func (p *Processor) fragment(ts time.Time, f *Frame, llc []byte) {
 		p.frags[key] = st
 	}
 	st.last = ts
+	if st.mic == nil && mic != nil {
+		st.mic = mic
+	}
 	if f.FragNumber == 0 {
 		// The frame aliases the capture buffer; later fragments arrive
 		// in later reads that overwrite it.
@@ -312,6 +318,18 @@ func (p *Processor) fragment(ts time.Time, f *Frame, llc []byte) {
 	joined := make([]byte, 0, st.total)
 	for _, part := range st.parts {
 		joined = append(joined, part...)
+	}
+	if st.mic != nil {
+		if !st.mic.verify(joined) {
+			delete(p.frags, key)
+			if p.cfg.IncludeData {
+				e := st.first.WireEvent()
+				e.Protected, e.Error = true, "tkip: Michael MIC failed"
+				p.emit(ts, e)
+			}
+			return
+		}
+		joined = joined[:len(joined)-8]
 	}
 	base := *st.first
 	delete(p.frags, key)

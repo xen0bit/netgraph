@@ -568,3 +568,33 @@ func TestCSVFormulaText(t *testing.T) {
 		}
 	}
 }
+
+func TestTokenRotation(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "ng.db"), store.Config{Now: func() time.Time { return testutil.Base }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	srv := httptest.NewServer(New(Config{Store: st, IngestToken: "in", ReadToken: "old"}))
+	defer srv.Close()
+	get := func(token string) int {
+		req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/summary", nil)
+		req.Header.Set("Authorization", "Bearer "+token)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer resp.Body.Close()
+		return resp.StatusCode
+	}
+	if code := get("old"); code != http.StatusOK {
+		t.Fatalf("old token before rotation: %d", code)
+	}
+	srv.Config.Handler.(*Server).SetTokens("in2", "new")
+	if code := get("old"); code != http.StatusUnauthorized {
+		t.Fatalf("old token after rotation: %d", code)
+	}
+	if code := get("new"); code != http.StatusOK {
+		t.Fatalf("new token after rotation: %d", code)
+	}
+}

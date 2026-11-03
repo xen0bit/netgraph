@@ -108,6 +108,8 @@ func run(args []string) error {
 	wifiHop := fs.Bool("wifi-hop", false, "hop channels on monitor-mode interfaces")
 	wifiDwell := fs.Duration("wifi-dwell", 250*time.Millisecond, "time to stay on each channel while hopping")
 	wifiChannels := fs.String("wifi-channels", "", "comma-separated channels to hop (default: common 2.4/5 GHz channels)")
+	wifiFreqs := fs.String("wifi-frequencies", "", "comma-separated frequencies in MHz to hop instead of channels (for 6 GHz, e.g. 5955,5975)")
+	wifi6 := fs.Bool("wifi-6ghz", false, "also hop the 20 MHz 6 GHz plan (needs a 6 GHz-capable monitor interface)")
 	wifiData := fs.Bool("wifi-data", false, "emit one event per Wi-Fi data frame (noisy; management and handshakes are always reported)")
 	memLimit := fs.Int("mem-limit-mb", 128, "Go soft memory limit, MiB, unless $GOMEMLIMIT is set (0: none)")
 	logLevel := fs.String("log-level", "info", "debug, info, warn or error")
@@ -241,7 +243,8 @@ func run(args []string) error {
 		// keys are in place before capture begins, but a down server
 		// never delays startup past the timeout.
 		loadCtx, cancelLoad := context.WithTimeout(shipCtx, 10*time.Second)
-		if nets, pairs, ok := syncWiFiKeys(loadCtx, shipper, wifiProc.Keys(), log); ok && nets > 0 {
+		var keySince int64
+		if nets, pairs, ok := syncWiFiKeys(loadCtx, shipper, wifiProc.Keys(), log, &keySince); ok && nets > 0 {
 			log.Info("loaded wifi keys from server", "networks", nets, "pairwise", pairs)
 		}
 		cancelLoad()
@@ -253,7 +256,7 @@ func run(args []string) error {
 				case <-shipCtx.Done():
 					return
 				case <-t.C:
-					syncWiFiKeys(shipCtx, shipper, wifiProc.Keys(), log)
+					syncWiFiKeys(shipCtx, shipper, wifiProc.Keys(), log, &keySince)
 				}
 			}
 		}()
@@ -310,6 +313,19 @@ func run(args []string) error {
 					return perr
 				}
 			}
+			var frequencies []int
+			if *wifiFreqs != "" {
+				var perr error
+				if frequencies, perr = wifi.ParseFrequencies(*wifiFreqs); perr != nil {
+					for _, s := range sources {
+						s.Close()
+					}
+					return perr
+				}
+			}
+			if *wifi6 {
+				frequencies = append(wifi.DefaultFrequencies(), wifi.SixGHzFrequencies()...)
+			}
 			started := 0
 			for _, src := range sources {
 				if !capture.IsWiFi(src.LinkType()) {
@@ -317,7 +333,7 @@ func run(args []string) error {
 				}
 				started++
 				go func(iface string) {
-					h := &wifi.Hopper{Interface: iface, Channels: channels, Dwell: *wifiDwell, Logger: log}
+					h := &wifi.Hopper{Interface: iface, Channels: channels, Frequencies: frequencies, Dwell: *wifiDwell, Logger: log}
 					if err := h.Run(hopCtx); err != nil {
 						log.Warn("wifi channel hopping", "iface", iface, "err", err)
 					}
@@ -353,12 +369,16 @@ func run(args []string) error {
 // fetch error is logged at debug, the keys already held are kept, and the
 // next refresh retries. It reports how many networks and pairwise keys it
 // loaded, and whether the fetch succeeded.
-func syncWiFiKeys(ctx context.Context, shipper *wire.Shipper, keys *wifi.Keyring, log *slog.Logger) (networks, pairwise int, ok bool) {
-	got, err := shipper.FetchWiFiKeys(ctx)
+func syncWiFiKeys(ctx context.Context, shipper *wire.Shipper, keys *wifi.Keyring, log *slog.Logger, since *int64) (networks, pairwise int, ok bool) {
+	// Overlap by a minute: a record can be committed while the fetch is
+	// in flight, and received timestamps are millisecond-granular.
+	until := time.Now().Add(-time.Minute).UnixMilli()
+	got, err := shipper.FetchWiFiKeysSince(ctx, *since)
 	if err != nil {
 		log.Debug("fetch wifi keys", "err", err)
 		return 0, 0, false
 	}
+	*since = until
 	sec := &wifi.Secrets{PMKs: map[string][]byte{}}
 	for _, p := range got.PMKs {
 		if b, err := hex.DecodeString(p.PMK); err == nil && len(b) == 32 && p.SSID != "" {

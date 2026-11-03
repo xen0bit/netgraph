@@ -27,6 +27,14 @@ const (
 // arbitrarily large body.
 const MaxBatchBytes = 64 << 20
 
+// MaxBatchEvents bounds the number of events in one request. The sensor's
+// batches are far smaller; this stops a body full of tiny JSONL lines from
+// turning a byte limit into millions of database operations.
+const MaxBatchEvents = 50_000
+
+// ErrBatchTooLarge reports a batch over MaxBatchBytes or MaxBatchEvents.
+var ErrBatchTooLarge = errors.New("batch too large")
+
 var (
 	encOnce sync.Once
 	enc     *zstd.Encoder
@@ -69,7 +77,7 @@ func Decode(body []byte) ([]Event, error) {
 		return nil, fmt.Errorf("decompress batch: %w", err)
 	}
 	if len(raw) > MaxBatchBytes {
-		return nil, errors.New("batch too large")
+		return nil, ErrBatchTooLarge
 	}
 	return DecodeJSONL(bytes.NewReader(raw))
 }
@@ -89,6 +97,9 @@ func DecodeJSONL(r io.Reader) ([]Event, error) {
 			return nil, fmt.Errorf("line %d: %w", line, err)
 		}
 		out = append(out, ev)
+		if len(out) > MaxBatchEvents {
+			return nil, ErrBatchTooLarge
+		}
 	}
 	return out, sc.Err()
 }

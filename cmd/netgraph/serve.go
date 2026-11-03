@@ -41,6 +41,7 @@ func runServe(args []string) error {
 	alertLearn := fs.String("alert-learn", "24h", "after the first sensor connects, learn the network this long before alerting on new devices")
 	alertAnomalies := fs.String("alert-anomalies", "", "also POST anomalies at or above this severity: low, medium or high (default off)")
 	alertKinds := fs.String("alert-anomaly-kinds", "", "comma-separated anomaly kinds to alert on (default: all kinds at the chosen severity)")
+	reportEvery := fs.String("report-every", envOr("NETGRAPH_REPORT_EVERY", ""), "POST a summary report at this interval, e.g. 24h (needs -alert-webhook); $NETGRAPH_REPORT_EVERY")
 	// Not a systemd credential like the files above: credentials are
 	// capped at about 1 MB together, and the table is several.
 	asnFile := fs.String("asn-file", envOr("NETGRAPH_ASN_FILE", ""), "an iptoasn.com ip2asn-combined.tsv(.gz): name the network and country of remote addresses; reloaded on SIGHUP and when the file changes. Default: the table built into release binaries, if any; none: no table. $NETGRAPH_ASN_FILE")
@@ -99,6 +100,19 @@ func runServe(args []string) error {
 	learnD, err := model.ParseDuration(*alertLearn)
 	if err != nil {
 		return fmt.Errorf("-alert-learn: %w", err)
+	}
+	var reportD time.Duration
+	if *reportEvery != "" {
+		reportD, err = model.ParseDuration(*reportEvery)
+		if err != nil {
+			return fmt.Errorf("-report-every: %w", err)
+		}
+		if reportD <= 0 {
+			return errors.New("-report-every must be positive")
+		}
+	}
+	if reportD > 0 && *alertURL == "" {
+		return errors.New("-report-every needs -alert-webhook")
 	}
 	var notifier *alert.Notifier
 	var onNew func(store.NewDevice)
@@ -176,12 +190,16 @@ func runServe(args []string) error {
 		Addr:              *listen,
 		Handler:           apiSrv,
 		ReadHeaderTimeout: 10 * time.Second,
-		ReadTimeout:       30 * time.Second,
-		IdleTimeout:       2 * time.Minute,
-		ErrorLog:          nil,
+		// Ingest bodies get their own deadline in the handler; a blanket
+		// ReadTimeout would cut off large batches from slow sensors.
+		ReadTimeout:    0,
+		IdleTimeout:    2 * time.Minute,
+		MaxHeaderBytes: 1 << 20,
+		ErrorLog:       nil,
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
+	go reloadTokens(ctx, apiSrv, *tokenFile, *readTokenFile, *noAuth, log)
 	go st.RunRetention(ctx, time.Hour)
 	if notifier != nil {
 		notifier.SetSince(st.FirstSensorSeen)
@@ -190,6 +208,10 @@ func runServe(args []string) error {
 		if *alertAnomalies != "" {
 			go watchAnomalies(ctx, st, notifier, log)
 			log.Info("anomaly alerts on", "minimum", *alertAnomalies)
+		}
+		if reportD > 0 {
+			go reportLoop(ctx, st, notifier, reportD, log)
+			log.Info("scheduled reports on", "every", reportD)
 		}
 	}
 	if *maxDB > 0 {
@@ -243,6 +265,9 @@ func runServe(args []string) error {
 	case <-ctx.Done():
 	}
 	log.Info("shutting down")
+	// SSE responses never become idle, so close them explicitly before
+	// waiting for the HTTP server.
+	apiSrv.Shutdown()
 	sctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	return srv.Shutdown(sctx)
@@ -282,6 +307,51 @@ func diskGuard(ctx context.Context, st *store.Store, target int64, trimRollups b
 	}
 }
 
+// reportLoop posts a window summary on a schedule. It runs on the same
+// webhook as alerts and uses the current window, so a 24h report covers the
+// last day, not a calendar day.
+func reportLoop(ctx context.Context, st *store.Store, n *alert.Notifier, every time.Duration, log *slog.Logger) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case now := <-t.C:
+			f := model.Filter{From: now.Add(-every), To: now}
+			sum, err := st.Summary(ctx, f)
+			if err != nil {
+				if ctx.Err() == nil {
+					log.Error("scheduled report summary", "err", err)
+				}
+				continue
+			}
+			rep, err := st.Anomalies(ctx, f)
+			if err != nil && ctx.Err() == nil {
+				log.Error("scheduled report anomalies", "err", err)
+			}
+			var b strings.Builder
+			fmt.Fprintf(&b, "netgraph report for the last %s: %d devices, %d connections, %s sent, %s received",
+				every, sum.Devices, sum.Flows, model.FormatBytes(sum.BytesOut), model.FormatBytes(sum.BytesIn))
+			if rep != nil {
+				if rep.Learning {
+					b.WriteString("; still learning history")
+				}
+				if len(rep.Anomalies) > 0 {
+					fmt.Fprintf(&b, "; %d anomalies", len(rep.Anomalies))
+					for i, a := range rep.Anomalies {
+						if i == 5 {
+							break
+						}
+						fmt.Fprintf(&b, "\n- [%s] %s", a.Severity, a.Summary)
+					}
+				}
+			}
+			n.NotifyReport(b.String())
+		}
+	}
+}
+
 // watchAnomalies checks the last hour every five minutes and hands new
 // findings to the notifier, which applies its own cooldown.
 func watchAnomalies(ctx context.Context, st *store.Store, n *alert.Notifier, log *slog.Logger) {
@@ -302,6 +372,41 @@ func watchAnomalies(ctx context.Context, st *store.Store, n *alert.Notifier, log
 			for _, a := range rep.Anomalies {
 				n.NotifyAnomaly(a)
 			}
+		}
+	}
+}
+
+// reloadTokens re-reads the token files on SIGHUP. A failed read keeps the
+// previous credentials; a flag with no file and no environment variable is
+// left alone rather than silently becoming open.
+func reloadTokens(ctx context.Context, srv *api.Server, ingestFile, readFile string, noAuth bool, log *slog.Logger) {
+	hup := make(chan os.Signal, 1)
+	signal.Notify(hup, syscall.SIGHUP)
+	defer signal.Stop(hup)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-hup:
+			ingest, read := srv.Tokens()
+			if !noAuth && (ingestFile != "" || os.Getenv("NETGRAPH_TOKEN") != "") {
+				v, err := readSecret(ingestFile, "NETGRAPH_TOKEN")
+				if err != nil {
+					log.Error("reload ingest token; keeping the previous one", "err", err)
+				} else {
+					ingest = v
+				}
+			}
+			if readFile != "" || os.Getenv("NETGRAPH_READ_TOKEN") != "" {
+				v, err := readSecret(readFile, "NETGRAPH_READ_TOKEN")
+				if err != nil {
+					log.Error("reload read token; keeping the previous one", "err", err)
+				} else {
+					read = v
+				}
+			}
+			srv.SetTokens(ingest, read)
+			log.Info("reloaded tokens")
 		}
 	}
 }
