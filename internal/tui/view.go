@@ -198,6 +198,8 @@ func (m Model) body() string {
 		return m.table(devicesCols, len(m.devices), func(i int) []string { return deviceRow(m.devices[i]) })
 	case tabFlows:
 		return m.table(flowsCols, len(m.flows), func(i int) []string { return flowRow(m.flows[i]) })
+	case tabDestinations:
+		return m.table(destinationsCols, len(m.destinations), func(i int) []string { return destinationRow(m.destinations[i]) })
 	case tabDNS:
 		return m.table(dnsCols, len(m.dns), func(i int) []string { return dnsRow(m.dns[i]) })
 	case tabFacts:
@@ -229,10 +231,11 @@ type col struct {
 }
 
 var (
-	devicesCols = []col{{"DEVICE", 24}, {"VENDOR", 14}, {"ADDRESSES", 26}, {"HOSTNAMES/SERVICES", 0}, {"CONNS", 6}, {"DNS", 5}, {"SENT", 8}, {"RECV", 8}}
-	flowsCols   = []col{{"OPENED", 8}, {"DIR", 5}, {"CLIENT", 22}, {"SERVER", 26}, {"NAME", 0}, {"APP", 6}, {"STATE", 13}, {"SENT", 8}, {"RECV", 8}}
-	dnsCols     = []col{{"TIME", 8}, {"DEVICE", 18}, {"TYPE", 5}, {"NAME", 36}, {"RCODE", 8}, {"ANSWERS", 0}}
-	factsCols   = []col{{"REL", 11}, {"FROM", 22}, {"TO", 0}, {"FIRST", 8}, {"LAST", 8}, {"N", 4}, {"SOURCE", 6}}
+	devicesCols      = []col{{"DEVICE", 24}, {"VENDOR", 14}, {"ADDRESSES", 26}, {"HOSTNAMES/SERVICES", 0}, {"CONNS", 6}, {"DNS", 5}, {"SENT", 8}, {"RECV", 8}}
+	flowsCols        = []col{{"OPENED", 8}, {"DIR", 5}, {"CLIENT", 22}, {"SERVER", 26}, {"NAME", 0}, {"APP", 6}, {"STATE", 13}, {"SENT", 8}, {"RECV", 8}}
+	destinationsCols = []col{{"DESTINATION", 36}, {"KIND", 5}, {"CONNS", 6}, {"DEVICES", 7}, {"SENT", 8}, {"RECV", 8}, {"LAST", 0}}
+	dnsCols          = []col{{"TIME", 8}, {"DEVICE", 18}, {"TYPE", 5}, {"NAME", 36}, {"RCODE", 8}, {"ANSWERS", 0}}
+	factsCols        = []col{{"REL", 11}, {"FROM", 22}, {"TO", 0}, {"FIRST", 8}, {"LAST", 8}, {"N", 4}, {"SOURCE", 6}}
 )
 
 func (m Model) table(cols []col, n int, row func(int) []string) string {
@@ -312,6 +315,15 @@ func deviceRow(d model.Device) []string {
 		ids = append(ids, "serves "+strings.Join(d.Serves, ","))
 	}
 	return []string{d.Label, vendor, strings.Join(d.IPs, ","), strings.Join(ids, ", "), strconv.Itoa(d.Flows), strconv.Itoa(d.DNSQueries), model.FormatBytes(d.BytesOut), model.FormatBytes(d.BytesIn)}
+}
+
+func destinationRow(d model.Destination) []string {
+	last := "-"
+	if d.LastSeen > 0 {
+		last = hhmmss(d.LastSeen)
+	}
+	return []string{d.Label, d.Kind, strconv.Itoa(d.Connections), strconv.Itoa(d.Devices),
+		model.FormatBytes(d.BytesOut), model.FormatBytes(d.BytesIn), last}
 }
 
 func flowRow(f model.Flow) []string {

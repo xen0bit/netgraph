@@ -55,6 +55,8 @@ type Shipper struct {
 	mu           sync.Mutex
 	sealMu       sync.Mutex // keeps sealed batches in sequence order
 	sendMu       sync.Mutex // one sender at a time (Run and an explicit Flush)
+	encodeOnce   sync.Once
+	encodeCh     chan encodeJob
 	seq          uint64
 	pending      []Event
 	pendingBytes int
@@ -77,6 +79,11 @@ type batch struct {
 	first, last uint64
 	n           int
 	body        []byte
+}
+
+type encodeJob struct {
+	events []Event
+	done   chan struct{}
 }
 
 // NewShipper returns a Shipper; call Run to start sending.
@@ -119,11 +126,12 @@ func NewShipper(cfg ShipperConfig) *Shipper {
 		}
 	}
 	return &Shipper{
-		cfg:    cfg,
-		boot:   NewBootID(),
-		client: &http.Client{Transport: tr, Timeout: 30 * time.Second},
-		log:    cfg.Logger,
-		wake:   make(chan struct{}, 1),
+		cfg:      cfg,
+		boot:     NewBootID(),
+		client:   &http.Client{Transport: tr, Timeout: 30 * time.Second},
+		log:      cfg.Logger,
+		wake:     make(chan struct{}, 1),
+		encodeCh: make(chan encodeJob, 8),
 	}
 }
 
@@ -142,7 +150,18 @@ func (s *Shipper) Boot() string { return s.boot }
 // sensor can decrypt without a key file of its own and re-derive pairwise
 // keys after a restart or from another sensor's capture.
 func (s *Shipper) FetchWiFiKeys(ctx context.Context) (*WiFiKeys, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.cfg.URL+"/api/v1/wifi/keys", nil)
+	return s.FetchWiFiKeysSince(ctx, 0)
+}
+
+// FetchWiFiKeysSince asks only for handshake and group-key records the
+// server received at or after since (unix ms; zero means all). PMKs and WEP
+// keys are always complete.
+func (s *Shipper) FetchWiFiKeysSince(ctx context.Context, since int64) (*WiFiKeys, error) {
+	u := s.cfg.URL + "/api/v1/wifi/keys"
+	if since > 0 {
+		u += "?since=" + strconv.FormatInt(since, 10)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -190,18 +209,40 @@ func (s *Shipper) Stats() ShipperStats {
 	return st
 }
 
-// seal encodes the pending events into a batch on the spool.
-func (s *Shipper) seal() {
-	// Encoding and appending must stay in one order: two concurrent seals
-	// that took pending events A then B must not spool B before A, or the
-	// server would skip A as a duplicate of B's higher sequence numbers.
+// seal hands the pending events to the encoder and returns a channel that
+// closes when this batch (and every earlier one) is on the spool. Encoding
+// runs off the capture path: zstd on a small router must not delay packet
+// reads. The send can block only when the bounded encode queue is full, so
+// memory stays bounded instead of growing without limit.
+func (s *Shipper) seal() <-chan struct{} {
+	s.encodeOnce.Do(func() {
+		go func() {
+			for job := range s.encodeCh {
+				s.encode(job.events)
+				close(job.done)
+			}
+		}()
+	})
 	s.sealMu.Lock()
-	defer s.sealMu.Unlock()
 	s.mu.Lock()
 	events := s.pending
 	s.pending = nil
 	s.pendingBytes = 0
 	s.mu.Unlock()
+	if len(events) == 0 {
+		s.sealMu.Unlock()
+		done := make(chan struct{})
+		close(done)
+		return done
+	}
+	done := make(chan struct{})
+	s.encodeCh <- encodeJob{events: events, done: done}
+	s.sealMu.Unlock()
+	return done
+}
+
+// encode puts one batch on the spool. It runs on the encoder goroutine.
+func (s *Shipper) encode(events []Event) {
 	if len(events) == 0 {
 		return
 	}
@@ -274,8 +315,26 @@ func nextBackoff(d time.Duration) time.Duration {
 
 // Flush seals pending events and tries to send everything spooled.
 func (s *Shipper) Flush(ctx context.Context) error {
-	s.seal()
+	<-s.seal()
+	<-s.barrier()
 	return s.sendAll(ctx)
+}
+
+// barrier waits for every batch handed to the encoder before it returns.
+func (s *Shipper) barrier() <-chan struct{} {
+	s.encodeOnce.Do(func() {
+		go func() {
+			for job := range s.encodeCh {
+				s.encode(job.events)
+				close(job.done)
+			}
+		}()
+	})
+	done := make(chan struct{})
+	s.sealMu.Lock()
+	s.encodeCh <- encodeJob{done: done}
+	s.sealMu.Unlock()
+	return done
 }
 
 func (s *Shipper) drain() {

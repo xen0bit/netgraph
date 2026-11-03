@@ -22,6 +22,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -63,13 +64,47 @@ type Server struct {
 	log  *slog.Logger
 	keys atomic.Pointer[wifi.Secrets]
 
+	ingestTok   atomic.Pointer[string]
+	readTok     atomic.Pointer[string]
 	ingestStats ingestMetrics
 	liveSubs    atomic.Int32
+	done        chan struct{}
+	doneOnce    sync.Once
 }
+
+// SetTokens replaces the ingest and read tokens, so a SIGHUP can rotate
+// credentials without restarting the server.
+func (s *Server) SetTokens(ingest, read string) {
+	s.ingestTok.Store(&ingest)
+	s.readTok.Store(&read)
+}
+
+func (s *Server) ingestToken() string {
+	if p := s.ingestTok.Load(); p != nil {
+		return *p
+	}
+	return ""
+}
+
+func (s *Server) readToken() string {
+	if p := s.readTok.Load(); p != nil {
+		return *p
+	}
+	return ""
+}
+
+// Tokens returns the current credentials, for a SIGHUP reload to update one
+// without changing the other.
+func (s *Server) Tokens() (ingest, read string) { return s.ingestToken(), s.readToken() }
 
 // SetWiFi replaces the Wi-Fi keys served to sensors, such as after the key
 // file is reloaded. Sensors pick them up on their next sync.
 func (s *Server) SetWiFi(sec *wifi.Secrets) { s.keys.Store(sec) }
+
+// Shutdown ends long-lived streams. http.Server.Shutdown only closes idle
+// connections, so without this an open SSE response keeps the server from
+// finishing a graceful stop until the shutdown deadline.
+func (s *Server) Shutdown() { s.doneOnce.Do(func() { close(s.done) }) }
 
 // New returns a Server.
 func New(cfg Config) *Server {
@@ -79,7 +114,8 @@ func New(cfg Config) *Server {
 	if cfg.MaxBatch <= 0 {
 		cfg.MaxBatch = 32 << 20
 	}
-	s := &Server{cfg: cfg, mux: http.NewServeMux(), log: cfg.Logger}
+	s := &Server{cfg: cfg, mux: http.NewServeMux(), log: cfg.Logger, done: make(chan struct{})}
+	s.SetTokens(cfg.IngestToken, cfg.ReadToken)
 	s.keys.Store(cfg.WiFi)
 	s.mux.HandleFunc("POST /api/v1/ingest", s.ingest)
 	s.mux.HandleFunc("GET /api/v1/wifi/keys", s.wifiKeys)
@@ -229,7 +265,7 @@ func tokenOKQuery(r *http.Request, want string, allowQuery bool) bool {
 
 func (s *Server) requireRead(h http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !tokenOK(r, s.cfg.ReadToken) {
+		if !tokenOK(r, s.readToken()) {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="netgraph"`)
 			httpError(w, http.StatusUnauthorized, errors.New("missing or wrong read token"))
 			return
@@ -240,7 +276,7 @@ func (s *Server) requireRead(h http.HandlerFunc) http.Handler {
 
 func (s *Server) requireLive(h http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !tokenOKQuery(r, s.cfg.ReadToken, true) {
+		if !tokenOKQuery(r, s.readToken(), true) {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="netgraph"`)
 			httpError(w, http.StatusUnauthorized, errors.New("missing or wrong read token"))
 			return
@@ -269,7 +305,7 @@ func (s *Server) version(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
-	if !tokenOK(r, s.cfg.IngestToken) {
+	if !tokenOK(r, s.ingestToken()) {
 		httpError(w, http.StatusUnauthorized, errors.New("missing or wrong ingest token"))
 		return
 	}
@@ -282,6 +318,10 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, fmt.Errorf("missing %s header", wire.HeaderSensor))
 		return
 	}
+	// ReadTimeout is deliberately off at the server: a valid 32 MiB batch
+	// from a slow sensor may take longer than a browser request. Give the
+	// body a generous per-request deadline instead.
+	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(5 * time.Minute))
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, s.cfg.MaxBatch))
 	if err != nil {
 		httpError(w, http.StatusRequestEntityTooLarge, err)
@@ -297,7 +337,11 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 		err = fmt.Errorf("unsupported Content-Encoding %q", r.Header.Get("Content-Encoding"))
 	}
 	if err != nil {
-		httpError(w, http.StatusBadRequest, err)
+		status := http.StatusBadRequest
+		if errors.Is(err, wire.ErrBatchTooLarge) {
+			status = http.StatusRequestEntityTooLarge
+		}
+		httpError(w, status, err)
 		return
 	}
 	start := time.Now()
@@ -376,7 +420,85 @@ func (s *Server) devices(w http.ResponseWriter, r *http.Request) {
 }
 func (s *Server) flows(w http.ResponseWriter, r *http.Request) { answer(s, w, r, s.cfg.Store.Flows) }
 func (s *Server) destinations(w http.ResponseWriter, r *http.Request) {
-	answer(s, w, r, s.cfg.Store.Destinations)
+	f, ok := s.filter(w, r)
+	if !ok {
+		return
+	}
+	ds, err := s.cfg.Store.Destinations(r.Context(), f)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	if r.URL.Query().Get("group") == "site" {
+		ds = groupDestinations(ds)
+	}
+	writeJSON(w, ds)
+}
+
+// groupDestinations folds names under their registrable site for the
+// Destinations view. Addresses stay addresses: an address has no site.
+func groupDestinations(ds []model.Destination) []model.Destination {
+	by := map[string]*model.Destination{}
+	for _, d := range ds {
+		key, kind := d.Key, d.Kind
+		if kind != "ip" {
+			if site := graph.Site(d.Key); site != "" {
+				key = site
+			}
+		}
+		p := by[key]
+		if p == nil {
+			copy := d
+			copy.Key, copy.Label, copy.Kind = key, key, kind
+			if kind != "ip" {
+				copy.Kind = "name"
+			}
+			by[key] = &copy
+			continue
+		}
+		p.Connections += d.Connections
+		// Devices cannot be de-duplicated after aggregation; max is a
+		// lower bound, whereas summing would claim more than exist.
+		p.Devices = max(p.Devices, d.Devices)
+		p.BytesOut += d.BytesOut
+		p.BytesIn += d.BytesIn
+		if d.FirstSeen > 0 && (p.FirstSeen == 0 || d.FirstSeen < p.FirstSeen) {
+			p.FirstSeen = d.FirstSeen
+		}
+		p.LastSeen = max(p.LastSeen, d.LastSeen)
+		p.Ports = unionStrings(p.Ports, d.Ports)
+		p.RemoteIPs = unionStrings(p.RemoteIPs, d.RemoteIPs)
+	}
+	out := make([]model.Destination, 0, len(by))
+	for _, d := range by {
+		out = append(out, *d)
+	}
+	slices.SortFunc(out, func(a, b model.Destination) int {
+		if a.BytesOut+a.BytesIn != b.BytesOut+b.BytesIn {
+			if a.BytesOut+a.BytesIn > b.BytesOut+b.BytesIn {
+				return -1
+			}
+			return 1
+		}
+		return cmp.Compare(a.Key, b.Key)
+	})
+	return out
+}
+
+func unionStrings(a, b []string) []string {
+	seen := map[string]bool{}
+	out := append([]string(nil), a...)
+	for _, s := range out {
+		seen[s] = true
+	}
+	for _, s := range b {
+		if !seen[s] {
+			seen[s] = true
+			out = append(out, s)
+		}
+	}
+	slices.Sort(out)
+	return out
 }
 func (s *Server) dns(w http.ResponseWriter, r *http.Request)   { answer(s, w, r, s.cfg.Store.DNS) }
 func (s *Server) facts(w http.ResponseWriter, r *http.Request) { answer(s, w, r, s.cfg.Store.Facts) }
@@ -404,29 +526,38 @@ func (s *Server) anomalies(w http.ResponseWriter, r *http.Request) {
 // restart, or learn keys another sensor found. It is authorised with the ingest token (the sensor's own
 // credential), and keys are never served without one.
 func (s *Server) wifiKeys(w http.ResponseWriter, r *http.Request) {
-	if s.cfg.IngestToken == "" {
+	if s.ingestToken() == "" {
 		// With -no-auth this endpoint has no credential to check, so it
 		// must not hand out even the non-secret handshake/group-key sync
 		// records. Sensors need an ingest token to sync Wi-Fi keys.
 		httpError(w, http.StatusForbidden, errors.New("wifi keys require an ingest token"))
 		return
 	}
-	if !tokenOK(r, s.cfg.IngestToken) {
+	if !tokenOK(r, s.ingestToken()) {
 		httpError(w, http.StatusUnauthorized, errors.New("missing or wrong ingest token"))
 		return
 	}
-	hs, err := s.cfg.Store.WiFiHandshakes(r.Context())
+	var since int64
+	if raw := r.URL.Query().Get("since"); raw != "" {
+		v, perr := strconv.ParseInt(raw, 10, 64)
+		if perr != nil || v < 0 {
+			httpError(w, http.StatusBadRequest, errors.New("since must be a non-negative unix millisecond timestamp"))
+			return
+		}
+		since = v
+	}
+	hs, err := s.cfg.Store.WiFiHandshakesSince(r.Context(), since)
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, errors.New("query failed"))
 		return
 	}
-	gks, err := s.cfg.Store.WiFiGroupKeys(r.Context())
+	gks, err := s.cfg.Store.WiFiGroupKeysSince(r.Context(), since)
 	if err != nil {
 		httpError(w, http.StatusInternalServerError, errors.New("query failed"))
 		return
 	}
 	out := wire.WiFiKeys{PMKs: []wire.WiFiPMK{}, WEP: []wire.WiFiWEP{}, Handshakes: hs, GroupKeys: gks}
-	if sec := s.keys.Load(); sec != nil && s.cfg.IngestToken != "" {
+	if sec := s.keys.Load(); sec != nil && s.ingestToken() != "" {
 		for ssid, pmk := range sec.PMKs {
 			out.PMKs = append(out.PMKs, wire.WiFiPMK{SSID: ssid, PMK: hex.EncodeToString(pmk)})
 		}
@@ -596,6 +727,12 @@ func (s *Server) graph(w http.ResponseWriter, r *http.Request) {
 
 // live streams ingested events as server-sent events.
 func (s *Server) live(w http.ResponseWriter, r *http.Request) {
+	select {
+	case <-s.done:
+		httpError(w, http.StatusServiceUnavailable, errors.New("server is shutting down"))
+		return
+	default:
+	}
 	if n := s.liveSubs.Add(1); n > 100 {
 		s.liveSubs.Add(-1)
 		httpError(w, http.StatusServiceUnavailable, errors.New("too many live listeners"))
@@ -617,15 +754,36 @@ func (s *Server) live(w http.ResponseWriter, r *http.Request) {
 	fl.Flush()
 	ping := time.NewTicker(25 * time.Second)
 	defer ping.Stop()
+	// Coalesce ingest batches: a busy router can produce several per
+	// second, while the UI only schedules one refresh. The data still
+	// names the events for a future live view, but is bounded.
+	coalesce := time.NewTicker(500 * time.Millisecond)
+	defer coalesce.Stop()
+	var pending []store.LiveEvent
 	for {
+		wrote := false
 		select {
 		case <-r.Context().Done():
 			return
+		case <-s.done:
+			return
 		case <-ping.C:
 			io.WriteString(w, ": ping\n\n")
+			wrote = true
 		case evs := <-ch:
-			b, _ := json.Marshal(evs)
-			fmt.Fprintf(w, "event: ingest\ndata: %s\n\n", b)
+			if len(pending) < 2000 {
+				pending = append(pending, evs...)
+			}
+		case <-coalesce.C:
+			if len(pending) > 0 {
+				b, _ := json.Marshal(pending)
+				fmt.Fprintf(w, "event: ingest\ndata: %s\n\n", b)
+				pending = pending[:0]
+				wrote = true
+			}
+		}
+		if !wrote {
+			continue
 		}
 		_ = rc.SetWriteDeadline(time.Now().Add(30 * time.Second))
 		if err := rc.Flush(); err != nil {

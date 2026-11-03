@@ -27,10 +27,11 @@ const (
 	tabDNS
 	tabFacts
 	tabGraph
+	tabDestinations
 	numTabs
 )
 
-var tabNames = [numTabs]string{"Summary", "Devices", "Flows", "DNS", "Facts", "Graph"}
+var tabNames = [numTabs]string{"Summary", "Devices", "Flows", "DNS", "Facts", "Graph", "Destinations"}
 
 // presets are the window lengths 't' cycles through.
 var presets = []time.Duration{15 * time.Minute, time.Hour, 6 * time.Hour, 24 * time.Hour, 7 * 24 * time.Hour}
@@ -60,17 +61,18 @@ type Model struct {
 	gopts   model.GraphOptions
 	outline bool
 
-	summary *model.Summary
-	series  *model.Timeseries
-	devices []model.Device
-	flows   []model.Flow
-	dns     []model.DNSQuery
-	facts   []model.Fact
-	graph   *model.Graph
-	gtext   string
-	gerr    error
-	gview   viewport.Model
-	outRows []outlineRow
+	summary      *model.Summary
+	series       *model.Timeseries
+	devices      []model.Device
+	flows        []model.Flow
+	destinations []model.Destination
+	dns          []model.DNSQuery
+	facts        []model.Fact
+	graph        *model.Graph
+	gtext        string
+	gerr         error
+	gview        viewport.Model
+	outRows      []outlineRow
 
 	seq       int // drops results of superseded requests
 	loading   int
@@ -207,6 +209,11 @@ func (m *Model) fetchTab(seq int, f model.Filter) tea.Cmd {
 			v, err := be.Flows(context.Background(), f)
 			return dataMsg{seq: seq, kind: t, v: v, err: err}
 		}
+	case tabDestinations:
+		return func() tea.Msg {
+			v, err := be.Destinations(context.Background(), f)
+			return dataMsg{seq: seq, kind: t, v: v, err: err}
+		}
 	case tabDNS:
 		return func() tea.Msg {
 			v, err := be.DNS(context.Background(), f)
@@ -312,6 +319,8 @@ func (m Model) onData(msg dataMsg) (tea.Model, tea.Cmd) {
 		m.devices = msg.v.([]model.Device)
 	case tabFlows:
 		m.flows = msg.v.([]model.Flow)
+	case tabDestinations:
+		m.destinations = msg.v.([]model.Destination)
 	case tabDNS:
 		m.dns = msg.v.([]model.DNSQuery)
 	case tabFacts:
@@ -539,6 +548,8 @@ func (m Model) rows() int {
 		return len(m.summaryDevices())
 	case tabFlows:
 		return len(m.flows)
+	case tabDestinations:
+		return len(m.destinations)
 	case tabDNS:
 		return len(m.dns)
 	case tabFacts:
@@ -619,6 +630,14 @@ func (m Model) selectedEntity() string {
 				return model.EntityID(model.KindDomain, f.Name)
 			}
 			return model.EntityID(model.KindIP, f.RemoteIP)
+		}
+	case tabDestinations:
+		if c < len(m.destinations) {
+			d := m.destinations[c]
+			if d.Kind == "ip" {
+				return model.EntityID(model.KindIP, d.Key)
+			}
+			return model.EntityID(model.KindDomain, d.Key)
 		}
 	case tabDNS:
 		if c < len(m.dns) {

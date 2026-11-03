@@ -58,7 +58,7 @@ func (s *Store) Anomalies(ctx context.Context, f model.Filter) (*model.AnomalyRe
 	}
 	gen := s.anomGen
 	s.anomMu.Unlock()
-	rep := &model.AnomalyReport{FromMS: from, ToMS: to, Anomalies: []model.Anomaly{}}
+	rep := &model.AnomalyReport{FromMS: from, ToMS: to, HistoryMS: AnomalyHistory.Milliseconds(), BaselineMS: anomalyBaseline.Milliseconds(), Anomalies: []model.Anomaly{}}
 	since, err := s.FirstSensorSeen(ctx)
 	if err != nil {
 		return nil, err
@@ -561,14 +561,20 @@ func (a *anomalies) sensorSilence(ctx context.Context) error {
 // a necessary preamble to capturing a handshake for an offline attack. Only
 // frames carrying a reason code are counted; normal roaming produces a few.
 func (a *anomalies) deauthFloods(ctx context.Context) error {
-	const minFrames = 20
+	const (
+		minFrames = 10
+		burstMS   = 5_000
+	)
+	// A flood is a burst, not a week's total: a normal AP and client
+	// roaming disconnects a few times an hour. Count frames in fixed five
+	// second buckets and keep the worst burst per AP.
 	rows, err := a.s.r.QueryContext(ctx, `SELECT json_extract(data, '$.bssid') AS bssid, count(*), min(ts), max(ts),
 		count(DISTINCT json_extract(data, '$.client'))
 		FROM observations
 		WHERE type = 'wifi' AND ts >= ? AND ts < ?
 		  AND json_extract(data, '$.kind') IN ('deauthentication', 'disassociation')
 		  AND coalesce(json_extract(data, '$.bssid'), '') != ''
-		GROUP BY 1 HAVING count(*) >= ? ORDER BY 2 DESC`, a.from, a.to, minFrames)
+		GROUP BY 1, ts / ? HAVING count(*) >= ? ORDER BY 2 DESC`, a.from, a.to, burstMS, minFrames)
 	if err != nil {
 		return err
 	}
@@ -577,18 +583,25 @@ func (a *anomalies) deauthFloods(ctx context.Context) error {
 		n, first, last int64
 		clients        int
 	}
-	var floods []flood
+	byAP := map[string]flood{}
 	for rows.Next() {
 		var f flood
 		if err := rows.Scan(&f.bssid, &f.n, &f.first, &f.last, &f.clients); err != nil {
 			rows.Close()
 			return err
 		}
-		floods = append(floods, f)
+		if old, ok := byAP[f.bssid]; !ok || f.n > old.n {
+			byAP[f.bssid] = f
+		}
 	}
 	if err := rows.Close(); err != nil {
 		return err
 	}
+	var floods []flood
+	for _, f := range byAP {
+		floods = append(floods, f)
+	}
+	slices.SortFunc(floods, func(a, b flood) int { return cmp.Compare(b.n, a.n) })
 	if len(floods) == 0 {
 		return nil
 	}
@@ -615,7 +628,7 @@ func (a *anomalies) deauthFloods(ctx context.Context) error {
 			continue
 		}
 		sev := model.SeverityMedium
-		if f.n >= 100 {
+		if f.n >= 50 {
 			sev = model.SeverityHigh
 		}
 		a.add(model.Anomaly{Kind: model.AnomalyDeauthFlood, Severity: sev, TS: max(f.first, a.from), Device: d.id, DeviceName: d.name,

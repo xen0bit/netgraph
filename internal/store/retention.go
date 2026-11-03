@@ -38,26 +38,28 @@ func (s *Store) Retain(ctx context.Context) (RetentionResult, error) {
 		n   *int64
 		sql string
 		arg int64
+		all bool // run until the statement removes nothing
 	}{
-		{&r.Flows, `DELETE FROM flows WHERE rowid IN (SELECT rowid FROM flows WHERE t_end < ? LIMIT ` + retainChunkSQL + `)`, raw},
-		{&r.Flows, `DELETE FROM connections WHERE flow_key IN (SELECT flow_key FROM connections WHERE last_seen < ? LIMIT ` + retainChunkSQL + `)`, raw},
-		{&r.DNS, `DELETE FROM dns WHERE rowid IN (SELECT rowid FROM dns WHERE ts < ? LIMIT ` + retainChunkSQL + `)`, raw},
-		{&r.Answers, `DELETE FROM dns_answers WHERE rowid IN (SELECT rowid FROM dns_answers WHERE expires < ? LIMIT ` + retainChunkSQL + `)`, raw},
-		{&r.Observations, `DELETE FROM observations WHERE rowid IN (SELECT rowid FROM observations WHERE ts < ? LIMIT ` + retainChunkSQL + `)`, raw},
-		{&r.Facts, `DELETE FROM facts WHERE rowid IN (SELECT rowid FROM facts WHERE last_seen < ? LIMIT ` + retainChunkSQL + `)`, roll},
-		// The rollups are WITHOUT ROWID; they are small enough to delete
-		// in one statement.
-		{&r.Rollups, `DELETE FROM traffic_hourly WHERE bucket < ?`, roll},
-		{&r.Rollups, `DELETE FROM dns_hourly WHERE bucket < ?`, roll},
+		{&r.Flows, `DELETE FROM flows WHERE rowid IN (SELECT rowid FROM flows WHERE t_end < ? LIMIT ` + retainChunkSQL + `)`, raw, false},
+		{&r.Flows, `DELETE FROM connections WHERE flow_key IN (SELECT flow_key FROM connections WHERE last_seen < ? LIMIT ` + retainChunkSQL + `)`, raw, false},
+		{&r.DNS, `DELETE FROM dns WHERE rowid IN (SELECT rowid FROM dns WHERE ts < ? LIMIT ` + retainChunkSQL + `)`, raw, false},
+		{&r.Answers, `DELETE FROM dns_answers WHERE rowid IN (SELECT rowid FROM dns_answers WHERE expires < ? LIMIT ` + retainChunkSQL + `)`, raw, false},
+		{&r.Observations, `DELETE FROM observations WHERE rowid IN (SELECT rowid FROM observations WHERE ts < ? LIMIT ` + retainChunkSQL + `)`, raw, false},
+		{&r.Facts, `DELETE FROM facts WHERE rowid IN (SELECT rowid FROM facts WHERE last_seen < ? LIMIT ` + retainChunkSQL + `)`, roll, false},
+		// The rollups are WITHOUT ROWID. Delete a few hours at a time:
+		// one unbounded DELETE can hold the ingest lock for a long time
+		// after a long capture or a missed retention run.
+		{&r.Rollups, `DELETE FROM traffic_hourly WHERE bucket IN (SELECT bucket FROM traffic_hourly WHERE bucket < ? ORDER BY bucket LIMIT 6)`, roll, true},
+		{&r.Rollups, `DELETE FROM dns_hourly WHERE bucket IN (SELECT bucket FROM dns_hourly WHERE bucket < ? ORDER BY bucket LIMIT 24)`, roll, true},
 		// A handshake's key stays valid while the client stays associated,
 		// which can be months for a fixed device, so these follow the
 		// rollups. Without a limit, clients with rotating private MACs
 		// would grow the table (and every sensor's key sync) forever.
-		{&r.Handshakes, `DELETE FROM wifi_handshakes WHERE ts < ?`, roll},
+		{&r.Handshakes, `DELETE FROM wifi_handshakes WHERE rowid IN (SELECT rowid FROM wifi_handshakes WHERE ts < ? LIMIT 5000)`, roll, true},
 		// At most four rows per AP, and an AP that never rekeys keeps
 		// its GTK for as long as it runs, so these follow the rollups too.
-		{&r.Handshakes, `DELETE FROM wifi_group_keys WHERE ts < ?`, roll},
-		{&r.Mutes, `DELETE FROM anomaly_mutes WHERE until < ?`, now.UnixMilli()},
+		{&r.Handshakes, `DELETE FROM wifi_group_keys WHERE rowid IN (SELECT rowid FROM wifi_group_keys WHERE ts < ? LIMIT 5000)`, roll, true},
+		{&r.Mutes, `DELETE FROM anomaly_mutes WHERE until < ?`, now.UnixMilli(), true},
 	}
 	// Each chunk takes the ingest lock for itself, so ingest runs between
 	// them. Deleting a fact ingest still has open is harmless: a fact past
@@ -85,7 +87,34 @@ func (s *Store) Retain(ctx context.Context) (RetentionResult, error) {
 			}
 		}
 	}
+	// Rollup and key deletes are grouped by a bucket/row window, so the
+	// old `k < retainChunk` stopping rule is wrong: a small window may
+	// leave older rows behind. Run until the statement removes nothing.
+	runAll := func(n *int64, sql string, arg int64) error {
+		for {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			s.mu.Lock()
+			res, err := s.w.ExecContext(ctx, sql, arg)
+			s.mu.Unlock()
+			if err != nil {
+				return err
+			}
+			k, _ := res.RowsAffected()
+			*n += k
+			if k == 0 {
+				return nil
+			}
+		}
+	}
 	for _, st := range steps {
+		if st.all {
+			if err := runAll(st.n, st.sql, st.arg); err != nil {
+				return r, err
+			}
+			continue
+		}
 		if err := run(st.n, st.sql, st.arg, true); err != nil {
 			return r, err
 		}

@@ -198,6 +198,10 @@ dialog menu { padding: 0; margin: 12px 0 0; display: flex; justify-content: flex
   .window input[type="datetime-local"] { width: 100%; }
   .panel { position: absolute; inset: 0; width: 100%; z-index: 2; }
   .timeline-meta .hint { display: none; }
+  .tabs { overflow-x: auto; white-space: nowrap; }
+  .view { overflow-x: auto; }
+  .table-tools { flex-wrap: wrap; }
+  .diagram { min-height: 220px; }
 }
 .anomaly-box button { margin-top: 8px; }
 .status button { font-size: 12px; padding: 1px 8px; }

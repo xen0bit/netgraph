@@ -78,7 +78,7 @@ TIME                 DEVICE           TYPE  NAME               RCODE     MS    A
 |---|---|
 | `query summary` | headline numbers |
 | `query devices` | devices active in the window, with addresses, names, services, traffic |
-| `query destinations` | remote ends aggregated by name/address, with connections and traffic |
+| `query destinations` | remote ends aggregated by name/address, with connections, traffic and ports |
 | `query flows` | connections, with the bytes each carried **inside** the window and their state (`opened`, `carried`, `closed:fin/rst/idle`); with an ASN table, a NETWORK column names the remote end's |
 | `query dns` | lookups, answers, TTLs, response times |
 | `query facts` | relationships that held in the window: `has_ip`, `hostname`, `announces`, `resolves_to`, `cname`, `serves`, `fingerprint`, `user_agent`, `upnp`, `neighbor` |

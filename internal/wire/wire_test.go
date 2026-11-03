@@ -1,7 +1,9 @@
 package wire
 
 import (
+	"bytes"
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -156,11 +158,22 @@ func TestShipperConcurrentEmitKeepsOrder(t *testing.T) {
 	}
 }
 
+func TestDecodeJSONLEventLimit(t *testing.T) {
+	var b bytes.Buffer
+	for i := 0; i <= MaxBatchEvents; i++ {
+		b.WriteString("{\"type\":\"stats\",\"ts\":\"2026-10-25T12:00:00Z\"}\n")
+	}
+	if _, err := DecodeJSONL(&b); !errors.Is(err, ErrBatchTooLarge) {
+		t.Fatalf("DecodeJSONL = %v, want ErrBatchTooLarge", err)
+	}
+}
+
 func TestShipperSpoolBound(t *testing.T) {
 	s := NewShipper(ShipperConfig{URL: "http://127.0.0.1:1", MaxEvents: 5, SpoolBytes: 1})
 	for _, ev := range sampleEvents(50) {
 		s.Emit(ev)
 	}
+	<-s.barrier()
 	st := s.Stats()
 	// Every sealed batch but the newest must have been dropped.
 	if st.EventsDropped != 45 || st.Queued != 5 {

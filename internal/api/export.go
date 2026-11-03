@@ -24,6 +24,8 @@ func (s *Server) export(w http.ResponseWriter, r *http.Request) {
 	}
 	kind := r.URL.Query().Get("kind")
 	ctx := r.Context()
+	all := r.URL.Query().Get("all") == "1"
+	f.All = all
 	max := 0
 	switch kind {
 	case "":
@@ -31,20 +33,30 @@ func (s *Server) export(w http.ResponseWriter, r *http.Request) {
 		fallthrough
 	case "flows":
 		max = 100000
-		f.Limit = exportLimit(f.Limit, max)
+		if !all {
+			f.Limit = exportLimit(f.Limit, max)
+		}
 	case "devices":
 		max = 100000
-		f.Limit = exportLimit(f.Limit, max)
+		if !all {
+			f.Limit = exportLimit(f.Limit, max)
+		}
 	case "dns":
 		max = 50000
-		f.Limit = exportLimit(f.Limit, max)
+		if !all {
+			f.Limit = exportLimit(f.Limit, max)
+		}
 	case "facts":
 		max = 100000
-		f.Limit = exportLimit(f.Limit, max)
+		if !all {
+			f.Limit = exportLimit(f.Limit, max)
+		}
 	case "anomalies":
 	case "wifi":
 		max = 10000
-		f.Limit = exportLimit(f.Limit, max)
+		if !all {
+			f.Limit = exportLimit(f.Limit, max)
+		}
 	default:
 		httpError(w, http.StatusBadRequest, fmt.Errorf("unknown export kind %q (devices, flows, dns, facts, anomalies, wifi)", kind))
 		return

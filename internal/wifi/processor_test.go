@@ -256,3 +256,48 @@ func TestProcessorOutOfOrderFragments(t *testing.T) {
 		t.Fatalf("out-of-order reassembly = %x", got)
 	}
 }
+
+func TestProcessorFragmentedTKIPVerifiesWholeMSDU(t *testing.T) {
+	const ap, sta = "aa:bb:cc:00:00:01", "3c:22:fb:01:02:03"
+	k := NewKeyring()
+	if err := k.AddPassphrase("home", "correct horse battery"); err != nil {
+		t.Fatal(err)
+	}
+	// Key version 1 is TKIP.
+	if ok, err := k.LoadHandshake(ap, sta, "home", bytes.Repeat([]byte{1}, 32), bytes.Repeat([]byte{2}, 32), 1); err != nil || !ok {
+		t.Fatalf("LoadHandshake: %v %v", ok, err)
+	}
+	var got [][]byte
+	p := NewProcessor(Config{Keys: k, Data: func(_ time.Time, eth []byte) { got = append(got, append([]byte(nil), eth...)) }})
+	llc := mustHex(t, "aaaa0300000008004500001c00000000401100000a0000010a000002")
+	tk := k.ptk(ap, sta).TK
+	hdr := dataHeader(0x4188, false, true)
+	mic := michaelMIC(tk[24:32], append(append([]byte(nil), michaelHeader(hdr)...), llc...))
+	msdu := append(append([]byte(nil), llc...), mic[:]...)
+	mk := func(frag int, more bool, part []byte) []byte {
+		h := dataHeader(0x4188, false, true)
+		if more {
+			h[1] |= 0x04
+		}
+		h[22] = byte(0x30 | frag)
+		iv16 := uint16(100 + frag)
+		iv32 := uint32(7)
+		rc4key := tkipPhase2(tk[:16], tkipPhase1(tk[:16], h[10:16], iv32), iv16)
+		body := make([]byte, 8, 8+len(part)+4)
+		body[0] = byte(iv16 >> 8)
+		body[1] = byte((iv16>>8)|0x20) & 0x7f
+		body[2] = byte(iv16)
+		body[3] = 0x20
+		binary.LittleEndian.PutUint32(body[4:], iv32)
+		body = append(body, wepSealRaw(rc4key[:], part)...)
+		return append(append([]byte(nil), h...), body...)
+	}
+	p.Handle(time.Unix(0, 0), mk(0, true, msdu[:20]), false)
+	if len(got) != 0 {
+		t.Fatal("first TKIP fragment was emitted")
+	}
+	p.Handle(time.Unix(0, 0), mk(1, false, msdu[20:]), false)
+	if len(got) != 1 || len(got[0]) != 14+20 {
+		t.Fatalf("reassembled TKIP Ethernet = %x", got)
+	}
+}
