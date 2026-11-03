@@ -35,6 +35,10 @@ what:
   timeline     the event rail over the window
   story ID     one entity's intervals and milestones
   diff         what changed between -at-a and -at-b
+  exposure     reachable/weak findings, from recorded evidence
+  coverage     which sensors saw which devices
+  airspace     Wi-Fi APs, clients, channels and rogue flags
+  weather      observed traffic and a simple forecast
 `
 
 func runQuery(args []string) error {
@@ -219,6 +223,30 @@ func runQuery(args []string) error {
 		if *out != "json" {
 			return writeDiff(w, df, *out)
 		}
+	case "exposure":
+		r, err := be.Exposure(ctx(), filter)
+		if err != nil {
+			return err
+		}
+		v, t = r, exposureTable(r.Findings)
+	case "coverage":
+		r, err := be.Coverage(ctx(), filter)
+		if err != nil {
+			return err
+		}
+		v, t = r, coverageTable(r)
+	case "airspace":
+		r, err := be.Airspace(ctx(), filter)
+		if err != nil {
+			return err
+		}
+		v, t = r, airspaceTable(r.Networks)
+	case "weather":
+		r, err := be.Weather(ctx(), filter)
+		if err != nil {
+			return err
+		}
+		v, t = r, weatherTable(r)
 	case "sensors":
 		ss, err := be.Sensors(ctx())
 		if err != nil {
@@ -494,4 +522,43 @@ func writeDiff(w io.Writer, d *model.Diff, format string) error {
 		fmt.Fprintf(w, "gap: %s\n", g)
 	}
 	return nil
+}
+
+func exposureTable(fs []model.ExposureFinding) *table {
+	t := &table{head: []string{"SEVERITY", "KIND", "ENTITY", "SUMMARY"}}
+	for _, f := range fs {
+		t.add(f.Severity, f.Kind, f.Entity, clip(f.Summary, 80))
+	}
+	return t
+}
+
+func coverageTable(c *model.CoverageReport) *table {
+	t := &table{head: []string{"KIND", "NAME", "DEVICES", "ONLY", "LAST", "SENSORS"}}
+	for _, s := range c.Sensors {
+		t.add("sensor", s.Name, strconv.Itoa(s.Devices), strconv.Itoa(s.OnlyDevice), ts(s.LastSeen), strings.Join(s.Interfaces, ","))
+	}
+	for _, d := range c.Devices {
+		t.add("device", d.Label, "", "", "", strings.Join(d.Sensors, ","))
+	}
+	return t
+}
+
+func airspaceTable(ns []model.AirspaceNetwork) *table {
+	t := &table{head: []string{"BSSID", "SSID", "SECURITY", "CHANNEL", "CLIENTS", "ROGUE", "LAST"}}
+	for _, n := range ns {
+		t.add(n.BSSID, n.SSID, n.Security, strconv.Itoa(n.Channel), strconv.Itoa(len(n.Clients)), strconv.FormatBool(n.Rogue), ts(n.LastSeen))
+	}
+	return t
+}
+
+func weatherTable(w *model.WeatherReport) *table {
+	t := &table{head: []string{"TIME", "SENT", "RECV", "FLOWS", "DNS", "DEVICES", "FORECAST", "BAND"}}
+	for _, p := range w.Points {
+		band := ""
+		if p.Forecast {
+			band = model.FormatBytes(p.Lower) + "–" + model.FormatBytes(p.Upper)
+		}
+		t.add(ts(p.TS), model.FormatBytes(p.BytesOut), model.FormatBytes(p.BytesIn), strconv.Itoa(p.Flows), strconv.Itoa(p.DNS), strconv.Itoa(p.Devices), strconv.FormatBool(p.Forecast), band)
+	}
+	return t
 }

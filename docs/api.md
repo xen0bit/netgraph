@@ -59,6 +59,10 @@ are unix milliseconds.
 | `DELETE /api/v1/incidents/{id}` | remove an incident and its notes/evidence. Read token. |
 | `POST /api/v1/whatif` | run a proposed policy against observed traffic: `{policy, from, to}`. Read-only; never applies a rule. Read token. |
 | `POST /api/v1/ask` | grounded question answering: `{q, from, to}`. Returns claims, citations, plan and gaps. Read token. |
+| `GET /api/v1/exposure` | read-only exposure inventory: weak Wi-Fi, inbound services, anomalies and stale sensors, with evidence and gaps. |
+| `GET /api/v1/coverage` | which sensors saw which devices, per-sensor health and devices seen by only one sensor. |
+| `GET /api/v1/airspace` | Wi-Fi APs, channels, clients, rogue flags and gaps. |
+| `GET /api/v1/weather` | observed traffic buckets and a simple moving-mean forecast with a band. |
 | `GET /api/v1/export?kind=flows` | CSV of every field the API returns for that table (`devices`, `flows`, `dns`, `facts`, `anomalies`, `wifi`). It uses the same window and filters and streams most kinds from the database, so it is not limited to what the browser loaded. Default safety caps: connections and facts 100,000 rows, lookups 50,000, Wi-Fi networks 10,000, devices and anomalies materialised in memory. Add `all=1` to stream every matching row (hard ceiling 5,000,000); the web "All CSV" uses it. Read token |
 | `GET /api/v1/anomalies` | the window's [anomalies](concepts.md#anomalies), most severe first: `{from, to, since, learning, anomalies: [{kind, severity, ts, device, device_name, entity, summary, evidence}]}`. Only the `device` filter applies. Read token |
 | `GET /api/v1/anomalies/mutes` | `{mutes: [{kind, device, entity, until, note, created}]}`, active mutes only. Read token |

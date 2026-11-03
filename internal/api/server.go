@@ -141,6 +141,10 @@ func New(cfg Config) *Server {
 	read("/api/v1/timeline", s.timeline)
 	read("/api/v1/story", s.story)
 	read("/api/v1/diff", s.diff)
+	read("/api/v1/exposure", s.exposure)
+	read("/api/v1/coverage", s.coverage)
+	read("/api/v1/airspace", s.airspace)
+	read("/api/v1/weather", s.weather)
 	read("/api/v1/autopsy", s.autopsyPreview)
 	read("/api/v1/incidents", s.incidents)
 	read("/api/v1/incidents/{id}", s.incident)
@@ -696,6 +700,22 @@ func parseLookback(q map[string][]string, def time.Duration) (time.Duration, err
 		return 0, fmt.Errorf("lookback must be a positive duration up to 90d")
 	}
 	return d, nil
+}
+
+func (s *Server) exposure(w http.ResponseWriter, r *http.Request) {
+	answer(s, w, r, s.cfg.Store.Exposure)
+}
+
+func (s *Server) coverage(w http.ResponseWriter, r *http.Request) {
+	answer(s, w, r, s.cfg.Store.Coverage)
+}
+
+func (s *Server) airspace(w http.ResponseWriter, r *http.Request) {
+	answer(s, w, r, s.cfg.Store.Airspace)
+}
+
+func (s *Server) weather(w http.ResponseWriter, r *http.Request) {
+	answer(s, w, r, s.cfg.Store.Weather)
 }
 
 func (s *Server) frame(w http.ResponseWriter, r *http.Request) {

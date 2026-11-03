@@ -93,6 +93,10 @@ TIME                 DEVICE           TYPE  NAME               RCODE     MS    A
 | `query diff -at-a ... -at-b ...` | what changed between two moments |
 | `whatif -policy FILE` | test a proposed policy against observed traffic; read-only |
 | `ask "question"` | answer from recorded evidence; prints claims and citations |
+| `query exposure` | reachable/weak findings, from recorded evidence |
+| `query coverage` | which sensors saw which devices |
+| `query airspace` | Wi-Fi APs, clients, channels and rogue flags |
+| `query weather` | observed traffic and a simple forecast |
 | `graph -o FILE` | the window's graph: `.svg`, `.d2`, `.txt`, `.json`, or `-` for text on stdout |
 | `label MAC NAME...`, `label -clear MAC` | name a device by hand; it overrides DHCP, mDNS and every other source until cleared. With `-server` it goes through the API; without, it writes the database file (stop the server first) |
 | `import FILE.pcap...` | ingest captures directly (re-importing a file is a no-op) |
