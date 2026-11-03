@@ -30,9 +30,10 @@ are unix milliseconds.
 |---|---|
 | `GET /api/v1/summary` | `{devices, flows, inbound, peak_connections, dns_queries, domains, remote_ips, bytes_out, bytes_in, precision, ...}`; bytes are what devices here sent and received |
 | `GET /api/v1/devices` | `[{id, mac, label, user_label, auto_label, vendor, vendor_short, randomized, role, ips, hostnames, services, serves, fingerprints, user_agents, flows, inbound, dns_queries, bytes_out, bytes_in, remotes, active_from, active_to, first_seen, last_seen}]`; `serves` lists the ports clients connected to (`443/tcp`), `inbound` how many connections came in from outside |
+| `GET /api/v1/destinations` | `[{key, kind, label, connections, devices, bytes_out, bytes_in, first_seen, last_seen}]`: remote ends aggregated by name, or by address when no name is known, busiest first. Uses the window and filters. |
 | `GET /api/v1/flows` | `[{key, proto, client_ip, client_port, server_ip, server_port, device, device_name, device_mac, remote_ip, remote_port, peer_device, peer_name, direction, app, name, sni, http_host, qname, alpn, ja4, user_agent, asn, as_org, country, first_seen, last_seen, state, closed, end_reason, bytes_out, bytes_in, pkts_out, pkts_in, connections}]`, busiest first (see [Flows](#flows)) |
 | `GET /api/v1/dns` | `[{ts, client_ip, device, device_name, server, qname, qtype, rcode, latency_ms, count, answers: [{name, type, data, ttl, expires}]}]`, newest first; `count` is set on hourly rollup rows |
-| `GET /api/v1/facts` | `[{rel, src, src_label, dst, dst_label, first_seen, last_seen, count, source, attrs}]` |
+| `GET /api/v1/facts` | `[{rel, src, src_label, dst, dst_label, first_seen, last_seen, count, source, attrs}]`; facts support the window and the `device`, `domain` and `ip` filters only |
 | `GET /api/v1/timeseries?step=5m` | `{step, precision, buckets: [{ts, bytes_out, bytes_in, flows_new, dns_queries, devices}]}` |
 | `GET /api/v1/graph` | `{from, to, precision, truncated, nodes: [{id, kind, label, sub, local, bytes_out, bytes_in, attrs}], edges: [{from, to, rel, count, bytes_out, bytes_in, carried, opened, closed, peak, ports, ttl, first_seen, last_seen, attrs}]}` |
 | `GET /api/v1/graph?format=svg\|d2\|txt` | the graph drawn by the server; `theme=dark`, `layout=elk\|dagre` |
@@ -42,8 +43,8 @@ are unix milliseconds.
 | `GET /api/v1/live` | server-sent events: `event: ingest` with `[{type, ts, detail}]` per batch |
 | `PUT /api/v1/devices/{mac}/label` | names a device by hand: body `{"label": "Living room TV"}` (JSON required; at most 64 printable characters), `{"label": ""}` restores the automatic name. `204`, or `400`/`404`. Read token |
 | `GET /api/v1/search?q=alice&limit=20` | `[{id, kind, key, label, last_seen}]`: devices (by MAC, name or label), addresses, DNS names and networks whose key starts with `q` or whose name contains it; exact keys first, then devices, then the most recently seen. `q` needs two characters; `kind:q` (`device:3c:22`) searches one kind. `limit` is at most 100 (default 20). Read token |
-| `GET /api/v1/export?kind=flows` | CSV of every field the API returns for that table (`devices`, `flows`, `dns`, `facts`, `anomalies`, `wifi`). It uses the same window and filters and streams each row from the database, so it is not limited to what the browser loaded or to the memory of the process. Read token |
-| `GET /api/v1/anomalies` | the window's [anomalies](concepts.md#anomalies), most severe first: `{from, to, since, learning, anomalies: [{kind, severity, ts, device, device_name, entity, summary, evidence}]}`. Read token |
+| `GET /api/v1/export?kind=flows` | CSV of every field the API returns for that table (`devices`, `flows`, `dns`, `facts`, `anomalies`, `wifi`). It uses the same window and filters and streams most kinds from the database, so it is not limited to what the browser loaded. Safety caps: connections and facts 100,000 rows, lookups 50,000, Wi-Fi networks 10,000, devices and anomalies materialised in memory. Read token |
+| `GET /api/v1/anomalies` | the window's [anomalies](concepts.md#anomalies), most severe first: `{from, to, since, learning, anomalies: [{kind, severity, ts, device, device_name, entity, summary, evidence}]}`. Only the `device` filter applies. Read token |
 | `GET /api/v1/anomalies/mutes` | `{mutes: [{kind, device, entity, until, note, created}]}`, active mutes only. Read token |
 | `POST /api/v1/anomalies/mute` | JSON body (`Content-Type: application/json`) `{kind, device, entity, until, note}`; empty fields are wildcards, `until` is unix ms (default one day). Read token |
 | `DELETE /api/v1/anomalies/mute?kind=...&device=...&entity=...` | remove that exact mute. Read token |
@@ -134,12 +135,15 @@ sensors call it automatically on startup and every minute. The response is
   server's `-wifi-key-file`. Passphrases are not sent; the server derives
   the PMKs.
 - `wep`: `[{index, key}]`, the configured WEP keys (hex).
-- `handshakes`: `[{bssid, sta, ssid, anonce, snonce, key_version}]`, the
+- `handshakes`: `[{bssid, sta, ssid, anonce, snonce, key_version, cipher}]`, the
   latest stored 4-way handshake nonces per client, from `wifi_key` events.
   These are broadcast in the clear and decrypt nothing on their own; with a
   network's PMK they let a restarted or additional sensor re-derive the
   pairwise key without seeing the handshake again.
 
+  `cipher` is the pairwise cipher the station chose in message 2, so a
+  restarted sensor does not have to guess between CCMP and GCMP-256 from a
+  transition network's beacon.
 - `group_keys`: `[{bssid, sta, ssid, key_id, anonce, snonce, descriptor,
   key_info, key_length, iv, key_data, ts}]`, the latest group key per AP and
   key ID from `wifi_gtk` events: the EAPOL-Key fields with `key_data` still

@@ -69,7 +69,7 @@ func (s *Store) Anomalies(ctx context.Context, f model.Filter) (*model.AnomalyRe
 	history := rep.SinceMS != 0 && from-rep.SinceMS >= AnomalyHistory.Milliseconds()
 	rep.Learning = !history
 	a := &anomalies{s: s, from: from, to: to, since: rep.SinceMS, devs: map[int64]*anomalyDevice{}}
-	checks := []func(context.Context) error{a.newDevices, a.beacons, a.dns, a.accessPoints, a.scans, a.bruteForce, a.arpConflicts, a.rogueDHCP}
+	checks := []func(context.Context) error{a.newDevices, a.beacons, a.dns, a.accessPoints, a.deauthFloods, a.sensorSilence, a.scans, a.bruteForce, a.arpConflicts, a.rogueDHCP}
 	if history {
 		checks = append(checks, a.newDestinations, a.uploadSpikes, a.newServices, a.inboundSurges)
 	}
@@ -426,6 +426,30 @@ func (a *anomalies) uploadSpikes(ctx context.Context) error {
 	if err := rows.Close(); err != nil {
 		return err
 	}
+	// The window's busiest hour, not its average: a 7-day window must not
+	// dilute a burst into "a few MB an hour".
+	cur := map[int64]map[int64]float64{}
+	rows, err = a.s.r.QueryContext(ctx, `SELECT client_device, bucket, sum(bytes_out) FROM traffic_hourly
+		WHERE bucket >= ? AND bucket < ? AND multicast = 0 AND client_device != 0 AND direction != 'in' GROUP BY client_device, bucket`,
+		hourOf(a.from), a.to)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var dev, bucket int64
+		var b float64
+		if err := rows.Scan(&dev, &bucket, &b); err != nil {
+			rows.Close()
+			return err
+		}
+		if cur[dev] == nil {
+			cur[dev] = map[int64]float64{}
+		}
+		cur[dev][bucket] = b
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
 	hours := map[int64][]float64{}
 	rows, err = a.s.r.QueryContext(ctx, `SELECT client_device, sum(bytes_out) FROM traffic_hourly
 		WHERE bucket >= ? AND bucket + 3600000 <= ? AND multicast = 0 AND client_device != 0 AND direction != 'in' GROUP BY client_device, bucket HAVING sum(bytes_out) > 0`,
@@ -457,7 +481,15 @@ func (a *anomalies) uploadSpikes(ctx context.Context) error {
 		if d == nil {
 			continue
 		}
-		rate := up[dev] / span
+		rate, ts := up[dev]/span, max(first[dev], a.from)
+		if a.to-a.from >= time.Hour.Milliseconds() {
+			rate = 0
+			for bucket, b := range cur[dev] {
+				if b > rate {
+					rate, ts = b, max(bucket, a.from)
+				}
+			}
+		}
 		spike, high, median, peak := anomaly.Spike(rate, hours[dev])
 		if !spike {
 			continue
@@ -466,11 +498,130 @@ func (a *anomalies) uploadSpikes(ctx context.Context) error {
 		if high {
 			sev = model.SeverityHigh
 		}
-		a.add(model.Anomaly{Kind: model.AnomalyUploadSpike, Severity: sev, TS: max(first[dev], a.from), Device: d.id, DeviceName: d.name,
+		a.add(model.Anomaly{Kind: model.AnomalyUploadSpike, Severity: sev, TS: ts, Device: d.id, DeviceName: d.name,
 			Summary: fmt.Sprintf("%s sent %s (%s an hour); its busiest hour in the last 7 days was %s, a typical one %s", d.name,
 				model.FormatBytes(uint64(up[dev])), model.FormatBytes(uint64(rate)), model.FormatBytes(uint64(peak)), model.FormatBytes(uint64(median))),
 			Evidence: map[string]string{"uploaded": model.FormatBytes(uint64(up[dev])), "per_hour": model.FormatBytes(uint64(rate)),
 				"busiest_hour": model.FormatBytes(uint64(peak)), "typical_hour": model.FormatBytes(uint64(median)), "hours": strconv.Itoa(len(hours[dev]))}})
+	}
+	return nil
+}
+
+// cdnSite reports a content-delivery domain whose normal traffic looks like
+// a DNS tunnel: many unique, long first labels under one registrable name.
+func cdnSite(site string) bool {
+	for _, suffix := range []string{
+		"amazonaws.com", "cloudfront.net", "fastly.net", "akamai.net",
+		"akamaized.net", "akamaiedge.net", "edgekey.net", "edgesuite.net",
+		"googlevideo.com", "nflxvideo.net", "fbcdn.net", "cdninstagram.com",
+		"tiktokcdn.com", "byteoversea.com", "douyincdn.com", "kwai.net",
+		"spotifycdn.com", "scdn.co", "azureedge.net", "trafficmanager.net",
+	} {
+		if site == suffix || strings.HasSuffix(site, "."+suffix) {
+			return true
+		}
+	}
+	return false
+}
+
+// sensorSilence reports a sensor that has stopped reporting. It only runs
+// for a window that ends near now: a historical window is not a live health
+// check.
+func (a *anomalies) sensorSilence(ctx context.Context) error {
+	now := a.s.cfg.Now().UnixMilli()
+	if now-a.to > 5*60*1000 || a.to < a.from {
+		return nil
+	}
+	stale := now - 2*60*1000
+	rows, err := a.s.r.QueryContext(ctx, `SELECT name, last_seen FROM sensors WHERE last_seen < ? ORDER BY last_seen`, stale)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name string
+		var last int64
+		if err := rows.Scan(&name, &last); err != nil {
+			return err
+		}
+		sev := model.SeverityMedium
+		if now-last >= 10*60*1000 {
+			sev = model.SeverityHigh
+		}
+		a.add(model.Anomaly{Kind: model.AnomalySensorSilent, Severity: sev, TS: last,
+			DeviceName: name, Entity: "sensor:" + name,
+			Summary:  fmt.Sprintf("sensor %s has not reported for %s", name, time.Since(time.UnixMilli(last)).Round(time.Second)),
+			Evidence: map[string]string{"sensor": name, "last_seen": time.UnixMilli(last).UTC().Format(time.RFC3339)}})
+	}
+	return rows.Err()
+}
+
+// deauthFloods finds an access point sending a burst of deauthentication or
+// disassociation frames: the classic way to knock clients off a network, and
+// a necessary preamble to capturing a handshake for an offline attack. Only
+// frames carrying a reason code are counted; normal roaming produces a few.
+func (a *anomalies) deauthFloods(ctx context.Context) error {
+	const minFrames = 20
+	rows, err := a.s.r.QueryContext(ctx, `SELECT json_extract(data, '$.bssid') AS bssid, count(*), min(ts), max(ts),
+		count(DISTINCT json_extract(data, '$.client'))
+		FROM observations
+		WHERE type = 'wifi' AND ts >= ? AND ts < ?
+		  AND json_extract(data, '$.kind') IN ('deauthentication', 'disassociation')
+		  AND coalesce(json_extract(data, '$.bssid'), '') != ''
+		GROUP BY 1 HAVING count(*) >= ? ORDER BY 2 DESC`, a.from, a.to, minFrames)
+	if err != nil {
+		return err
+	}
+	type flood struct {
+		bssid          string
+		n, first, last int64
+		clients        int
+	}
+	var floods []flood
+	for rows.Next() {
+		var f flood
+		if err := rows.Scan(&f.bssid, &f.n, &f.first, &f.last, &f.clients); err != nil {
+			rows.Close()
+			return err
+		}
+		floods = append(floods, f)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	if len(floods) == 0 {
+		return nil
+	}
+	var ids []int64
+	byMAC := map[string]int64{}
+	for _, f := range floods {
+		mac, ok := normMAC(f.bssid)
+		if !ok {
+			continue
+		}
+		var id int64
+		if err := a.s.r.QueryRowContext(ctx, `SELECT id FROM entities WHERE kind = 'device' AND key = ?`, mac).Scan(&id); err == nil && id != 0 {
+			byMAC[f.bssid] = id
+			ids = append(ids, id)
+		}
+	}
+	devs, err := a.devices(ctx, ids)
+	if err != nil {
+		return err
+	}
+	for _, f := range floods {
+		d := devs[byMAC[f.bssid]]
+		if d == nil {
+			continue
+		}
+		sev := model.SeverityMedium
+		if f.n >= 100 {
+			sev = model.SeverityHigh
+		}
+		a.add(model.Anomaly{Kind: model.AnomalyDeauthFlood, Severity: sev, TS: max(f.first, a.from), Device: d.id, DeviceName: d.name,
+			Entity:   model.EntityID(model.KindDevice, f.bssid),
+			Summary:  fmt.Sprintf("%s sent %d deauthentication/disassociation frames to %d clients in the window", d.name, f.n, f.clients),
+			Evidence: map[string]string{"frames": strconv.Itoa(int(f.n)), "clients": strconv.Itoa(f.clients)}})
 	}
 	return nil
 }
@@ -484,7 +635,7 @@ func (a *anomalies) beacons(ctx context.Context) error {
 	}
 	rows, err := a.s.r.QueryContext(ctx, `SELECT c.client_device, c.client_ip, `+connName+`, c.remote_ip, c.remote_port, c.proto, c.first_seen
 		FROM connections c WHERE c.first_seen >= ? AND c.first_seen < ? AND c.direction = 'out' AND c.multicast = 0
-		AND c.remote_port NOT IN (53, 123, 853, 5353) LIMIT 200000`, a.from, a.to)
+		AND c.remote_port NOT IN (53, 123, 853, 5353) ORDER BY c.client_device, c.first_seen LIMIT 200000`, a.from, a.to)
 	if err != nil {
 		return err
 	}
@@ -506,9 +657,16 @@ func (a *anomalies) beacons(ctx context.Context) error {
 			return err
 		}
 		k := destKey(name, rip)
-		id := fmt.Sprintf("%d|%s|%s", dev, cip, k)
+		// Series are per destination, not per registrable site: two
+		// different names under one domain polled on different schedules
+		// are not one beacon. Port and protocol matter too.
+		seriesKey := strings.ToLower(name)
+		if seriesKey == "" {
+			seriesKey = rip
+		}
+		id := fmt.Sprintf("%d|%s|%s|%d|%d", dev, cip, seriesKey, port, proto)
 		if dev != 0 {
-			id = fmt.Sprintf("%d||%s", dev, k)
+			id = fmt.Sprintf("%d||%s|%d|%d", dev, seriesKey, port, proto)
 		}
 		sr := all[id]
 		if sr == nil {
@@ -557,7 +715,7 @@ func (a *anomalies) beacons(ctx context.Context) error {
 // unique names under one site (data smuggled out in the names).
 func (a *anomalies) dns(ctx context.Context) error {
 	rows, err := a.s.r.QueryContext(ctx, `SELECT client_device, client_ip, qname, rcode, min(ts) FROM dns
-		WHERE ts >= ? AND ts < ? GROUP BY 1, 2, 3, 4 LIMIT 500000`, a.from, a.to)
+		WHERE ts >= ? AND ts < ? GROUP BY 1, 2, 3, 4 ORDER BY 1, 3, 4 LIMIT 500000`, a.from, a.to)
 	if err != nil {
 		return err
 	}
@@ -629,6 +787,9 @@ func (a *anomalies) dns(ctx context.Context) error {
 				Evidence: map[string]string{"nxdomain": strconv.Itoa(nx), "names": strconv.Itoa(len(c.names)), "examples": strings.Join(names[:min(len(names), 5)], ",")}})
 		}
 		for _, site := range slices.Sorted(maps.Keys(c.perSite)) {
+			if cdnSite(site) {
+				continue // video/CDN clients mint long unique names all day
+			}
 			names := slices.Sorted(maps.Keys(c.perSite[site]))
 			if len(names) < 50 {
 				continue
@@ -739,6 +900,11 @@ func (a *anomalies) accessPoints(ctx context.Context) error {
 				}
 			}
 		}
+		if len(bySec) > 1 && len(n.aps) < 2 {
+			// One BSSID changed its advertised security (or a malformed
+			// beacon was misread): not two access points disagreeing.
+			continue
+		}
 		if len(bySec) > 1 {
 			var parts []string
 			for _, sec := range slices.Sorted(maps.Keys(bySec)) {
@@ -748,7 +914,14 @@ func (a *anomalies) accessPoints(ctx context.Context) error {
 			// are lured; WPA2 next to WPA3 is how mesh and 6 GHz radios
 			// are often set up.
 			sev, what := model.SeverityLow, "access points disagree on its security"
-			if len(open) > 0 && len(protected) > 0 {
+			evil := false
+			for _, b := range open {
+				if !slices.Contains(protected, b) {
+					evil = true
+					break
+				}
+			}
+			if evil {
 				sev, what = model.SeverityHigh, "an open access point copies a protected network's name"
 			}
 			// The disagreement began when the second setting was first heard.

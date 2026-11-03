@@ -30,6 +30,9 @@ type batcher struct {
 }
 
 func (b *batcher) Emit(ev wire.Event) {
+	if b.err != nil {
+		return // the first failed batch stops the import; do not grow memory
+	}
 	b.seq++
 	ev.Seq = b.seq
 	b.pending = append(b.pending, ev)

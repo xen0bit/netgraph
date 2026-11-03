@@ -4,7 +4,6 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
-	"fmt"
 	"strconv"
 	"strings"
 
@@ -100,7 +99,7 @@ func (s *Store) walkFlowsHourly(ctx context.Context, f model.Filter, from, to in
 	}
 	defer conn.Close()
 	rows, err := conn.QueryContext(ctx, `SELECT client_device, client_ip, remote_ip, remote_port, proto, name, direction, max(app),
-		min(bucket), max(bucket), sum(flows), sum(bytes_out), sum(bytes_in), coalesce(max(remote_asn), 0), max(remote_cc)
+		min(bucket), max(bucket), max(sum(flows), count(DISTINCT flow_key)), sum(bytes_out), sum(bytes_in), coalesce(max(remote_asn), 0), max(remote_cc)
 		FROM traffic_hourly WHERE `+w.sql()+`
 		GROUP BY client_device, client_ip, remote_ip, remote_port, proto, name, direction ORDER BY sum(bytes_out) + sum(bytes_in) DESC LIMIT ? OFFSET ?`, append(w.args, limit(f, 1000, 100000), offset(f))...)
 	if err != nil {
@@ -118,7 +117,7 @@ func (s *Store) walkFlowsHourly(ctx context.Context, f model.Filter, from, to in
 		if err := rows.Scan(&dev, &localIP, &fl.RemoteIP, &port, &proto, &fl.Name, &fl.Direction, &fl.App, &first, &last, &n, &fl.BytesOut, &fl.BytesIn, &fl.ASN, &fl.Country); err != nil {
 			return err
 		}
-		fl.Key = fmt.Sprintf("hourly:%d:%s:%s:%d:%d:%s", dev, localIP, fl.RemoteIP, port, proto, fl.Direction)
+		fl.Key = hourlyFlowKey(dev, localIP, fl.RemoteIP, port, proto, fl.Name, fl.Direction)
 		fl.Proto = ProtoName(proto)
 		fl.FirstSeen, fl.LastSeen = first, last+hourMS
 		fl.State = model.StateOpened
@@ -140,6 +139,18 @@ func (s *Store) walkFlowsHourly(ctx context.Context, f model.Filter, from, to in
 // WalkDNS visits lookups in the window, newest first.
 func (s *Store) WalkDNS(ctx context.Context, f model.Filter, yield func(model.DNSQuery) error) error {
 	from, to := s.window(f)
+	if s.precision(from, to) == model.PrecisionHour {
+		rows, err := s.dnsHourly(ctx, f, from, to)
+		if err != nil {
+			return err
+		}
+		for _, q := range rows {
+			if err := yield(q); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
 	w, err := s.dnsWhere(ctx, f, from, to)
 	if err != nil {
 		return err
@@ -150,7 +161,7 @@ func (s *Store) WalkDNS(ctx context.Context, f model.Filter, yield func(model.DN
 	}
 	defer conn.Close()
 	rows, err := conn.QueryContext(ctx, `SELECT ts, client_ip, client_device, server_ip, qname, qtype, rcode, coalesce(latency_ms, 0), answers
-		FROM dns WHERE `+w.sql()+` ORDER BY ts DESC LIMIT ? OFFSET ?`, append(w.args, limit(f, 500, 50000), offset(f))...)
+		FROM dns WHERE `+w.sql()+` ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?`, append(w.args, limit(f, 500, 50000), offset(f))...)
 	if err != nil {
 		return err
 	}
@@ -203,7 +214,7 @@ func (s *Store) WalkFacts(ctx context.Context, f model.Filter, yield func(model.
 	}
 	rows, err := s.r.QueryContext(ctx, `SELECT f.rel, a.kind, a.key, a.label, a.attrs, b.kind, b.key, b.label, f.first_seen, f.last_seen, f.count, f.source, f.attrs
 		FROM facts f JOIN entities a ON a.id = f.src JOIN entities b ON b.id = f.dst
-		WHERE `+w.sql()+` ORDER BY f.last_seen DESC LIMIT ? OFFSET ?`,
+		WHERE `+w.sql()+` ORDER BY f.last_seen DESC, f.id DESC LIMIT ? OFFSET ?`,
 		append(w.args, limit(f, 2000, 100000), offset(f))...)
 	if err != nil {
 		return err

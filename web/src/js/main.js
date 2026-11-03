@@ -56,14 +56,19 @@ const state = {
 
 function loadHash() {
   const p = new URLSearchParams(location.hash.slice(1));
-  if (p.get("to")) state.to = Number(p.get("to"));
-  if (p.get("span")) state.span = Number(p.get("span"));
-  if (p.get("from") && p.get("to")) state.span = state.to - Number(p.get("from"));
+  const num = (k) => { const v = Number(p.get(k)); return Number.isFinite(v) ? v : null; };
+  const to = num("to");
+  if (to && to > 0) state.to = to;
+  const span = num("span");
+  if (span && span >= 10_000) state.span = span;
+  if (p.get("from") && to) state.span = Math.max(10_000, state.to - Number(p.get("from")));
   state.live = p.get("live") === "1" || !p.has("to");
   state.filter = p.get("q") || "";
-  if (p.get("tab")) state.tab = p.get("tab");
+  if (p.get("tab") && tables[p.get("tab")]) state.tab = p.get("tab");
+  if (p.get("layout") === "elk" || p.get("layout") === "dagre") state.layout = p.get("layout");
   for (const k of ["collapse", "dns", "sites", "anomalies", "networks", "identity"]) if (p.has(k)) state.gopts[k] = p.get(k) === "1";
-  if (p.has("top")) state.gopts.top = Number(p.get("top"));
+  const top = num("top");
+  if (top === -1 || (top && top >= 1)) state.gopts.top = Math.min(top, 1000);
   // sort=<table>.<column>.<asc|desc>
   state.sort = {};
   const [st, col, dir] = (p.get("sort") || "").split(".");
@@ -78,6 +83,7 @@ function saveHash() {
   if (state.tab !== "graph") p.set("tab", state.tab);
   for (const k of ["collapse", "dns", "sites", "anomalies", "networks", "identity"]) p.set(k, state.gopts[k] ? "1" : "0");
   p.set("top", state.gopts.top);
+  p.set("layout", state.layout);
   const so = state.sort[state.tab];
   if (so) p.set("sort", `${state.tab}.${so.col}.${so.dir}`);
   if (state.open) p.set("open", state.open);
@@ -110,7 +116,15 @@ function params(extra = {}) {
 
 // --- API ----------------------------------------------------------------------
 
-let token = localStorage.getItem("netgraph.token") || "";
+// Storage can throw (private mode, sandboxed iframe, blocked cookies). The UI
+// must still start without it; the token then lives for this page only.
+const store = {
+  get(k) { try { return localStorage.getItem(k); } catch { return null; } },
+  set(k, v) { try { localStorage.setItem(k, v); } catch { /* private mode */ } },
+  remove(k) { try { localStorage.removeItem(k); } catch { /* private mode */ } },
+};
+
+let token = store.get("netgraph.token") || "";
 
 async function api(path, extra = {}, raw = false) {
   let retried = false;
@@ -120,7 +134,7 @@ async function api(path, extra = {}, raw = false) {
     if (resp.status === 401) {
       if (retried) {
         token = "";
-        try { localStorage.removeItem("netgraph.token"); } catch { /* private mode */ }
+        store.remove("netgraph.token")
         needAuth();
         throw new Error(`${path}: read token required`);
       }
@@ -152,7 +166,7 @@ async function send(method, path, body) {
     if (resp.status === 401) {
       if (retried) {
         token = "";
-        try { localStorage.removeItem("netgraph.token"); } catch { /* private mode */ }
+        store.remove("netgraph.token")
         needAuth();
         throw new Error("read token required");
       }
@@ -205,7 +219,7 @@ function askToken() {
 
 function saveToken() {
   if (!token) return;
-  try { localStorage.setItem("netgraph.token", token); } catch { /* private mode */ }
+  store.set("netgraph.token", token)
   engine?.call("configure", { base: location.origin, token }).catch(() => {});
   $("#connect").hidden = true;
 }
@@ -257,6 +271,7 @@ function setWindow(to, span, { live = false } = {}) {
 // --- refresh ------------------------------------------------------------------
 
 let refreshSeq = 0;
+let entityReq = 0;
 async function refresh() {
   if (state.live) state.to = Date.now();
   saveHash();
@@ -275,7 +290,7 @@ async function refresh() {
   await renderTab(seq);
 }
 
-const tablePath = { devices: "devices", flows: "flows", dns: "dns", facts: "facts", wifi: "wifi", sensors: "sensors", anomalies: "anomalies" };
+const tablePath = { devices: "devices", flows: "flows", destinations: "destinations", dns: "dns", facts: "facts", wifi: "wifi", sensors: "sensors", anomalies: "anomalies" };
 
 async function renderTab(seq) {
   const t = state.tab;
@@ -289,6 +304,7 @@ async function renderTab(seq) {
         ? "Learning the network: until it has a day of history, only the checks that need none run (beacons, failed lookups, DNS tunnels, access points, scans, password guessing). New devices, new destinations, upload spikes, new services and inbound surges follow."
         : "";
       rows = rows?.anomalies;
+      renderMutes();
     }
     state.data[t] = rows || [];
     renderTable(t);
@@ -428,6 +444,13 @@ const tables = {
     id: (d) => d.id,
     sort: (d) => -(d.bytes_in + d.bytes_out),
   },
+  destinations: {
+    cols: ["Destination", "Kind", "Connections", "Devices", "Sent", "Received", "First seen", "Last seen"],
+    num: [2, 3, 4, 5],
+    row: (d) => [esc(d.label), badge(d.kind), d.connections, d.devices, bytes(d.bytes_out), bytes(d.bytes_in), stamp(d.first_seen), stamp(d.last_seen)],
+    keys: [(d) => d.label, (d) => d.kind, (d) => d.connections, (d) => d.devices, (d) => d.bytes_out, (d) => d.bytes_in, (d) => d.first_seen, (d) => d.last_seen],
+    id: (d) => d.kind === "ip" ? `ip:${d.key}` : `domain:${d.key}`,
+  },
   flows: {
     cols: ["Opened", "Dir", "Client", "", "Server", "Name", "App", "State", "Sent", "Received", "Last"],
     titles: {
@@ -523,7 +546,7 @@ const tables = {
 
 // What the API returns at most by default, and at most at all: past the
 // default, "load more" doubles the request.
-const limits = { flows: [1000, 100000], dns: [500, 50000], facts: [2000, 100000], wifi: [1000, 10000] };
+const limits = { flows: [1000, 100000], destinations: [1000, 100000], dns: [500, 50000], facts: [2000, 100000], wifi: [1000, 10000] };
 
 // addrKey sorts addresses by their numbers: 10.0.0.9 before 10.0.0.10.
 const addrKey = (ip) => {
@@ -571,7 +594,10 @@ function csvCell(k, v) {
   else if (Array.isArray(v)) v = v.map((x) => (typeof x === "object" ? JSON.stringify(x) : x)).join("; ");
   else if (typeof v === "object") v = JSON.stringify(v);
   let s = String(v);
-  if (typeof v !== "number" && typeof v !== "boolean" && /^[=+\-@\t\r]/.test(s)) s = "'" + s;
+  // Leading Unicode whitespace (including NBSP) hides a formula from a
+  // simple prefix test; skip it before deciding.
+  const lead = s.replace(/^[\s\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]+/, "");
+  if (typeof v !== "number" && typeof v !== "boolean" && /^[=+\-@\t\r]/.test(lead)) s = "'" + s;
   return /[",\r\n]/.test(s) ? `"${s.replaceAll('"', '""')}"` : s;
 }
 
@@ -583,14 +609,34 @@ function toCSV(rows) {
   return [cols.join(","), ...rows.map((r) => cols.map((k) => csvCell(k, r[k])).join(","))].join("\r\n") + "\r\n";
 }
 
+// renderMutes lists the mutes in force with a button that removes each.
+async function renderMutes() {
+  const box = $("#mutes");
+  if (!box) return;
+  let mutes = [];
+  try { mutes = (await api("anomalies/mutes")).mutes || []; } catch { box.textContent = ""; return; }
+  if (!mutes.length) { box.innerHTML = ""; return; }
+  box.innerHTML = `<h3>Muted findings</h3><ul>${mutes.map((m) => `<li>${esc(m.kind || "any kind")} ${m.device ? esc(m.device) : ""} ${m.entity ? esc(m.entity) : ""} until ${stamp(m.until)} <button type="button" data-kind="${esc(m.kind)}" data-device="${esc(m.device)}" data-entity="${esc(m.entity)}">Unmute</button></li>`).join("")}</ul>`;
+  for (const b of box.querySelectorAll("button")) {
+    b.onclick = async () => {
+      try {
+        await send("DELETE", `anomalies/mute?kind=${encodeURIComponent(b.dataset.kind)}&device=${encodeURIComponent(b.dataset.device)}&entity=${encodeURIComponent(b.dataset.entity)}`);
+        renderMutes();
+      } catch (e) { setStatus(e.message); }
+    };
+  }
+}
+
 async function loadMore(t) {
   const [def, max] = limits[t] || [];
   const asked = state.limits[t] || def;
   if (!def || asked >= max) return;
   const next = Math.min(asked * 2, max);
   const offset = (state.data[t] || []).length;
+  const seq = refreshSeq;
   try {
     const add = await track(api(tablePath[t], { limit: next - asked, offset }));
+    if (seq !== refreshSeq) return;
     if (!Array.isArray(add) || add.length === 0) return;
     state.limits[t] = next;
     state.data[t] = [...(state.data[t] || []), ...add];
@@ -785,6 +831,7 @@ function fileStamp() {
 
 async function openEntity(id, { anomaly } = {}) {
   if (!id) return;
+  const req = ++entityReq;
   const panel = $("#panel");
   panel.hidden = false;
   state.open = id;
@@ -797,9 +844,10 @@ async function openEntity(id, { anomaly } = {}) {
   try {
     d = await track(api("entity", { id }));
   } catch (e) {
-    $("#panel-body").innerHTML = `<h2>${esc(id)}</h2><p class="muted">${esc(e.message)}</p>`;
+    if (req === entityReq) $("#panel-body").innerHTML = `<h2>${esc(id)}</h2><p class="muted">${esc(e.message)}</p>`;
     return;
   }
+  if (req !== entityReq) return;
   const userLabel = d.attrs?.user_label || "";
   const autoLabel = d.attrs?.auto_label || "";
   const attrs = Object.entries(d.attrs || {}).filter(([k]) => k !== "user_label" && k !== "auto_label")
@@ -993,7 +1041,7 @@ function search() {
   input.oninput = () => {
     clearTimeout(timer);
     const q = input.value.trim();
-    if (q.length < 2) { close(); return; }
+    if (q.length < 2) { seq++; clearTimeout(timer); results = []; close(); return; }
     timer = setTimeout(async () => {
       const n = ++seq;
       let rs;
@@ -1024,7 +1072,7 @@ function search() {
 }
 
 function init() {
-  const saved = localStorage.getItem("netgraph.theme");
+  const saved = store.get("netgraph.theme");
   if (saved) document.documentElement.dataset.theme = saved;
   loadHash();
   $("#filter").value = state.filter;
@@ -1059,7 +1107,15 @@ function init() {
   $("#g-layout").onchange = () => { state.layout = $("#g-layout").value; refresh(); };
   $("#connect").onclick = () => askToken().then((t) => { if (t) refresh(); });
   $("#g-fit").onclick = () => diagram.fit();
-  $("#g-svg").onclick = () => { const svg = $("#diagram svg"); if (svg) download(`netgraph-${fileStamp()}.svg`, svg.outerHTML, "image/svg+xml"); };
+  $("#g-svg").onclick = () => {
+    const svg = $("#diagram svg");
+    if (!svg) return;
+    // The root carries the current pan/zoom transform; exporting it as-is
+    // opens the diagram translated off-screen.
+    const clone = svg.cloneNode(true);
+    clone.removeAttribute("style");
+    download(`netgraph-${fileStamp()}.svg`, clone.outerHTML, "image/svg+xml");
+  };
   $("#g-d2").onclick = async () => {
     if (!state.graph) return;
     const script = engineState === "ready"
@@ -1071,7 +1127,7 @@ function init() {
   $("#theme").onclick = () => {
     const next = theme() === "dark" ? "light" : "dark";
     document.documentElement.dataset.theme = next;
-    try { localStorage.setItem("netgraph.theme", next); } catch { /* private mode */ }
+    store.set("netgraph.theme", next)
     refresh();
   };
   document.addEventListener("keydown", (e) => {
@@ -1093,6 +1149,12 @@ function init() {
     const wasLive = state.live;
     loadHash();
     $("#filter").value = state.filter;
+    renderWindow();
+    for (const [id, k] of [["#g-collapse", "collapse"], ["#g-dns", "dns"], ["#g-sites", "sites"], ["#g-anomalies", "anomalies"], ["#g-networks", "networks"], ["#g-identity", "identity"]]) {
+      $(id).checked = state.gopts[k];
+    }
+    $("#g-top").value = state.gopts.top;
+    $("#g-layout").value = state.layout;
     const changed = state.live !== wasLive;
     if (changed) setLive(state.live);
     if (!changed || !state.live) selectTab(state.tab);

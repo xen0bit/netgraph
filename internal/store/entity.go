@@ -73,7 +73,7 @@ func (s *Store) Entity(ctx context.Context, id string, f model.Filter) (*model.E
 		wf.IP, wd.IP = key, key
 	case model.KindDomain:
 		// Exact name rather than a substring.
-		wf.Domain, wd.Domain = key, key
+		wf.DomainExact, wd.DomainExact = key, key
 	case model.KindASN:
 		// Connections with the network's addresses; lookups do not say
 		// which network answered.
@@ -112,8 +112,9 @@ func (s *Store) siteEntity(ctx context.Context, id, site string, f model.Filter)
 	from, to := s.window(f)
 	d := &model.EntityDetail{ID: id, Kind: model.KindSite, Key: site, Label: site}
 	in := func(name string) bool { return name != "" && graph.Site(name) == site }
-	// The domain filter matches a substring; the site test makes it exact.
-	wf := model.Filter{From: time.UnixMilli(from), To: time.UnixMilli(to), Limit: 200, Multicast: true, Domain: site}
+	// Match the registrable domain and its subdomains exactly, not every
+	// name that happens to contain the string.
+	wf := model.Filter{From: time.UnixMilli(from), To: time.UnixMilli(to), Limit: 200, Multicast: true, DomainSuffix: site}
 	var err error
 	if d.Flows, err = s.Flows(ctx, wf); err != nil {
 		return nil, err
@@ -351,8 +352,11 @@ func (s *Store) Search(ctx context.Context, q string, limit int) ([]model.Search
 	if len(q) < 2 || len(q) > 256 {
 		return out, nil
 	}
-	if limit <= 0 || limit > 100 {
+	if limit <= 0 {
 		limit = 20
+	}
+	if limit > 100 {
+		limit = 100
 	}
 	like := strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(q)
 	order := "CASE kind"
@@ -369,7 +373,10 @@ func (s *Store) Search(ctx context.Context, q string, limit int) ([]model.Search
 	rows, err := s.r.QueryContext(ctx, `SELECT kind, key, label, last_seen, attrs FROM entities e
 		WHERE kind IN (`+marks+`) AND (lower(key) LIKE ? || '%' ESCAPE '\' OR lower(label) LIKE '%' || ? || '%' ESCAPE '\'
 			OR (kind = 'device' AND json_valid(attrs) AND lower(coalesce(json_extract(attrs, '$.auto_label'), '')) LIKE '%' || ? || '%' ESCAPE '\'))
-			AND (kind = 'device' OR EXISTS (SELECT 1 FROM facts f WHERE f.src = e.id OR f.dst = e.id))
+			AND (kind IN ('device', 'asn')
+				OR EXISTS (SELECT 1 FROM facts f WHERE f.src = e.id OR f.dst = e.id)
+				OR EXISTS (SELECT 1 FROM connections c WHERE c.remote_ip = e.key OR c.client_ip = e.key)
+				OR EXISTS (SELECT 1 FROM dns d WHERE d.qname = e.key))
 		ORDER BY lower(key) = ? DESC, lower(key) LIKE ? || '%' ESCAPE '\' DESC, `+order+`, last_seen DESC LIMIT ?`, args...)
 	if err != nil {
 		return nil, err

@@ -11,7 +11,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"net/http"
 	"slices"
@@ -135,7 +137,7 @@ func (n *Notifier) NotifyAnomaly(a model.Anomaly) {
 	if len(n.cfg.AnomalyKinds) > 0 && !slices.Contains(n.cfg.AnomalyKinds, a.Kind) {
 		return
 	}
-	key := a.Kind + "|" + a.Device + "|" + a.Entity
+	key := a.Kind + "|" + a.Device + "|" + a.Entity + "|" + a.Severity
 	now := time.Now()
 	n.mu.Lock()
 	last, ok := n.cooldown[key]
@@ -143,14 +145,18 @@ func (n *Notifier) NotifyAnomaly(a model.Anomaly) {
 		n.mu.Unlock()
 		return
 	}
-	n.cooldown[key] = now
-	if len(n.cooldown) > 10000 {
-		clear(n.cooldown)
-		n.cooldown[key] = now
-	}
 	n.mu.Unlock()
 	select {
 	case n.queue <- notice{anomaly: &a}:
+		// Commit the cooldown only after the alert is queued: a full
+		// queue or a failed delivery must not silence the finding.
+		n.mu.Lock()
+		n.cooldown[key] = now
+		if len(n.cooldown) > 10000 {
+			clear(n.cooldown)
+			n.cooldown[key] = now
+		}
+		n.mu.Unlock()
 	default:
 		n.dropped.Add(1)
 		n.log.Warn("alert queue full; dropping anomaly alert", "kind", a.Kind, "summary", a.Summary)
@@ -162,6 +168,7 @@ func (n *Notifier) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
+			n.dropped.Add(uint64(len(n.queue)))
 			return
 		case m := <-n.queue:
 			switch {
@@ -203,7 +210,7 @@ func (n *Notifier) deliver(ctx context.Context, p Payload, what, detail string) 
 			n.log.Info("sent alert", "event", p.Event, "detail", detail)
 			return
 		}
-		if attempt == 4 || ctx.Err() != nil {
+		if errors.Is(err, errPermanent) || attempt == 4 || ctx.Err() != nil {
 			n.failed.Add(1)
 			n.log.Warn("alert not delivered", "event", what, "detail", detail, "err", err)
 			return
@@ -227,12 +234,19 @@ func (n *Notifier) post(ctx context.Context, body []byte) error {
 	if err != nil {
 		return err
 	}
+	io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
 	resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
+	if resp.StatusCode/100 == 2 {
+		return nil
+	}
+	if resp.StatusCode == http.StatusRequestTimeout || resp.StatusCode == http.StatusTooManyRequests ||
+		resp.StatusCode/100 == 5 {
 		return fmt.Errorf("webhook: %s", resp.Status)
 	}
-	return nil
+	return fmt.Errorf("webhook: %s: %w", resp.Status, errPermanent)
 }
+
+var errPermanent = errors.New("permanent webhook failure")
 
 // NewPayload builds the webhook body for a device.
 func NewPayload(d store.NewDevice) Payload {

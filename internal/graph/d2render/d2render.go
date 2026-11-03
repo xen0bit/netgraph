@@ -10,6 +10,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"oss.terrastruct.com/d2/d2graph"
 	"oss.terrastruct.com/d2/d2layouts/d2dagrelayout"
@@ -43,7 +44,8 @@ func logCtx() context.Context {
 }
 
 func compile(script string, o Options) (*d2target.Diagram, error) {
-	ctx := logCtx()
+	ctx, cancel := context.WithTimeout(logCtx(), 20*time.Second)
+	defer cancel()
 	ruler, err := textmeasure.NewRuler()
 	if err != nil {
 		return nil, err

@@ -31,6 +31,11 @@ func OpenFile(path string) (Source, error) {
 		f.Close()
 		return nil, fmt.Errorf("%s: %w", path, err)
 	}
+	if info, statErr := f.Stat(); statErr == nil {
+		// Simple Packet Blocks carry no timestamp. Use the file's mtime
+		// as a stable epoch: replaying the same file stays deterministic.
+		s.base = info.ModTime()
+	}
 	s.name, s.closer = path, f
 	return s, nil
 }
@@ -51,6 +56,8 @@ type Reader struct {
 	// pcapng: per-interface link type and timestamp unit
 	ifaces []ngIface
 	buf    []byte
+	base   time.Time // SPB epoch; zero means the Unix epoch
+	last   time.Time // last timestamp, for SPB ordering
 }
 
 type ngIface struct {
@@ -65,7 +72,7 @@ func NewReader(r io.Reader) (*Reader, error) {
 	if err != nil {
 		return nil, errFormat
 	}
-	s := &Reader{r: br}
+	s := &Reader{r: br, base: time.Unix(0, 0)}
 	switch {
 	case magic[0] == 0x0a && magic[1] == 0x0d && magic[2] == 0x0d && magic[3] == 0x0a:
 		s.ng = true
@@ -230,26 +237,35 @@ func (s *Reader) readNG() ([]byte, time.Time, error) {
 			if len(body) < 20 {
 				return nil, time.Time{}, errFormat
 			}
-			id := int(s.bo.Uint32(body))
-			if id >= len(s.ifaces) {
+			// Compare as unsigned before converting: an interface id or
+			// captured length >= 2^31 is corrupt, and int would be
+			// negative on the MIPS/ARMv5 sensor builds.
+			id := uint64(s.bo.Uint32(body))
+			if id >= uint64(len(s.ifaces)) {
 				return nil, time.Time{}, fmt.Errorf("capture: packet for undeclared interface %d", id)
 			}
 			ts := uint64(s.bo.Uint32(body[4:]))<<32 | uint64(s.bo.Uint32(body[8:]))
-			capLen := int(s.bo.Uint32(body[12:]))
-			if 20+capLen > len(body) {
+			capLen := uint64(s.bo.Uint32(body[12:]))
+			if capLen > uint64(len(body)-20) {
 				return nil, time.Time{}, errFormat
 			}
 			ifc := s.ifaces[id]
 			s.link = ifc.link
 			s.n++
-			return body[20 : 20+capLen], tsTime(ts, ifc.unit), nil
+			s.last = tsTime(ts, ifc.unit)
+			return body[20 : 20+capLen], s.last, nil
 		case 3: // simple packet: no timestamp
 			if len(s.ifaces) == 0 || len(body) < 4 {
 				return nil, time.Time{}, errFormat
 			}
 			s.link = s.ifaces[0].link
 			s.n++
-			return body[4:], time.Time{}, nil
+			// Synthesise a monotonic timestamp instead of a zero time:
+			// a zero clock makes RunFile emit a hello per packet and
+			// never tick or flush. The file's mtime keeps replays stable.
+			ts := s.base.Add(time.Duration(s.n) * time.Microsecond)
+			s.last = ts
+			return body[4:], ts, nil
 		}
 		// Other blocks (name resolution, statistics, custom) are skipped.
 	}

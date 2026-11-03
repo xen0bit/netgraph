@@ -90,7 +90,7 @@ main { position: relative; overflow: hidden; display: flex; min-height: 0; }
 .graph-tools { display: flex; gap: 14px; align-items: center; padding: 8px 16px; flex-wrap: wrap; border-bottom: 1px solid var(--border); }
 .graph-tools input[type="number"] { width: 4.5rem; }
 .spacer { flex: 1; }
-.diagram { flex: 1; overflow: hidden; position: relative; cursor: grab; min-height: 300px; background: var(--bg); }
+.diagram { flex: 1; overflow: hidden; position: relative; cursor: grab; min-height: 300px; background: var(--bg); touch-action: none; user-select: none; }
 .diagram.dragging { cursor: grabbing; }
 .diagram svg { position: absolute; top: 0; left: 0; transform-origin: 0 0; }
 .diagram .placeholder { position: absolute; inset: 0; display: grid; place-items: center; color: var(--fg-2); text-align: center; padding: 16px; }

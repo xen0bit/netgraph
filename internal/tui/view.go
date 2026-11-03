@@ -368,9 +368,7 @@ func (m Model) summaryView() string {
 	b.WriteString("\n")
 	b.WriteString(m.st.head.Render("  busiest devices"))
 	b.WriteString("\n")
-	ds := append([]model.Device(nil), m.devices...)
-	sort.SliceStable(ds, func(i, j int) bool { return ds[i].BytesIn+ds[i].BytesOut > ds[j].BytesIn+ds[j].BytesOut })
-	for i, d := range ds {
+	for i, d := range m.summaryDevices() {
 		if i >= 10 {
 			break
 		}

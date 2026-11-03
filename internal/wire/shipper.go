@@ -10,7 +10,9 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"sync"
 	"time"
@@ -30,9 +32,14 @@ type ShipperConfig struct {
 	TLSConfig *tls.Config
 
 	MaxEvents     int           // seal a batch at this many events (default 2000)
+	MaxBytes      int           // ...or this many estimated bytes (default 4 MiB)
 	FlushInterval time.Duration // seal a non-empty batch at least this often (default 2s)
 	SpoolBytes    int           // bound on compressed batches held for retry (default 32 MiB)
 	Logger        *slog.Logger
+	// OnDial, when set, reports each TCP connection the shipper opens. The
+	// sensor uses it to ignore exactly its own traffic instead of every
+	// flow to the server's address and port.
+	OnDial func(local, remote netip.AddrPort)
 }
 
 // Shipper batches events, compresses each batch once, holds sealed batches in
@@ -45,14 +52,15 @@ type Shipper struct {
 	client *http.Client
 	log    *slog.Logger
 
-	mu         sync.Mutex
-	sealMu     sync.Mutex // keeps sealed batches in sequence order
-	sendMu     sync.Mutex // one sender at a time (Run and an explicit Flush)
-	seq        uint64
-	pending    []Event
-	spool      []batch
-	spoolBytes int
-	wake       chan struct{}
+	mu           sync.Mutex
+	sealMu       sync.Mutex // keeps sealed batches in sequence order
+	sendMu       sync.Mutex // one sender at a time (Run and an explicit Flush)
+	seq          uint64
+	pending      []Event
+	pendingBytes int
+	spool        []batch
+	spoolBytes   int
+	wake         chan struct{}
 
 	stats ShipperStats
 }
@@ -76,6 +84,9 @@ func NewShipper(cfg ShipperConfig) *Shipper {
 	if cfg.MaxEvents <= 0 {
 		cfg.MaxEvents = 2000
 	}
+	if cfg.MaxBytes <= 0 {
+		cfg.MaxBytes = 4 << 20
+	}
 	if cfg.FlushInterval <= 0 {
 		cfg.FlushInterval = 2 * time.Second
 	}
@@ -88,6 +99,25 @@ func NewShipper(cfg ShipperConfig) *Shipper {
 	tr := http.DefaultTransport.(*http.Transport).Clone()
 	tr.TLSClientConfig = cfg.TLSConfig
 	tr.MaxIdleConns = 2
+	if cfg.OnDial != nil {
+		dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
+		tr.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+			c, err := dialer.DialContext(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+			if l, ok := c.LocalAddr().(*net.TCPAddr); ok {
+				if r, ok := c.RemoteAddr().(*net.TCPAddr); ok {
+					la, lok := netip.AddrFromSlice(l.IP)
+					ra, rok := netip.AddrFromSlice(r.IP)
+					if lok && rok {
+						cfg.OnDial(netip.AddrPortFrom(la.Unmap(), uint16(l.Port)), netip.AddrPortFrom(ra.Unmap(), uint16(r.Port)))
+					}
+				}
+			}
+			return c, nil
+		}
+	}
 	return &Shipper{
 		cfg:    cfg,
 		boot:   NewBootID(),
@@ -140,7 +170,8 @@ func (s *Shipper) Emit(ev Event) {
 	s.seq++
 	ev.Seq = s.seq
 	s.pending = append(s.pending, ev)
-	full := len(s.pending) >= s.cfg.MaxEvents
+	s.pendingBytes += estimateEventSize(ev)
+	full := len(s.pending) >= s.cfg.MaxEvents || s.pendingBytes >= s.cfg.MaxBytes
 	s.mu.Unlock()
 	if full {
 		s.seal()
@@ -169,6 +200,7 @@ func (s *Shipper) seal() {
 	s.mu.Lock()
 	events := s.pending
 	s.pending = nil
+	s.pendingBytes = 0
 	s.mu.Unlock()
 	if len(events) == 0 {
 		return
@@ -302,9 +334,9 @@ func (s *Shipper) post(ctx context.Context, b batch) error {
 	switch {
 	case resp.StatusCode/100 == 2:
 		return nil
-	case resp.StatusCode == http.StatusBadRequest:
+	case permanentStatus(resp.StatusCode):
 		// The server will never accept this batch; retrying it forever would
-		// wedge everything behind it.
+		// wedge everything behind it. 408/429 are transient.
 		s.log.Error("server rejected batch, dropping it", "status", resp.Status, "body", string(msg), "events", b.n)
 		s.mu.Lock()
 		s.stats.EventsDropped += uint64(b.n)
@@ -313,6 +345,53 @@ func (s *Shipper) post(ctx context.Context, b batch) error {
 	default:
 		return fmt.Errorf("server returned %s: %s", resp.Status, bytes.TrimSpace(msg))
 	}
+}
+
+// permanentStatus reports an HTTP failure that retrying cannot fix.
+func permanentStatus(code int) bool {
+	if code == http.StatusRequestTimeout || code == http.StatusTooManyRequests {
+		return false
+	}
+	return code >= 400 && code < 500
+}
+
+// estimateEventSize is a cheap upper bound for a batch's memory use. It
+// deliberately avoids JSON encoding on the capture path.
+func estimateEventSize(ev Event) int {
+	n := 96
+	switch {
+	case ev.Flow != nil:
+		n += 160 + len(ev.Flow.SNI) + len(ev.Flow.HTTPHost) + len(ev.Flow.UserAgent)
+	case ev.DNS != nil:
+		n += 160 + len(ev.DNS.QName)
+		for _, a := range ev.DNS.Answers {
+			n += 48 + len(a.Name) + len(a.Data)
+		}
+	case ev.MDNS != nil:
+		n += 160
+		for _, q := range ev.MDNS.Queries {
+			n += len(q)
+		}
+		for _, h := range ev.MDNS.Hosts {
+			n += 32 + len(h.Name)
+			for _, a := range h.Addrs {
+				n += len(a.String())
+			}
+		}
+		for _, sv := range ev.MDNS.Services {
+			n += 64 + len(sv.Instance) + len(sv.Target)
+			for k, v := range sv.TXT {
+				n += len(k) + len(v)
+			}
+		}
+	case ev.SSDP != nil:
+		n += len(ev.SSDP.Server) + len(ev.SSDP.USN) + len(ev.SSDP.NT) + len(ev.SSDP.Location) + len(ev.SSDP.UserAgent)
+	case ev.DHCP != nil:
+		n += len(ev.DHCP.Hostname) + len(ev.DHCP.FQDN) + len(ev.DHCP.VendorClass) + len(ev.DHCP.ClientID)
+	case ev.LLDP != nil:
+		n += len(ev.LLDP.SystemName) + len(ev.LLDP.SystemDesc) + len(ev.LLDP.PortDesc)
+	}
+	return n
 }
 
 // JSONWriter is an Emitter that writes uncompressed JSON lines, for

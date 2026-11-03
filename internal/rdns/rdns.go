@@ -12,6 +12,7 @@ package rdns
 
 import (
 	"context"
+	"errors"
 	"log/slog"
 	"net"
 	"net/netip"
@@ -201,7 +202,12 @@ func (l *Lookup) resolve(j job) {
 		if err != nil && l.ctx.Err() == nil {
 			l.log.Debug("reverse lookup", "ip", j.ip, "err", err)
 		}
-		l.cache[j.ip] = entry{expires: now.Add(l.cfg.NegativeTTL)}
+		// Cache only a real "no such name". A timeout or a resolver
+		// restart must not suppress the host's name for ten minutes.
+		var dnsErr *net.DNSError
+		if err == nil || errors.As(err, &dnsErr) && dnsErr.IsNotFound {
+			l.cache[j.ip] = entry{expires: now.Add(l.cfg.NegativeTTL)}
+		}
 		delete(l.inflight, j.ip)
 		l.mu.Unlock()
 		return

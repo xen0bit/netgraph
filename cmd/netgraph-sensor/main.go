@@ -126,6 +126,23 @@ func run(args []string) error {
 	if *server == "" {
 		return errors.New("-server is required (use - for stdout)")
 	}
+	for _, d := range []struct {
+		name string
+		v    time.Duration
+	}{{"-active-timeout", *active}, {"-tcp-idle", *tcpIdle}, {"-udp-idle", *udpIdle}, {"-flush", *flushEvery},
+		{"-rdns-timeout", *rdnsTimeout}, {"-rdns-ttl", *rdnsTTL}, {"-wifi-dwell", *wifiDwell}} {
+		if d.v <= 0 {
+			return fmt.Errorf("%s must be positive", d.name)
+		}
+	}
+	for _, n := range []struct {
+		name string
+		v    int
+	}{{"-ring-mb", *ringMB}, {"-max-flows", *maxFlows}, {"-spool-mb", *spoolMB}, {"-rdns-workers", *rdnsWorkers}} {
+		if n.v <= 0 {
+			return fmt.Errorf("%s must be positive", n.name)
+		}
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -145,15 +162,16 @@ func run(args []string) error {
 			return err
 		}
 		base := strings.TrimRight(*server, "/")
-		shipper = wire.NewShipper(wire.ShipperConfig{
-			URL: base, Token: token, Sensor: *name, TLSConfig: tlsCfg,
-			FlushInterval: *flushEvery, SpoolBytes: *spoolMB << 20, Logger: log,
-		})
-		out = shipper
 		self, err := newSelfFilter(ctx, base)
 		if err != nil {
 			return err
 		}
+		shipper = wire.NewShipper(wire.ShipperConfig{
+			URL: base, Token: token, Sensor: *name, TLSConfig: tlsCfg,
+			FlushInterval: *flushEvery, SpoolBytes: *spoolMB << 20, Logger: log,
+			OnDial: self.observe,
+		})
+		out = shipper
 		ignore = self.match
 	}
 
@@ -360,7 +378,7 @@ func syncWiFiKeys(ctx context.Context, shipper *wire.Shipper, keys *wifi.Keyring
 		if err1 != nil || err2 != nil {
 			continue
 		}
-		if ok, err := keys.LoadHandshake(r.BSSID, r.STA, r.SSID, an, sn, r.KeyVersion); err == nil && ok {
+		if ok, err := keys.LoadHandshakeCipher(r.BSSID, r.STA, r.SSID, an, sn, r.KeyVersion, r.Cipher); err == nil && ok {
 			loaded++
 		}
 	}
@@ -455,6 +473,10 @@ type selfFilter struct {
 	port uint16
 	mu   sync.RWMutex
 	ips  map[netip.Addr]bool
+	// own holds the exact connections the shipper opened. Matching those,
+	// not every flow to the server address, keeps other devices' use of
+	// the netgraph UI visible.
+	own map[string]time.Time
 }
 
 func newSelfFilter(ctx context.Context, base string) (*selfFilter, error) {
@@ -470,7 +492,7 @@ func newSelfFilter(ctx context.Context, base string) (*selfFilter, error) {
 	if err != nil {
 		return nil, fmt.Errorf("invalid port in -server URL %q", base)
 	}
-	f := &selfFilter{host: u.Hostname(), port: uint16(p), ips: map[netip.Addr]bool{}}
+	f := &selfFilter{host: u.Hostname(), port: uint16(p), ips: map[netip.Addr]bool{}, own: map[string]time.Time{}}
 	f.resolve()
 	go func() {
 		t := time.NewTicker(5 * time.Minute)
@@ -501,8 +523,24 @@ func (f *selfFilter) resolve() {
 	f.mu.Unlock()
 }
 
+func (f *selfFilter) observe(local, remote netip.AddrPort) {
+	f.mu.Lock()
+	f.own[local.String()+"|"+remote.String()] = time.Now().Add(10 * time.Minute)
+	f.mu.Unlock()
+}
+
 func (f *selfFilter) match(src, dst netip.AddrPort) bool {
-	f.mu.RLock()
-	defer f.mu.RUnlock()
-	return dst.Port() == f.port && f.ips[dst.Addr()] || src.Port() == f.port && f.ips[src.Addr()]
+	now := time.Now()
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	key := src.String() + "|" + dst.String()
+	if exp, ok := f.own[key]; ok && exp.After(now) {
+		return true
+	}
+	for k, exp := range f.own {
+		if !exp.After(now) {
+			delete(f.own, k)
+		}
+	}
+	return false
 }

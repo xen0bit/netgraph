@@ -42,6 +42,9 @@ func runDB(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if *dryRun && cmd != "purge" && cmd != "forget" {
+		return fmt.Errorf("-dry-run is only supported by purge and forget, not %s", cmd)
+	}
 	rawD, err := model.ParseDuration(*raw)
 	if err != nil {
 		return err

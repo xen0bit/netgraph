@@ -144,11 +144,12 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 	v("go_memstats_heap_alloc_bytes", nil, float64(ms.HeapAlloc))
 
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
 	io.WriteString(w, b.String())
 }
 
 // labelEscape escapes a label value for the text format. Sensor names come
 // from sensors, so nothing is assumed about them.
 func labelEscape(s string) string {
-	return strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`).Replace(s)
+	return strings.NewReplacer(`\`, `\\`, `"`, `\"`, "\n", `\n`, "\r", `\r`).Replace(s)
 }

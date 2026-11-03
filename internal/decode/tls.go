@@ -330,6 +330,18 @@ func (r *reader) bytes(n int) []byte {
 func (r *reader) skip(n int) { r.bytes(n) }
 
 // varint reads a QUIC variable-length integer (RFC 9000 §16).
+// varintInt reads a QUIC varint that is used as a byte length. It checks the
+// bound before converting: on the 32-bit sensor targets a large varint would
+// otherwise wrap to a small or negative int.
+func (r *reader) varintInt() int {
+	v := r.varint()
+	if v > uint64(r.left()) {
+		r.err = true
+		return 0
+	}
+	return int(v)
+}
+
 func (r *reader) varint() uint64 {
 	if r.left() < 1 {
 		r.err = true

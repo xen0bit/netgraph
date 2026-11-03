@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"time"
 )
@@ -26,6 +27,9 @@ type RetentionResult struct {
 // only while they run, so a large backlog does not stall ingest; freed
 // pages are returned to the filesystem.
 func (s *Store) Retain(ctx context.Context) (RetentionResult, error) {
+	if s.w == nil {
+		return RetentionResult{}, errors.New("database is open read-only")
+	}
 	var r RetentionResult
 	now := s.cfg.Now()
 	raw := ms(now.Add(-s.cfg.RawRetention))

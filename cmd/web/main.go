@@ -25,6 +25,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"sync"
 	"syscall/js"
 	"time"
 
@@ -35,7 +36,10 @@ import (
 	"github.com/xen0bit/netgraph/internal/model"
 )
 
-var client = apiclient.NewClient("", "")
+var (
+	clientMu sync.Mutex
+	client   = apiclient.NewClient("", "")
+)
 
 func main() {
 	js.Global().Set("netgraphCall", js.FuncOf(call))
@@ -56,9 +60,11 @@ func call(_ js.Value, args []js.Value) any {
 	if len(args) > 1 && args[1].Type() == js.TypeString {
 		req = args[1].String()
 	}
-	return js.Global().Get("Promise").New(js.FuncOf(func(_ js.Value, p []js.Value) any {
+	var fn js.Func
+	fn = js.FuncOf(func(_ js.Value, p []js.Value) any {
 		resolve := p[0]
 		go func() {
+			defer fn.Release()
 			out, err := dispatch(method, []byte(req))
 			if err != nil {
 				out = errorJSON(err)
@@ -66,7 +72,8 @@ func call(_ js.Value, args []js.Value) any {
 			resolve.Invoke(out)
 		}()
 		return nil
-	}))
+	})
+	return js.Global().Get("Promise").New(fn)
 }
 
 func dispatch(method string, req []byte) (s string, err error) {
@@ -92,7 +99,9 @@ func dispatch(method string, req []byte) (s string, err error) {
 	case "version":
 		return marshal(map[string]string{"version": buildinfo.Version})
 	case "configure":
+		clientMu.Lock()
 		client = apiclient.NewClient(in.Base, in.Token)
+		clientMu.Unlock()
 		return marshal(map[string]bool{"ok": true})
 	case "graph":
 		q, err := url.ParseQuery(in.Query)
@@ -103,7 +112,10 @@ func dispatch(method string, req []byte) (s string, err error) {
 		if err != nil {
 			return "", err
 		}
-		g, err := client.Graph(context.Background(), f, model.ParseGraphOptions(q))
+		clientMu.Lock()
+		c := client
+		clientMu.Unlock()
+		g, err := c.Graph(context.Background(), f, model.ParseGraphOptions(q))
 		if err != nil {
 			return "", err
 		}

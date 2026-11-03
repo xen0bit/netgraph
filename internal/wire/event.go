@@ -276,12 +276,13 @@ type WiFi struct {
 // stored on the server) these values decrypt nothing, so the server can hold
 // and redistribute them without being able to read any traffic.
 type WiFiKey struct {
-	BSSID      string `json:"bssid"`       // access point
-	STA        string `json:"sta"`         // client station
-	SSID       string `json:"ssid"`        // network name, to find the PMK
-	ANonce     string `json:"anonce"`      // authenticator nonce, hex (32 bytes)
-	SNonce     string `json:"snonce"`      // supplicant nonce, hex (32 bytes)
-	KeyVersion int    `json:"key_version"` // EAPOL descriptor version: 1 TKIP, 2 CCMP
+	BSSID      string `json:"bssid"`            // access point
+	STA        string `json:"sta"`              // client station
+	SSID       string `json:"ssid"`             // network name, to find the PMK
+	ANonce     string `json:"anonce"`           // authenticator nonce, hex (32 bytes)
+	SNonce     string `json:"snonce"`           // supplicant nonce, hex (32 bytes)
+	KeyVersion int    `json:"key_version"`      // EAPOL descriptor version: 1 TKIP, 2 CCMP
+	Cipher     string `json:"cipher,omitempty"` // pairwise cipher chosen in message 2
 }
 
 // WiFiKeys is the Wi-Fi key material a sensor fetches from the server

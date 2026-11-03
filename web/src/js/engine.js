@@ -25,6 +25,8 @@ export class Engine {
     };
     this.worker.onerror = (ev) => {
       this.failed = ev.message || "worker failed";
+      for (const p of this.pending.values()) p.reject(new Error(this.failed));
+      this.pending.clear();
       onFailed?.(this.failed);
     };
   }

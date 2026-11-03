@@ -51,6 +51,7 @@ The target lists live in the Makefile, `.goreleaser.yaml` and CI's
 
 ```sh
 make test          # unit and integration tests, -race
+make test32        # packet/decoder tests as a 32-bit process (MIPS/ARMv5 paths)
 make lint          # gofmt, go vet (all tag sets), golangci-lint
 make fuzz          # every Fuzz target for FUZZTIME (20s)
 make lab           # the Docker lab (below)

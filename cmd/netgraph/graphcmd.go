@@ -32,6 +32,7 @@ func runGraph(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	f.visited(fs)
 	filter, err := f.filter()
 	if err != nil {
 		return err

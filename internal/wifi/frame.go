@@ -384,12 +384,17 @@ func (f *Frame) WireEvent() *wire.WiFi {
 	}
 	if f.Type == TypeManagement {
 		switch f.Subtype {
-		case SubtypeAssocReq, SubtypeReassocReq, SubtypeProbeReq, SubtypeAuth:
+		case SubtypeAssocReq, SubtypeReassocReq, SubtypeProbeReq:
 			e.Client = f.Src.String()
 		case SubtypeAssocResp, SubtypeReassocResp:
 			e.Client = f.Dst.String()
-		case SubtypeDeauth, SubtypeDisassoc:
+		case SubtypeAuth, SubtypeDeauth, SubtypeDisassoc:
+			// The AP sends these as often as the client does. Record the
+			// station, not whichever end happened to transmit.
 			e.Client = f.Src.String()
+			if f.Src != nil && f.BSSID != nil && f.Src.String() == f.BSSID.String() {
+				e.Client = f.Dst.String()
+			}
 		}
 	}
 	if f.Type == TypeData && f.Src != nil && f.Dst != nil {

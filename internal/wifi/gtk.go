@@ -209,7 +209,11 @@ func (k *Keyring) installGTK(bssid, ssid string, msg *EAPOLKey, kek []byte, ts t
 	switch len(gtk) {
 	case 16:
 	case 32:
-		gk.tkip = true
+		// A 32-byte GTK is TKIP or GCMP-256. The beacon's group cipher
+		// tells them apart; without one, TKIP is the older and more
+		// likely case.
+		_, sec, _ := k.Network(bssid)
+		gk.tkip = !strings.HasPrefix(sec.Group, "GCMP")
 	default:
 		return 0, false, fmt.Errorf("eapol: GTK length %d", len(gtk))
 	}
@@ -219,7 +223,7 @@ func (k *Keyring) installGTK(bssid, ssid string, msg *EAPOLKey, kek []byte, ts t
 	g := k.groups[key]
 	if g == nil || g.ssid != strings.ToLower(ssid) {
 		if len(k.groups) > 50_000 {
-			clear(k.groups)
+			evict(k.groups, 45_000)
 		}
 		g = &apGroup{ssid: strings.ToLower(ssid)}
 		k.groups[key] = g

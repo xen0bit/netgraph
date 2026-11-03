@@ -112,13 +112,21 @@ type Store struct {
 // file, which query_only would refuse.
 func dsn(path string, queryOnly bool) string {
 	q := url.Values{}
-	for _, p := range []string{"busy_timeout(10000)", "journal_mode(WAL)", "synchronous(NORMAL)", "foreign_keys(0)", "cache_size(-16000)", "temp_store(MEMORY)"} {
+	pragmas := []string{"busy_timeout(10000)", "foreign_keys(0)", "cache_size(-16000)", "temp_store(MEMORY)"}
+	if !queryOnly {
+		// A read-only connection must not try to switch the journal
+		// mode or run WAL recovery: that is a write.
+		pragmas = append(pragmas, "journal_mode(WAL)", "synchronous(NORMAL)")
+	}
+	for _, p := range pragmas {
 		q.Add("_pragma", p)
 	}
 	if queryOnly {
 		q.Add("_pragma", "query_only(1)")
+		q.Set("mode", "ro")
+	} else {
+		q.Set("_txlock", "immediate")
 	}
-	q.Set("_txlock", "immediate")
 	return "file:" + path + "?" + q.Encode()
 }
 
@@ -176,6 +184,9 @@ func Open(path string, cfg Config) (*Store, error) {
 // with -db while a server may be writing to it.
 func OpenReadOnly(path string, cfg Config) (*Store, error) {
 	cfg.defaults()
+	if _, err := os.Stat(path); err != nil {
+		return nil, err
+	}
 	r, err := sql.Open("sqlite", dsn(path, true))
 	if err != nil {
 		return nil, err
@@ -349,6 +360,19 @@ func (s *Store) Backup(ctx context.Context, path string, opts ...BackupOptions) 
 
 // invalidateAnomalies drops the short-lived anomaly report cache. New data
 // or a retention pass can change what a window finds.
+// invalidateAnomaliesThrottled is for the ingest path, which runs every few
+// seconds. A live report may be up to ten seconds stale; recomputing every
+// check on every batch would make every graph refresh wait for all of them.
+func (s *Store) invalidateAnomaliesThrottled() {
+	s.anomMu.Lock()
+	if s.anomRep != nil && s.cfg.Now().Sub(s.anomAt) < 10*time.Second {
+		s.anomMu.Unlock()
+		return
+	}
+	s.anomMu.Unlock()
+	s.invalidateAnomalies()
+}
+
 func (s *Store) invalidateAnomalies() {
 	s.anomMu.Lock()
 	s.anomGen++
@@ -361,6 +385,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	var version int
 	if err := s.w.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return err
+	}
+	if version > schemaVersion() {
+		return fmt.Errorf("database schema is version %d, newer than this binary's %d (upgrade netgraph)", version, schemaVersion())
 	}
 	if version == 0 {
 		// Must precede the first table: auto_vacuum cannot be switched on

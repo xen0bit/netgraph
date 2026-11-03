@@ -111,6 +111,9 @@ func runServe(args []string) error {
 	if *trimRollups && *maxDB <= 0 {
 		return errors.New("-trim-rollups needs -max-db-mb")
 	}
+	if *maxDB < 0 {
+		return errors.New("-max-db-mb must not be negative")
+	}
 	if *alertURL != "" {
 		if u, err := url.Parse(*alertURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			return fmt.Errorf("-alert-webhook: want an http(s) URL")
@@ -163,6 +166,9 @@ func runServe(args []string) error {
 		cfg.Alerts = notifier.Stats
 	}
 	if *webDir != "" {
+		if info, err := os.Stat(*webDir); err != nil || !info.IsDir() {
+			return fmt.Errorf("-web-dir %q is not a directory", *webDir)
+		}
 		cfg.Web = os.DirFS(*webDir)
 	}
 	apiSrv := api.New(cfg)
@@ -170,6 +176,7 @@ func runServe(args []string) error {
 		Addr:              *listen,
 		Handler:           apiSrv,
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 		ErrorLog:          nil,
 	}
