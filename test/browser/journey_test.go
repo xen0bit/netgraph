@@ -586,10 +586,14 @@ func TestScreenshots(t *testing.T) {
 		"home-phone": {"", false, 390, 844},
 		"map-phone":  {window(), false, 390, 844},
 		"flows-dark": {window() + "&tab=flows", true, 1500, 950},
+		"privacy":    {window() + "&tab=devices&privacy=1", false, 1500, 950},
 	} {
 		init := ""
 		if c.dark {
 			init = `localStorage.setItem("netgraph.theme", "dark");`
+		}
+		if name == "privacy" {
+			init = `localStorage.setItem("netgraph.privacy", "1");`
 		}
 		s := open(t, c.hash, init)
 		s.run(emulation.SetDeviceMetricsOverride(c.w, c.h, 2, c.w < 500))

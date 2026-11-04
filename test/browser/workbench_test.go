@@ -3,6 +3,7 @@
 package browser
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -518,5 +519,134 @@ func TestViewerGetsAReadOnlyPage(t *testing.T) {
 	}
 	if status != 403 {
 		t.Errorf("a viewer's write: %d", status)
+	}
+}
+
+// realIdentifiers asks the API directly for what privacy mode must not show.
+const realIdentifiers = `(async () => {
+	const t = await fetch("/api/v1/devices?from=" + (Date.now() - 7200000) + "&to=" + (Date.now() + 60000));
+	const d = await t.json();
+	const out = new Set(["alice-iphone", "www.example.com", "quic.example.org", "BRN001BA9", "desktop-1"]);
+	for (const x of d) { out.add(x.mac); out.add(x.label); for (const ip of x.ips || []) out.add(ip); for (const h of x.hostnames || []) out.add(h); }
+	return [...out].filter((x) => x && x.length > 3);
+})()`
+
+// Privacy mode: nothing real on any page, and everything still works.
+func TestPrivacyMode(t *testing.T) {
+	s := open(t, "", `localStorage.setItem("netgraph.privacy", "1");`)
+	s.waitFor("Home", homeDrawn)
+	s.waitFor("the session", `localStorage.getItem("netgraph.token") === null`)
+	var real []string
+	if err := chromedp.Run(s.ctx, chromedp.Evaluate(realIdentifiers, &real, awaitPromise)); err != nil {
+		t.Fatal(err)
+	}
+	if len(real) < 5 {
+		t.Fatalf("real: %v", real)
+	}
+	var chip bool
+	s.eval(`document.querySelector("#privacy-off").offsetParent !== null`, &chip)
+	if !chip {
+		t.Error("nothing says privacy mode is on")
+	}
+	check := func(where string) {
+		t.Helper()
+		var text string
+		s.eval(`document.body.innerText + " " + (document.querySelector(".map-list")?.textContent || "") + " " + location.hash`, &text)
+		low := strings.ToLower(text)
+		for _, r := range real {
+			if strings.Contains(low, strings.ToLower(r)) {
+				t.Errorf("%s shows %q", where, r)
+			}
+		}
+	}
+	check("Home")
+	for _, v := range []struct{ tab, ready string }{
+		{"devices", `document.querySelectorAll("#t-devices tbody tr[data-i]").length > 0`},
+		{"flows", `document.querySelectorAll("#t-flows tbody tr[data-i]").length > 0`},
+		{"dns", `document.querySelectorAll("#t-dns tbody tr[data-i]").length > 0`},
+		{"destinations", `document.querySelectorAll("#t-destinations tbody tr[data-i]").length > 0`},
+		{"facts", `document.querySelectorAll("#t-facts tbody tr[data-i]").length > 0`},
+		{"findings", `!!document.querySelector("#findings-body [data-finding]")`},
+		{"graph", nodesDrawn},
+	} {
+		s.run(chromedp.Navigate(baseURL + "/#" + window() + "&tab=" + v.tab))
+		s.run(chromedp.Reload())
+		s.waitFor(v.tab, v.ready)
+		s.settle()
+		check(v.tab)
+	}
+	// A stand-in still reaches the real thing, through details and a filter.
+	s.run(chromedp.Navigate(baseURL + "/#" + window() + "&tab=devices"))
+	s.run(chromedp.Reload())
+	s.waitFor("devices", `document.querySelectorAll("#t-devices tbody tr[data-i]").length > 0`)
+	s.run(chromedp.Click(`#t-devices tbody tr[data-i]`, chromedp.ByQuery))
+	s.waitFor("details", `!!document.querySelector("#panel form.profile")`)
+	check("details")
+	var status string
+	s.eval(`document.querySelector("#status").textContent`, &status)
+	if strings.Contains(status, "not found") {
+		t.Errorf("details: %q", status)
+	}
+	s.eval(`document.querySelector("#panel-close").click()`, nil)
+	var mac string
+	s.eval(`document.querySelector("#t-devices tbody .mono").textContent`, &mac)
+	if !strings.HasPrefix(mac, "02:00:00:00:") {
+		t.Errorf("a MAC on screen: %q", mac)
+	}
+	s.run(chromedp.Navigate(baseURL + "/#" + window() + "&tab=devices&q=device:" + mac))
+	s.run(chromedp.Reload())
+	s.waitFor("one device", `document.querySelectorAll("#t-devices tbody tr[data-i]").length === 1`)
+	// Exports straight from the server are off.
+	var export bool
+	s.eval(`document.querySelector("#tt-devices [data-export]").offsetParent !== null`, &export)
+	if export {
+		t.Error("All CSV is on offer")
+	}
+}
+
+// The translation itself, directly.
+func TestPrivacyRoundTrips(t *testing.T) {
+	s := open(t, "", "")
+	var res string
+	js := `import("/js/privacy.js").then(({Privacy}) => {
+		const mem = {}; const store = {get: (k) => mem[k] || null, set: (k, v) => { mem[k] = v; }, remove: (k) => { delete mem[k]; }};
+		const p = new Privacy(store); p.set(true);
+		const d = p.walk({id: "device:3c:22:fb:01:02:03", label: "alice-iphone", kind: "device", ips: ["192.168.1.23", "fd00::50"],
+			summary: "alice-iphone at 192.168.1.23 reached www.example.com at 09:15:35 2026-11-04T09:15:35Z", text: "a secret note", bytes_out: 5, severity: "high", sub: "3 more"});
+		const again = p.walk({label: "alice-iphone", remote_ip: "192.168.1.23"});
+		return JSON.stringify({
+			id: d.id, label: d.label, kind: d.kind, ips: d.ips, text: d.text, bytes: d.bytes_out, sev: d.severity, sub: d.sub,
+			summaryClean: !/alice|192\.168|www\.example\.com/.test(d.summary), keepsTimes: d.summary.includes("09:15:35"),
+			stable: again.label === d.label && again.remote_ip === d.ips[0],
+			back: p.restore(d.id), path: p.restorePath("devices/" + encodeURIComponent(d.id.slice(7)) + "/profile?x=" + encodeURIComponent(d.label)),
+			bodyBack: p.restore(JSON.stringify({entity: d.id})),
+		});
+	})`
+	if err := chromedp.Run(s.ctx, chromedp.Evaluate(js, &res, awaitPromise)); err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		ID, Label, Kind, Text, Sev, Sub, Back, Path, BodyBack string
+		Ips                                                   []string
+		Bytes                                                 int
+		SummaryClean, KeepsTimes, Stable                      bool
+	}
+	if err := json.Unmarshal([]byte(res), &got); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(got.ID, "3c:22") || !strings.HasPrefix(got.ID, "device:02:00") || got.Label == "alice-iphone" || got.Kind != "device" || got.Text != "(hidden)" || got.Bytes != 5 || got.Sev != "high" || got.Sub != "3 more" {
+		t.Errorf("%s", res)
+	}
+	if strings.Contains(strings.Join(got.Ips, ","), "192.168") || strings.Contains(strings.Join(got.Ips, ","), "fd00") {
+		t.Errorf("ips %v", got.Ips)
+	}
+	if !got.SummaryClean || !got.KeepsTimes || !got.Stable {
+		t.Errorf("%s", res)
+	}
+	if got.Back != "device:3c:22:fb:01:02:03" || !strings.Contains(got.BodyBack, "3c:22:fb") {
+		t.Errorf("back %q, body %q", got.Back, got.BodyBack)
+	}
+	if !strings.Contains(got.Path, "3c%3A22") || !strings.Contains(got.Path, "alice-iphone") {
+		t.Errorf("path %q", got.Path)
 	}
 }

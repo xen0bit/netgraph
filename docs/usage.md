@@ -274,6 +274,11 @@ Incidents, Insights, What-if), **Wi-Fi** and **Settings** (General, Sensors).
   each time the page loads. For a model off your network it asks first, and shows
   what's being sent. The model can only read, and a statement that doesn't cite a
   read it made is removed. That shows where a claim came from, not that it's right.
+- **Privacy mode** (Settings, or the palette): for screenshots and demos, names and
+  addresses become consistent stand-ins across the whole page, in this browser. Everything
+  still works. Notes and fingerprints are hidden, and exports straight from the server are
+  off. Makers, device types, traffic volumes and times stay. It recognises addresses by shape and names by where they appear, so it's best
+  effort: check before sharing. A chip in the header says when it's on.
 - **Settings:** theme, saved views, the commands to add a sensor to this server, what this
   browser remembers, and what the server holds.
 - **Window:** pick presets, type times, shift with ◀ ▶ or `[` `]`, or drag

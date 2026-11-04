@@ -487,6 +487,11 @@ body[data-role="viewer"] .finding-note, body[data-role="viewer"] #rec-note, body
 body[data-role="viewer"] #view-links .actions, body[data-role="viewer"] [data-findings-seen],
 body[data-role="viewer"] #ask-model { display: none; }
 
+/* Privacy mode: always visible, and what comes straight from the server is off. */
+.privacy-chip { display: none; font-size: var(--text-xs); padding: 1px var(--sp-2); border-color: var(--warn); color: var(--warn); border-radius: 999px; }
+body.privacy .privacy-chip { display: inline-block; }
+body.privacy [data-export], body.privacy #g-svg, body.privacy #g-d2, body.privacy #rec-capsule { display: none !important; }
+
 /* Phones: the window is presets only, everything is one column, and what isn't
    the map folds away on the map. */
 @media (max-width: 760px) {
