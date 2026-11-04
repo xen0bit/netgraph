@@ -71,7 +71,7 @@ that are easy to break.
 
 ```sh
 gofmt -l .        # must print nothing
-make lint test    # vet (default, lab, browser and wasm tags), golangci-lint, tests with -race
+make lint test    # vet (default, lab and browser tags), golangci-lint, tests with -race
 make cross        # when touching dependencies or the sensor
 make browser      # when touching the web UI
 make lab          # when touching capture, decoding, ingest, queries or the web UI
