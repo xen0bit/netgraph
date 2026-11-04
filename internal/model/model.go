@@ -187,6 +187,39 @@ type Device struct {
 	Remotes      int      `json:"remotes"`
 }
 
+// Home states: how far to trust what the landing page shows as "now".
+const (
+	HomeOK       = "ok"       // at least one sensor is reporting
+	HomeQuiet    = "quiet"    // sensors exist, and none has reported lately
+	HomeImported = "imported" // data, but no sensor: it came from a capture
+	HomeNoData   = "no_data"  // nothing has ever arrived
+)
+
+// HomeSensor is one sensor on the landing page.
+type HomeSensor struct {
+	Name       string   `json:"name"`
+	Version    string   `json:"version,omitempty"`
+	LastSeen   int64    `json:"last_seen"`
+	Interfaces []string `json:"interfaces,omitempty"`
+	Quiet      bool     `json:"quiet,omitempty"`
+}
+
+// Home is the landing page. Active and TopTalkers are as of AsOfMS, the newest
+// data held, which is not now if the sensors have stopped.
+type Home struct {
+	State        string       `json:"state"`
+	NowMS        int64        `json:"now"`
+	AsOfMS       int64        `json:"as_of"`
+	SinceMS      int64        `json:"since"`
+	SinceClamped bool         `json:"since_clamped,omitempty"` // the absence was longer than Since covers
+	Sensors      []HomeSensor `json:"sensors"`
+	Active       []Device     `json:"active"`
+	NewDevices   []Device     `json:"new_devices"`
+	TopTalkers   []Device     `json:"top_talkers"`
+	Since        *Summary     `json:"summary_since,omitempty"`
+	Traffic      *Timeseries  `json:"traffic,omitempty"`
+}
+
 // Flow states relative to the window.
 const (
 	StateCarried = "carried" // opened before the window, still open at its start

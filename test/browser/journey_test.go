@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chromedp/cdproto/emulation"
 	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/page"
@@ -33,6 +34,8 @@ const readToken = "journey-read-token"
 
 var (
 	baseURL string
+	server  string // a built netgraph
+	webDir  string // the web UI it serves
 	sensor  string // a built netgraph-sensor
 	replay  string // the capture the server was loaded from
 	dataEnd int64  // unix ms: the end of the generated scenario, comfortably past it
@@ -63,6 +66,8 @@ func run(m *testing.M) (int, error) {
 	}
 	defer os.RemoveAll(dir)
 	bin := filepath.Join(dir, "netgraph")
+	server = bin
+	webDir = filepath.Join(root, "web/dist")
 	pcap := filepath.Join(dir, "home.pcap")
 	db := filepath.Join(dir, "netgraph.db")
 	tok := filepath.Join(dir, "read.token")
@@ -123,6 +128,12 @@ type session struct {
 // the app's own scripts on every load.
 func open(t *testing.T, hash, initJS string) *session {
 	t.Helper()
+	return openAt(t, baseURL, hash, initJS)
+}
+
+// openAt is open against another server than the shared one.
+func openAt(t *testing.T, url, hash, initJS string) *session {
+	t.Helper()
 	opts := append(chromedp.DefaultExecAllocatorOptions[:], chromedp.NoSandbox, chromedp.WindowSize(1500, 950),
 		// A fresh CI runner can take longer than the default 20s to start Chrome at all.
 		chromedp.WSURLReadTimeout(90*time.Second))
@@ -153,7 +164,7 @@ func open(t *testing.T, hash, initJS string) *session {
 			go func() { _ = chromedp.Run(ctx, page.HandleJavaScriptDialog(false)) }()
 		}
 	})
-	s.run(network.Enable(), chromedp.Navigate(baseURL+"/healthz"),
+	s.run(network.Enable(), chromedp.Navigate(url+"/healthz"),
 		chromedp.Evaluate(fmt.Sprintf(`localStorage.setItem("netgraph.token", %q)`, readToken), nil))
 	if initJS != "" {
 		s.run(chromedp.ActionFunc(func(ctx context.Context) error {
@@ -161,7 +172,11 @@ func open(t *testing.T, hash, initJS string) *session {
 			return err
 		}))
 	}
-	s.run(chromedp.Navigate(baseURL + "/#" + hash))
+	if hash == "" {
+		s.run(chromedp.Navigate(url + "/"))
+	} else {
+		s.run(chromedp.Navigate(url + "/#" + hash))
+	}
 	return s
 }
 
@@ -190,6 +205,8 @@ func (s *session) waitFor(what, js string) {
 	_ = chromedp.Run(s.ctx, chromedp.Text(`#status`, &status, chromedp.ByQuery))
 	s.t.Fatalf("timed out waiting for %s (status: %q)", what, status)
 }
+
+var awaitPromise = func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) }
 
 func (s *session) eval(js string, out any) {
 	s.t.Helper()
@@ -493,8 +510,37 @@ func TestScreenshots(t *testing.T) {
 		"recorder": window() + "&rec=1&rec_at=" + fmt.Sprint(dataEnd) + "&rec_lookback=3600000",
 		"empty":    fmt.Sprintf("from=%d&to=%d", far-3600_000, far),
 		"long":     fmt.Sprintf("from=%d&to=%d&tab=flows", dataEnd-3*864e5, dataEnd),
+		"map":      window(),
+		"home":     "",
+		"settings": "tab=settings",
 	} {
 		s := open(t, hash, "")
+		s.settle()
+		time.Sleep(1500 * time.Millisecond)
+		var buf []byte
+		s.run(chromedp.CaptureScreenshot(&buf))
+		if err := os.WriteFile(filepath.Join(dir, name+".png"), buf, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// Home and the map, dark and on a phone.
+	for name, c := range map[string]struct {
+		hash string
+		dark bool
+		w, h int64
+	}{
+		"home-dark":  {"", true, 1500, 950},
+		"map-dark":   {window(), true, 1500, 950},
+		"home-phone": {"", false, 390, 844},
+		"map-phone":  {window(), false, 390, 844},
+		"flows-dark": {window() + "&tab=flows", true, 1500, 950},
+	} {
+		init := ""
+		if c.dark {
+			init = `localStorage.setItem("netgraph.theme", "dark");`
+		}
+		s := open(t, c.hash, init)
+		s.run(emulation.SetDeviceMetricsOverride(c.w, c.h, 2, c.w < 500))
 		s.settle()
 		time.Sleep(1500 * time.Millisecond)
 		var buf []byte

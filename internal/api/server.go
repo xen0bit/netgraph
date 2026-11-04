@@ -124,6 +124,7 @@ func New(cfg Config) *Server {
 	s.mux.HandleFunc("GET /healthz", s.version)
 	read := func(p string, h http.HandlerFunc) { s.mux.Handle("GET "+p, s.requireRead(h)) }
 	read("/api/v1/range", s.dataRange)
+	read("/api/v1/home", s.home)
 	read("/api/v1/reel", s.reel)
 	read("/api/v1/reel/markers", s.reelMarkers)
 	read("/api/v1/summary", s.summary)
@@ -630,6 +631,26 @@ func (s *Server) dataRange(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, rng)
+}
+
+// home answers the landing page. since is unix milliseconds; without it, the
+// last day.
+func (s *Server) home(w http.ResponseWriter, r *http.Request) {
+	var since time.Time
+	if v := r.URL.Query().Get("since"); v != "" {
+		n, err := strconv.ParseInt(v, 10, 64)
+		if err != nil || n <= 0 {
+			httpError(w, http.StatusBadRequest, errors.New("since must be unix milliseconds"))
+			return
+		}
+		since = time.UnixMilli(n)
+	}
+	h, err := s.cfg.Store.Home(r.Context(), since)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, h)
 }
 
 func (s *Server) anomalies(w http.ResponseWriter, r *http.Request) {
@@ -1500,6 +1521,9 @@ func (s *Server) web(w http.ResponseWriter, r *http.Request) {
 	}
 	if p == "index.html" || strings.HasSuffix(p, ".js") || strings.HasSuffix(p, ".css") {
 		w.Header().Set("Cache-Control", "no-cache")
+	}
+	if strings.HasSuffix(p, ".webmanifest") {
+		w.Header().Set("Content-Type", "application/manifest+json")
 	}
 	http.ServeFileFS(w, r, s.cfg.Web, p)
 }
