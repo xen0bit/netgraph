@@ -27,10 +27,11 @@ that are easy to break.
   identical events (`TestReplayDeterministic`). Active lookups — reverse
   DNS, channel hopping — are live-capture only.
 - **Other sources run on the server** (`internal/sources`): decoders bound what they read
-  and have `Fuzz*` targets, as the sensor's do, and UDP exports need an allow-list.
+  and have `Fuzz*` targets, as the sensor's do, and UDP exports need an allow-list. Conntrack is the exception, since only the router's
+  kernel knows it: `internal/conntrack` runs in the sensor, off by default.
 - **The sensor persists nothing.** It writes no file: no database, spool,
   cache or keyring on disk. Its only inputs from disk are the token and CA
-  files it is pointed at.
+  files it is pointed at. (The kernel's connection table comes over netlink.)
 - **Wi-Fi keys are configured on the server; decryption happens on the
   sensor, in pure Go.** `netgraph serve -wifi-key-file` holds the
   passphrases, derives PMKs (`internal/wifi`), and serves only PMKs and WEP

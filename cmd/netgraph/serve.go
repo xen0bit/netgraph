@@ -53,10 +53,13 @@ func runServe(args []string) error {
 	mqttFile := fs.String("mqtt-file", "", "file holding an MQTT broker's URL, to publish to Home Assistant: mqtt://user:pass@host:1883/prefix; or $NETGRAPH_MQTT")
 	netflowListen := fs.String("netflow-listen", "", "receive NetFlow v5, v9 and IPFIX on this UDP address, such as :2055 (needs -netflow-allow)")
 	netflowAllow := fs.String("netflow-allow", "", "comma-separated addresses or CIDRs to accept exports from")
+	sflowListen := fs.String("sflow-listen", "", "receive sFlow v5 on this UDP address, such as :6343 (needs -sflow-allow)")
+	sflowAllow := fs.String("sflow-allow", "", "comma-separated addresses or CIDRs to accept sFlow from")
 	dnsLog := fs.String("dns-log", "", "follow this DNS server's log: dnsmasq's log-queries output, Pi-hole's pihole.log, or AdGuard Home's querylog.json")
 	dnsLogFormat := fs.String("dns-log-format", "dnsmasq", "dnsmasq (also Pi-hole) or adguard")
-	leasesFile := fs.String("leases-file", "", "read device names and addresses from this dnsmasq lease file")
-	sourceLocal := fs.String("source-local", "", "comma-separated CIDRs that are \"here\", for -netflow-listen, -dns-log and -leases-file (default the private ranges)")
+	leasesFile := fs.String("leases-file", "", "read device names and addresses from this DHCP server's lease file")
+	leasesFormat := fs.String("leases-format", "dnsmasq", "dnsmasq, isc (dhcpd.leases, also OPNsense and pfSense) or kea (memfile CSV)")
+	sourceLocal := fs.String("source-local", "", "comma-separated CIDRs that are \"here\", for -netflow-listen, -sflow-listen, -dns-log and -leases-file (default the private ranges)")
 	llmFile := fs.String("llm-file", "", "file holding an OpenAI-compatible model's URL, to let Ask use it: http://localhost:11434/v1?model=llama3.2; or $NETGRAPH_LLM. Off by default: a model elsewhere receives your network's data")
 	alertAnomalies := fs.String("alert-anomalies", "", "also POST anomalies at or above this severity: low, medium or high (default off)")
 	alertKinds := fs.String("alert-anomaly-kinds", "", "comma-separated anomaly kinds to alert on (default: all kinds at the chosen severity)")
@@ -177,6 +180,16 @@ func runServe(args []string) error {
 	if *netflowListen != "" && len(allowExporters) == 0 {
 		return errors.New("-netflow-listen needs -netflow-allow: UDP has no login, so this says who to believe")
 	}
+	allowSFlow, err := parsePrefixes("-sflow-allow", *sflowAllow)
+	if err != nil {
+		return err
+	}
+	if *sflowListen != "" && len(allowSFlow) == 0 {
+		return errors.New("-sflow-listen needs -sflow-allow: UDP has no login, so this says who to believe")
+	}
+	if !sources.ValidLeaseFormat(*leasesFormat) {
+		return fmt.Errorf("-leases-format: %q is not dnsmasq, isc or kea", *leasesFormat)
+	}
 	localNets, err := parsePrefixes("-source-local", *sourceLocal)
 	if err != nil {
 		return err
@@ -282,6 +295,15 @@ func runServe(args []string) error {
 		}()
 		log.Info("receiving NetFlow", "listen", *netflowListen)
 	}
+	if *sflowListen != "" {
+		go func() {
+			n := &sources.SFlow{Listen: *sflowListen, Allow: allowSFlow, Local: localNets, Sink: sink, Log: log}
+			if err := n.Run(ctx); err != nil && ctx.Err() == nil {
+				log.Error("sflow", "err", err)
+			}
+		}()
+		log.Info("receiving sFlow", "listen", *sflowListen)
+	}
 	if *dnsLog != "" {
 		go func() {
 			d := &sources.DNSLog{Path: *dnsLog, Format: *dnsLogFormat, Local: localNets, Sink: sink, Log: log}
@@ -293,11 +315,11 @@ func runServe(args []string) error {
 	}
 	if *leasesFile != "" {
 		go func() {
-			if err := (&sources.LeaseFile{Path: *leasesFile, Local: localNets, Sink: sink, Log: log}).Run(ctx); err != nil && ctx.Err() == nil {
+			if err := (&sources.LeaseFile{Path: *leasesFile, Format: *leasesFormat, Local: localNets, Sink: sink, Log: log}).Run(ctx); err != nil && ctx.Err() == nil {
 				log.Error("lease file", "err", err)
 			}
 		}()
-		log.Info("reading a lease file", "path", *leasesFile)
+		log.Info("reading a lease file", "path", *leasesFile, "format", *leasesFormat)
 	}
 	var anomalyAlerts *alert.Notifier
 	if notifier != nil && *alertAnomalies != "" {
