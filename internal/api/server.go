@@ -18,6 +18,7 @@ import (
 	"io/fs"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"path"
 	"slices"
 	"strconv"
@@ -201,6 +202,8 @@ func New(cfg Config) *Server {
 	s.mux.Handle("POST /api/v1/findings/seen", s.require(RoleOperator, s.findingsSeen))
 	s.mux.Handle("POST /api/v1/anomalies/mute", s.require(RoleOperator, s.muteAnomaly))
 	s.mux.Handle("POST /api/v1/whatif", s.require(RoleViewer, s.whatif))
+	s.mux.Handle("GET /api/v1/policy/learn", s.require(RoleViewer, s.policyLearn))
+	s.mux.Handle("POST /api/v1/policy/export", s.require(RoleViewer, s.policyExport))
 	s.mux.Handle("POST /api/v1/ask", s.require(RoleViewer, s.ask))
 	s.mux.Handle("POST /api/v1/annotations", s.require(RoleOperator, s.createAnnotation))
 	s.mux.Handle("DELETE /api/v1/annotations/{id}", s.require(RoleOperator, s.deleteAnnotation))
@@ -1512,6 +1515,87 @@ func (s *Server) whatif(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out, err := s.cfg.Store.WhatIf(r.Context(), p, f, r.URL.Query().Get("scope"))
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, out)
+}
+
+// policyWindow is a window for learning or exporting: two weeks, unless told otherwise.
+func (s *Server) policyWindow(from, to string, q url.Values) (model.Filter, error) {
+	now := s.cfg.Store.Now()
+	f := model.Filter{}
+	if q != nil {
+		var err error
+		if f, err = model.ParseFilter(q, now); err != nil {
+			return f, err
+		}
+	}
+	var err error
+	if from != "" {
+		if f.From, err = model.ParseTime(from, now); err != nil {
+			return f, err
+		}
+	}
+	if to != "" {
+		if f.To, err = model.ParseTime(to, now); err != nil {
+			return f, err
+		}
+	}
+	if f.To.IsZero() {
+		f.To = now
+	}
+	if f.From.IsZero() {
+		f.From = f.To.Add(-14 * 24 * time.Hour)
+	}
+	if !f.From.Before(f.To) {
+		return f, errors.New("from must be before to")
+	}
+	return f, nil
+}
+
+// policyLearn proposes a policy for a device. It reads, and saves nothing.
+func (s *Server) policyLearn(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	device := q.Get("device")
+	q.Del("device") // it's the device learned about, not a filter to parse
+	f, err := s.policyWindow("", "", q)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	out, err := s.cfg.Store.LearnPolicy(r.Context(), device, f)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, out)
+}
+
+// policyExport writes a firewall's configuration for someone to apply. It never touches one.
+func (s *Server) policyExport(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Policy json.RawMessage `json:"policy"`
+		Format string          `json:"format"`
+		From   string          `json:"from"`
+		To     string          `json:"to"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in); err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	p, err := policy.Parse(bytes.NewReader(in.Policy))
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	f, err := s.policyWindow(in.From, in.To, nil)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	out, err := s.cfg.Store.ExportPolicy(r.Context(), p, in.Format, f)
 	if err != nil {
 		s.fail(w, err)
 		return

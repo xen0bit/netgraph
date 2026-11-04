@@ -48,6 +48,8 @@ func main() {
 		err = runLabel(os.Args[2:])
 	case "whatif":
 		err = runWhatIf(os.Args[2:])
+	case "policy":
+		err = runPolicy(os.Args[2:])
 	case "mcp":
 		err = runMCP(os.Args[2:])
 	case "ask":

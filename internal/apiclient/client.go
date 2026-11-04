@@ -291,6 +291,37 @@ func (c *Client) WhatIf(ctx context.Context, p *policy.Policy, f model.Filter, s
 	return &v, nil
 }
 
+// LearnPolicy asks the server to propose a policy for a device.
+func (c *Client) LearnPolicy(ctx context.Context, device string, f model.Filter) (*policy.Learned, error) {
+	q := url.Values{"device": {device}, "from": {f.From.Format(time.RFC3339Nano)}, "to": {f.To.Format(time.RFC3339Nano)}}
+	b, err := c.do(ctx, http.MethodGet, "/api/v1/policy/learn", q, nil)
+	if err != nil {
+		return nil, err
+	}
+	var v policy.Learned
+	if err := json.Unmarshal(b, &v); err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
+// ExportPolicy asks the server for a firewall's configuration.
+func (c *Client) ExportPolicy(ctx context.Context, p *policy.Policy, format string, f model.Filter) (*policy.Exported, error) {
+	body, err := json.Marshal(map[string]any{"policy": p, "format": format, "from": f.From, "to": f.To})
+	if err != nil {
+		return nil, err
+	}
+	b, err := c.do(ctx, http.MethodPost, "/api/v1/policy/export", nil, body)
+	if err != nil {
+		return nil, err
+	}
+	var v policy.Exported
+	if err := json.Unmarshal(b, &v); err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
 // Ask sends a question to the server's grounded intent engine.
 func (c *Client) Ask(ctx context.Context, question string, f model.Filter) (*model.Answer, error) {
 	_, offset := time.Now().Zone()

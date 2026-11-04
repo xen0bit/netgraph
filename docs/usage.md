@@ -92,6 +92,8 @@ TIME                 DEVICE           TYPE  NAME               RCODE     MS    A
 | `query story ID` | one entity's intervals, milestones and evidence |
 | `query diff -at-a ... -at-b ...` | what changed between two moments |
 | `whatif -policy FILE` | test a proposed policy against observed traffic; read-only |
+| `policy learn -device MAC` | propose the least a device needs, from what it did in the last two weeks |
+| `policy export -policy FILE -format nftables` | write `nftables`, `openwrt` or `opnsense` configuration for you to apply |
 | `ask "question"` | answer from recorded evidence; prints claims and citations |
 | `query exposure` | reachable/weak findings, from recorded evidence |
 | `query coverage` | which sensors saw which devices |
@@ -121,6 +123,32 @@ rest are one "N more destinations" node), `-dns` (lookups and answers,
 default on), `-identity` (services, Wi-Fi networks, and the hostnames,
 addresses, fingerprints and vendors devices share), `-layout
 elk|dagre`, `-theme light|dark`, `-ascii` (no box-drawing characters).
+
+## Building a policy
+
+Under **Findings → Policy**, or from any connection on the map: right-click an edge or open it,
+and choose **Allow** or **Deny**. Each click adds a rule, ahead of the ones before, and shows
+straight away what would stop in the current window. The draft lives in your browser.
+
+**Learn** proposes a least-privilege policy for one device from what it did, two weeks by default:
+everything it did is allowed and the rest denied. It's a starting point. Something it does
+monthly isn't in it, so run it past the window you trust and read the rules.
+
+**Export** writes configuration for nftables, OpenWrt or OPNsense. netgraph never applies it. A
+firewall works in addresses, so:
+
+- Devices are matched by the addresses seen for them, so give them fixed leases first.
+- Rules naming a site, network or country use the addresses seen for it in the window. Those
+  change, and any not seen aren't covered, so a deny by name is weaker than it reads.
+- Anything that can't be expressed is commented out and listed as a warning. Read these: a
+  left-out deny is traffic that's still allowed.
+- DNS rules aren't exported: put them on your DNS server.
+- It covers traffic the router forwards. Two devices on one LAN talk through its switch, which the
+  router's firewall never sees, so it can't stop those.
+
+The nftables output has been loaded by `nft` and tested against real traffic, and the OpenWrt
+output compiled by `fw4`. The OPNsense output is checked as XML only: it hasn't been imported
+into a real OPNsense, so look it over first.
 
 ## What-if policies
 

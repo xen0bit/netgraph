@@ -2,7 +2,7 @@
 // server restarting. Only the shell is ever stored: network data stays out of
 // the cache, so nothing from /api/ is touched here at all.
 const CACHE = "netgraph-shell-v5";
-const SHELL = ["./", "css/app.css", "icon.svg", "manifest.webmanifest", "js/main.js", "js/util.js", "js/home.js", "js/palette.js", "js/filters.js", "js/passport.js", "js/devices.js", "js/findings.js", "js/fleet.js", "js/airspace.js", "js/privacy.js", "js/pulse.js", "js/reel.js", "js/map/map.js", "js/map/layout.js", "js/map/icons.js"];
+const SHELL = ["./", "css/app.css", "icon.svg", "manifest.webmanifest", "js/main.js", "js/util.js", "js/home.js", "js/palette.js", "js/filters.js", "js/passport.js", "js/devices.js", "js/findings.js", "js/fleet.js", "js/airspace.js", "js/policy.js", "js/privacy.js", "js/pulse.js", "js/reel.js", "js/map/map.js", "js/map/layout.js", "js/map/icons.js"];
 const scoped = (p) => new URL(p, self.registration.scope).pathname;
 
 self.addEventListener("install", (e) => {
