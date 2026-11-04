@@ -594,3 +594,182 @@ func TestLeaseFileSkipsExpired(t *testing.T) {
 		t.Errorf("%d leases", n)
 	}
 }
+
+const iscFile = `# The format of this file is documented in the dhcpd.leases(5) manual page.
+authoring-byte-order little-endian;
+
+lease 192.168.1.50 {
+  starts 4 2026/10/29 10:00:00;
+  ends 4 2026/10/29 11:00:00;
+  binding state active;
+  hardware ethernet 00:11:22:33:44:55;
+  client-hostname "old-name";
+}
+lease 192.168.1.50 {
+  starts 4 2026/10/29 11:00:00;
+  ends 4 2026/10/29 12:00:00;
+  cltt 4 2026/10/29 11:00:00;
+  binding state active;
+  next binding state free;
+  rewind binding state free;
+  hardware ethernet 00:11:22:33:44:55;
+  uid "\001\000\021\"3DU";
+  client-hostname "laptop";
+}
+lease 192.168.1.51 {
+  ends epoch 1793232000; # Thu Oct 29 2026
+  binding state active;
+  hardware ethernet 00:11:22:33:44:66;
+}
+lease 192.168.1.52 {
+  ends never;
+  binding state active;
+  hardware ethernet 00:11:22:33:44:77;
+}
+lease 192.168.1.60 {
+  binding state active;
+  hardware ethernet 00:11:22:33:44:88;
+}
+lease 192.168.1.60 {
+  binding state free;
+  hardware ethernet 00:11:22:33:44:88;
+}
+lease not-an-address {
+  binding state active;
+}
+`
+
+func TestISCLeases(t *testing.T) {
+	got := ParseISCLeases(iscFile)
+	if len(got) != 3 {
+		t.Fatalf("%+v", got)
+	}
+	if got[0].Hostname != "laptop" || got[0].MAC != "00:11:22:33:44:55" || !got[0].Expires.Equal(time.Date(2026, 10, 29, 12, 0, 0, 0, time.UTC)) {
+		t.Errorf("the last block should win: %+v", got[0])
+	}
+	if got[1].Expires.Unix() != 1793232000 {
+		t.Errorf("epoch form: %+v", got[1])
+	}
+	if !got[2].Expires.IsZero() {
+		t.Errorf("never: %+v", got[2])
+	}
+}
+
+const keaFile = `address,hwaddr,client_id,valid_lifetime,expire,subnet_id,fqdn_fwd,fqdn_rev,hostname,state,user_context,pool_id
+192.168.1.70,00:11:22:33:44:01,01:00:11,3600,1793232000,1,0,0,tv.example.,0,,0
+192.168.1.71,00:11:22:33:44:02,,3600,1793232000,1,0,0,,0,,0
+192.168.1.71,00:11:22:33:44:02,,3600,1793232100,1,0,0,phone,0,,0
+192.168.1.72,00:11:22:33:44:03,,3600,1793232000,1,0,0,gone,0,,0
+192.168.1.72,00:11:22:33:44:03,,0,1793232000,1,0,0,gone,2,,0
+192.168.1.73,,,3600,1793232000,1,0,0,,0,,0
+not-an-address,00:11:22:33:44:04,,3600,1793232000,1,0,0,,0,,0
+short
+`
+
+func TestKeaLeases(t *testing.T) {
+	got := ParseKeaLeases(keaFile)
+	if len(got) != 2 {
+		t.Fatalf("%+v", got)
+	}
+	if got[0].Hostname != "tv.example" || got[0].Expires.Unix() != 1793232000 {
+		t.Errorf("%+v", got[0])
+	}
+	if got[1].Hostname != "phone" || got[1].Expires.Unix() != 1793232100 {
+		t.Errorf("the last row should win: %+v", got[1])
+	}
+	if ParseKeaLeases("not,a,lease,file\n1,2,3,4\n") != nil {
+		t.Error("read a file with no address column")
+	}
+}
+
+func TestKeaLeasesWithNoStateColumn(t *testing.T) {
+	got := ParseKeaLeases("address,hwaddr,client_id,valid_lifetime,expire,subnet_id,fqdn_fwd,fqdn_rev,hostname\n192.168.1.70,00:11:22:33:44:01,,3600,1793232000,1,0,0,tv\n")
+	if len(got) != 1 || got[0].Hostname != "tv" {
+		t.Errorf("%+v", got)
+	}
+}
+
+func TestKeaLeases6(t *testing.T) {
+	text := "address,duid,valid_lifetime,expire,subnet_id,pref_lifetime,lease_type,iaid,prefix_len,fqdn_fwd,fqdn_rev,hostname,hwaddr,state\n" +
+		"2001:db8::5,00:01,3600,1793232000,1,1800,0,1,128,0,0,nas,00:11:22:33:44:09,0\n"
+	got := ParseLeases("kea", text)
+	if len(got) != 1 || got[0].IP.String() != "2001:db8::5" || got[0].MAC != "00:11:22:33:44:09" {
+		t.Fatalf("%+v", got)
+	}
+	evs := LeaseEvents(got[0], rx)
+	for _, e := range evs {
+		if e.Type == wire.TypeDHCP {
+			t.Errorf("an IPv6 lease as a DHCPv4 event: %+v", e.DHCP)
+		}
+	}
+	if len(evs) != 2 || evs[1].Name.Name != "nas" {
+		t.Errorf("%+v", evs)
+	}
+}
+
+func FuzzLeases(f *testing.F) {
+	f.Add(iscFile)
+	f.Add(keaFile)
+	f.Add("1793232000 aa:bb:cc:dd:ee:ff 10.0.0.1 host *\n")
+	f.Fuzz(func(t *testing.T, s string) {
+		for _, format := range []string{"dnsmasq", "isc", "kea"} {
+			for _, l := range ParseLeases(format, s) {
+				if !l.IP.IsValid() || l.MAC == "" || len(l.Hostname) > 253 {
+					t.Fatalf("%s: %+v", format, l)
+				}
+				LeaseEvents(l, rx)
+			}
+		}
+	})
+}
+
+type runner interface{ Run(context.Context) error }
+
+// testCollector sends a datagram from an allowed and then a refused address's point of
+// view, and waits for done to see the events.
+func testCollector(t *testing.T, datagram []byte, build func(ready func(string), allow []netip.Prefix, sink Sink) runner, done func([]wire.Event) bool) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	var mu sync.Mutex
+	var seen []wire.Event
+	sink := func(_ context.Context, _, _ string, evs []wire.Event) error {
+		mu.Lock()
+		defer mu.Unlock()
+		seen = append(seen, evs...)
+		return nil
+	}
+	addr := make2(ctx, t, build, sink)
+	conn, err := net.Dial("udp", addr)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	for ctx.Err() == nil {
+		if _, err := conn.Write(datagram); err != nil {
+			t.Fatal(err)
+		}
+		time.Sleep(100 * time.Millisecond)
+		mu.Lock()
+		ok := done(seen)
+		mu.Unlock()
+		if ok {
+			return
+		}
+	}
+	t.Fatal("never arrived")
+}
+
+func make2(ctx context.Context, t *testing.T, build func(ready func(string), allow []netip.Prefix, sink Sink) runner, sink Sink) string {
+	t.Helper()
+	ready := make(chan string, 1)
+	r := build(func(a string) { ready <- a }, []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}, sink)
+	go func() { _ = r.Run(ctx) }()
+	select {
+	case a := <-ready:
+		return a
+	case <-ctx.Done():
+		t.Fatal("never listened")
+		return ""
+	}
+}

@@ -86,37 +86,87 @@ const (
 )
 
 type exporter struct {
-	tmpl Templates
-	pub  *publisher
-	evs  []wire.Event
+	tmpl    Templates
+	pub     *publisher
+	evs     []wire.Event
+	samples sampleTotals
 }
 
 // Run listens until ctx ends.
 func (n *NetFlow) Run(ctx context.Context) error {
-	if len(n.Allow) == 0 {
-		return errors.New("netflow: needs addresses to accept exports from")
+	c := collector{kind: "netflow", listen: n.Listen, allow: n.Allow, local: n.Local, sink: n.Sink, log: n.Log, ready: n.Ready}
+	c.decode = func(e *exporter, b []byte, now time.Time) error {
+		flows, err := ParseNetFlow(b, &e.tmpl, now)
+		for i := range flows {
+			f := flows[i]
+			e.evs = append(e.evs, wire.Event{Type: wire.TypeFlow, TS: f.End, Flow: &f})
+		}
+		return err
 	}
-	if n.Log == nil {
-		n.Log = slog.Default()
+	return c.run(ctx)
+}
+
+// SFlow listens for sFlow v5 datagrams, with the same rule as NetFlow about who to believe.
+type SFlow struct {
+	Listen string
+	Allow  []netip.Prefix
+	Local  []netip.Prefix
+	Sink   Sink
+	Log    *slog.Logger
+	Ready  func(addr string)
+}
+
+// Run listens until ctx ends.
+func (s *SFlow) Run(ctx context.Context) error {
+	c := collector{kind: "sflow", listen: s.Listen, allow: s.Allow, local: s.Local, sink: s.Sink, log: s.Log, ready: s.Ready}
+	c.decode = func(e *exporter, b []byte, now time.Time) error {
+		flows, err := ParseSFlow(b, now)
+		for _, f := range flows {
+			e.samples.add(f)
+		}
+		return err
 	}
-	conn, err := (&net.ListenConfig{}).ListenPacket(ctx, "udp", n.Listen)
+	return c.run(ctx)
+}
+
+// collector is what listening for exports over UDP has in common.
+type collector struct {
+	kind, listen string
+	allow, local []netip.Prefix
+	sink         Sink
+	log          *slog.Logger
+	ready        func(addr string)
+	decode       func(e *exporter, b []byte, now time.Time) error
+}
+
+func (c *collector) run(ctx context.Context) error {
+	if len(c.allow) == 0 {
+		return fmt.Errorf("%s: needs addresses to accept exports from", c.kind)
+	}
+	if c.log == nil {
+		c.log = slog.Default()
+	}
+	conn, err := (&net.ListenConfig{}).ListenPacket(ctx, "udp", c.listen)
 	if err != nil {
 		return err
 	}
 	defer conn.Close()
-	if n.Ready != nil {
-		n.Ready(conn.LocalAddr().String())
+	if c.ready != nil {
+		c.ready(conn.LocalAddr().String())
 	}
 	go func() {
 		<-ctx.Done()
 		conn.Close()
 	}()
 	exporters := map[netip.Addr]*exporter{}
-	flush := func() {
+	send := func(sendCtx context.Context, e *exporter) {
+		evs := append(e.evs, e.samples.drain()...)
+		e.evs = nil
+		e.pub.send(sendCtx, evs)
+	}
+	flush := func(sendCtx context.Context) {
 		for _, e := range exporters {
-			evs := e.evs
-			e.evs = nil
-			e.pub.send(ctx, evs)
+			send(sendCtx, e)
 		}
 	}
 	buf := make([]byte, 65535)
@@ -125,11 +175,11 @@ func (n *NetFlow) Run(ctx context.Context) error {
 		_ = conn.SetReadDeadline(time.Now().Add(netflowInterval))
 		size, addr, err := conn.ReadFrom(buf)
 		if ctx.Err() != nil {
-			flush()
+			flush(context.WithoutCancel(ctx))
 			return nil
 		}
 		if time.Since(last) >= netflowInterval {
-			flush()
+			flush(ctx)
 			last = time.Now()
 		}
 		if err != nil {
@@ -144,7 +194,7 @@ func (n *NetFlow) Run(ctx context.Context) error {
 			continue
 		}
 		from := ua.AddrPort().Addr().Unmap()
-		if !allowed(n.Allow, from) {
+		if !allowed(c.allow, from) {
 			continue
 		}
 		e := exporters[from]
@@ -152,23 +202,15 @@ func (n *NetFlow) Run(ctx context.Context) error {
 			if len(exporters) >= maxExporters {
 				continue
 			}
-			e = &exporter{pub: newPublisher("netflow-"+from.String(), n.Local, n.Sink, n.Log)}
+			e = &exporter{pub: newPublisher(c.kind+"-"+from.String(), c.local, c.sink, c.log)}
 			exporters[from] = e
-			n.Log.Info("netflow: a new exporter", "from", from)
+			c.log.Info(c.kind+": a new exporter", "from", from)
 		}
-		now := time.Now()
-		flows, err := ParseNetFlow(buf[:size], &e.tmpl, now)
-		if err != nil {
-			n.Log.Debug("netflow: a datagram didn't parse", "from", from, "err", err)
+		if err := c.decode(e, buf[:size], time.Now()); err != nil {
+			c.log.Debug(c.kind+": a datagram didn't parse", "from", from, "err", err)
 		}
-		for i := range flows {
-			f := flows[i]
-			e.evs = append(e.evs, wire.Event{Type: wire.TypeFlow, TS: f.End, Flow: &f})
-		}
-		if len(e.evs) >= netflowBatch {
-			evs := e.evs
-			e.evs = nil
-			e.pub.send(ctx, evs)
+		if len(e.evs) >= netflowBatch || len(e.samples.order) >= netflowBatch {
+			send(ctx, e)
 		}
 	}
 }
@@ -298,13 +340,32 @@ func (t *follower) read(line func(string)) {
 	}
 }
 
+// maxLeaseFile bounds one read. ISC and Kea append to theirs between cleanups, so what's
+// at the end is the newest; readBounded keeps the end.
+const maxLeaseFile = 64 << 20
+
+func readBounded(path string, limit int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	if st, err := f.Stat(); err == nil && st.Size() > limit {
+		if _, err := f.Seek(st.Size()-limit, io.SeekStart); err != nil {
+			return nil, err
+		}
+	}
+	return io.ReadAll(io.LimitReader(f, limit))
+}
+
 // LeaseFile watches a DHCP server's lease file.
 type LeaseFile struct {
-	Path  string
-	Local []netip.Prefix
-	Sink  Sink
-	Log   *slog.Logger
-	Every time.Duration
+	Path   string
+	Format string // dnsmasq, isc or kea; dnsmasq if empty
+	Local  []netip.Prefix
+	Sink   Sink
+	Log    *slog.Logger
+	Every  time.Duration
 }
 
 // Run reports the leases until ctx ends. Each lease is said again every time round, to
@@ -320,12 +381,12 @@ func (l *LeaseFile) Run(ctx context.Context) error {
 	tick := time.NewTicker(l.Every)
 	defer tick.Stop()
 	for {
-		if b, err := os.ReadFile(l.Path); err != nil {
+		if b, err := readBounded(l.Path, maxLeaseFile); err != nil {
 			l.Log.Debug("lease file", "err", err)
 		} else {
 			now := time.Now()
 			var evs []wire.Event
-			for _, lease := range ParseDNSMasqLeases(string(b)) {
+			for _, lease := range ParseLeases(l.Format, string(b)) {
 				if lease.Expires.IsZero() || lease.Expires.After(now) {
 					evs = append(evs, LeaseEvents(lease, now)...)
 				}

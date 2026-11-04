@@ -1,5 +1,5 @@
 // Package sources turns what other systems already know into netgraph's events:
-// NetFlow and IPFIX from a router, DNS logs from dnsmasq, Pi-hole and AdGuard Home, and
+// NetFlow, IPFIX and sFlow from a router, DNS logs from dnsmasq, Pi-hole and AdGuard Home, and
 // a DHCP server's leases. They run on the server, so the sensor stays small.
 //
 // All of it is input from outside. Decoders are pure functions that bound every length
@@ -160,19 +160,25 @@ const connectionBucket = 600
 // orient makes a record read from client to server. NetFlow reports each direction on its
 // own, with no idea who began, so the reply to a phone's HTTPS connection reads as someone
 // at port 443 connecting to the phone, and would show as a connection in from outside.
-// The side on the well-known port is taken to be the server. With two high ports there's
-// nothing to go on, and it stays as reported, so that traffic can show as two connections.
+// The side on the well-known port is taken to be the server, and failing that, the side
+// outside the range systems pick client ports from (32768 up, on anything current). With
+// two ports in that range there's nothing to go on, and it stays as reported, so that
+// traffic can show as two connections.
 func orient(f *wire.Flow) {
 	if f.Proto != 6 && f.Proto != 17 {
 		return
 	}
-	if serverLike(f.SrcPort) && (!serverLike(f.DstPort) || f.SrcPort < f.DstPort) {
+	if swap := serverLike(f.SrcPort) && (!serverLike(f.DstPort) || f.SrcPort < f.DstPort) ||
+		!serverLike(f.DstPort) && f.SrcPort > 0 && f.SrcPort < ephemeralPorts && f.DstPort >= ephemeralPorts; swap {
 		f.Src, f.Dst = f.Dst, f.Src
 		f.SrcPort, f.DstPort = f.DstPort, f.SrcPort
 		f.BytesOut, f.BytesIn = 0, f.BytesOut
 		f.PktsOut, f.PktsIn = 0, f.PktsOut
+		f.SrcMAC, f.DstMAC = f.DstMAC, f.SrcMAC
 	}
 }
+
+const ephemeralPorts = 32768
 
 func serverLike(port uint16) bool {
 	return port > 0 && port < 1024 || port == 8080 || port == 8443 || port == 3306 || port == 5432 || port == 5353 || port == 1900 || port == 5355

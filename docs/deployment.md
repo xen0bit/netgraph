@@ -65,9 +65,10 @@ netgraph serve -db /var/lib/netgraph/netgraph.db -listen :8443
 | `-proxy-user-header` | `Remote-User` | the header it says so in |
 | `-proxy-roles-file` | | lines of `user role`; `* role` sets the default, otherwise `viewer` |
 | `-netflow-listen`, `-netflow-allow` | | receive NetFlow v5, v9 and IPFIX on a UDP address, from these addresses only: see [Other sources](#other-sources) |
+| `-sflow-listen`, `-sflow-allow` | | receive sFlow v5 on a UDP address, from these addresses only |
 | `-dns-log`, `-dns-log-format` | `dnsmasq` | follow a DNS server's log |
-| `-leases-file` | | read names and addresses from a dnsmasq lease file |
-| `-source-local` | private ranges | the CIDRs that are "here", for those three |
+| `-leases-file`, `-leases-format` | `dnsmasq` | read names and addresses from a DHCP server's lease file: `dnsmasq`, `isc` or `kea` |
+| `-source-local` | private ranges | the CIDRs that are "here", for those |
 | `-llm-file` | `$NETGRAPH_LLM` | let Ask use a language model: an OpenAI-compatible URL such as `http://localhost:11434/v1?model=llama3.2`, or `https://api.example.com/v1?model=name&key=KEY`. Off by default: a model on another network receives your network's data, and the page warns before sending any |
 | `-mqtt-file` | `$NETGRAPH_MQTT` | publish to Home Assistant: see [Home Assistant](#home-assistant) |
 | `-alert-webhook` | `$NETGRAPH_ALERT_WEBHOOK` | POST a JSON alert when a new device joins, and optionally for anomalies and scheduled reports ([alerts](#new-device-alerts)) |
@@ -176,20 +177,46 @@ or can't run at all. Each shows up as its own entry under Sensors.
 - **NetFlow and IPFIX** (`-netflow-listen :2055 -netflow-allow 192.168.1.1`): gives
   connections and volumes, from a router that can export them. UDP has no login, so only
   allowed addresses are heard. Each direction arrives separately: the side on a well-known
-  port is taken as the server and the two are joined, and with two high ports nothing says
-  who began, so that traffic shows as two connections. A flow only says what it says: no
+  port, or failing that the one below 32768, is taken as the server and the two are joined. With
+  two ports above that, nothing says who began, so that traffic shows as two connections. A flow only says what it says: no
   names, no MACs, no fingerprints. Add a lease file, or a sensor, to tie addresses to devices.
+- **sFlow** (`-sflow-listen :6343 -sflow-allow 192.168.1.2`): samples packets from a switch
+  or router. A sample stands for as many packets as the sampling rate, so volumes are
+  estimates, and a short connection between samples isn't seen at all. A sampled header
+  includes MAC addresses, so unlike NetFlow it can name devices.
 - **DNS logs** (`-dns-log /var/log/pihole.log`, or `-dns-log-format adguard` for AdGuard
   Home's `querylog.json`): gives names, and shows lookups a filter blocked as `BLOCKED`.
   dnsmasq needs `log-queries`. It reads from the end of the file on, and follows rotation.
   dnsmasq logs nothing for some answers, so a lookup with no reply shows as `UNKNOWN`.
   Only the log's arrival is timed, so DNS latency isn't available from dnsmasq or Pi-hole.
   AdGuard's entries say what was asked and whether it was blocked, not what it resolved to.
-- **Lease files** (`-leases-file /var/lib/misc/dnsmasq.leases`): gives each device's MAC,
-  address and name, which also lets the other two attribute traffic to a device.
+- **Lease files** (`-leases-file /var/lib/misc/dnsmasq.leases`, or `-leases-format isc` for
+  `dhcpd.leases`, as OPNsense and pfSense keep too, or `-leases-format kea` for Kea's memfile
+  CSV): gives each device's MAC, address and name, which also lets the others attribute
+  traffic to a device.
 
-A file has to be readable from where the server runs. sFlow, conntrack and other routers'
-lease formats aren't supported yet.
+A file has to be readable from where the server runs. Routers' own APIs aren't read: copy the
+lease file across, or run a sensor there.
+
+### Connection tracking
+
+Hardware offload moves a router's busiest connections off the CPU, where a capture can't see
+them. The kernel still counts them, so a sensor on the router can read its connection table:
+
+```sh
+# Capture as usual, and add what offload hides.
+netgraph-sensor run -iface br-lan -server ... -conntrack offloaded
+# Or don't capture at all: less detail, almost no CPU. -iface only says what's local.
+netgraph-sensor run -iface br-lan -server ... -conntrack all -capture=false
+```
+
+This needs `CAP_NET_ADMIN`, on top of what capture needs, and
+`sysctl net.netfilter.nf_conntrack_acct=1`, or connections show with no volume. The table is
+read every `-conntrack-every` (10s). Each read gives totals, so a connection's last bytes
+before it ends can be lost, and a connection that comes and goes between reads isn't seen.
+It says who talked to whom and how much: no names, MACs or fingerprints, so tying an address
+to a device takes capture or a lease file. A connection that begins under
+capture and is then offloaded appears as two records: the part captured, and the part counted.
 
 ### Who can do what
 

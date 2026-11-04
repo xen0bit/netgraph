@@ -38,6 +38,7 @@ import (
 
 	"github.com/xen0bit/netgraph/internal/buildinfo"
 	"github.com/xen0bit/netgraph/internal/capture"
+	"github.com/xen0bit/netgraph/internal/conntrack"
 	"github.com/xen0bit/netgraph/internal/flow"
 	"github.com/xen0bit/netgraph/internal/rdns"
 	"github.com/xen0bit/netgraph/internal/sensor"
@@ -111,6 +112,9 @@ func run(args []string) error {
 	wifiFreqs := fs.String("wifi-frequencies", "", "comma-separated frequencies in MHz to hop instead of channels (for 6 GHz, e.g. 5955,5975)")
 	wifi6 := fs.Bool("wifi-6ghz", false, "also hop the 20 MHz 6 GHz plan (needs a 6 GHz-capable monitor interface)")
 	wifiData := fs.Bool("wifi-data", false, "emit one event per Wi-Fi data frame (noisy; management and handshakes are always reported)")
+	conntrackFlag := fs.String("conntrack", "off", "also read the kernel's connection table: offloaded reports what hardware offload hides from capture; all reports everything, with -capture=false (needs CAP_NET_ADMIN)")
+	conntrackEvery := fs.Duration("conntrack-every", 10*time.Second, "how often to read the connection table")
+	captureOn := fs.Bool("capture", true, "capture packets on -iface; with false, -iface only says which networks are local, and -conntrack supplies the traffic")
 	memLimit := fs.Int("mem-limit-mb", 128, "Go soft memory limit, MiB, unless $GOMEMLIMIT is set (0: none)")
 	logLevel := fs.String("log-level", "info", "debug, info, warn or error")
 	logFormat := fs.String("log-format", "text", "text or json")
@@ -128,11 +132,24 @@ func run(args []string) error {
 	if *server == "" {
 		return errors.New("-server is required (use - for stdout)")
 	}
+	ctMode, ok := conntrack.ParseMode(*conntrackFlag)
+	if !ok {
+		return fmt.Errorf("-conntrack: %q is not off, offloaded or all", *conntrackFlag)
+	}
+	if *pcap != "" && ctMode != conntrack.Off {
+		return errors.New("-conntrack reads this machine's table now, which has nothing to do with a replay")
+	}
+	if !*captureOn && ctMode == conntrack.Off {
+		return errors.New("-capture=false needs -conntrack: there would be nothing to report")
+	}
+	if *captureOn && ctMode == conntrack.All {
+		return errors.New("-conntrack all with capture would count everything twice: use -conntrack offloaded, or add -capture=false")
+	}
 	for _, d := range []struct {
 		name string
 		v    time.Duration
 	}{{"-active-timeout", *active}, {"-tcp-idle", *tcpIdle}, {"-udp-idle", *udpIdle}, {"-flush", *flushEvery},
-		{"-rdns-timeout", *rdnsTimeout}, {"-rdns-ttl", *rdnsTTL}, {"-wifi-dwell", *wifiDwell}} {
+		{"-rdns-timeout", *rdnsTimeout}, {"-rdns-ttl", *rdnsTTL}, {"-wifi-dwell", *wifiDwell}, {"-conntrack-every", *conntrackEvery}} {
 		if d.v <= 0 {
 			return fmt.Errorf("%s must be positive", d.name)
 		}
@@ -262,6 +279,23 @@ func run(args []string) error {
 		}()
 	}
 
+	// The table says what capture can't see. It has to stop, with what it's still holding
+	// sent, before the shipper drains below.
+	var tableDone chan struct{}
+	if ctMode != conntrack.Off {
+		table := &conntrack.Runner{
+			Tracker: conntrack.Tracker{Mode: ctMode, Ignore: ignore},
+			Read:    conntrack.Dump, Every: *conntrackEvery, Log: log,
+			Emit: func(ev wire.Event) { out.Emit(ev) },
+		}
+		if err := table.Check(); err != nil {
+			return err
+		}
+		tableDone = make(chan struct{})
+		go func() { defer close(tableDone); table.Run(ctx) }()
+		log.Info("reading the connection table", "mode", ctMode, "every", *conntrackEvery)
+	}
+
 	var err error
 	if *pcap != "" {
 		src, oerr := capture.OpenFile(*pcap)
@@ -279,7 +313,11 @@ func run(args []string) error {
 			}
 			return capture.OpenLive(capture.LiveConfig{Interface: n, RingBytes: *ringMB << 20, Promiscuous: *promisc})
 		}
-		for _, spec := range strings.Split(*ifaces, ",") {
+		captureSpecs := strings.Split(*ifaces, ",")
+		if !*captureOn {
+			captureSpecs = nil
+		}
+		for _, spec := range captureSpecs {
 			src, oerr := openOne(spec)
 			if oerr != nil {
 				for _, s := range sources {
@@ -345,6 +383,9 @@ func run(args []string) error {
 		}
 		err = r.RunLive(ctx, sources)
 		stopHop()
+	}
+	if tableDone != nil {
+		<-tableDone
 	}
 	if reverse != nil {
 		// Stop lookups before the shipper drains: a lookup still in
