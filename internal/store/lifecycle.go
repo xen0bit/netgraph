@@ -29,13 +29,16 @@ type ForgetResult struct {
 	Handshakes   int64  `json:"handshakes"`
 	Groups       int64  `json:"group_keys"`
 	Mutes        int64  `json:"mutes"`
+	Timeline     int64  `json:"timeline"`
+	Notes        int64  `json:"notes"`
+	Incidents    int64  `json:"incidents"`
 	DryRun       bool   `json:"dry_run,omitempty"`
 }
 
 // ForgetDevice removes one device and everything attributed to it: its
 // connections and interval records, lookups, observations, facts, Wi-Fi
-// sync records, rollups and private address entities, then the device
-// entity. It is the privacy control for a phone that was sold or a guest
+// sync records, rollups, rail events, the notes, bookmarks and incidents
+// that name it, and private address entities, then the device entity. It is the privacy control for a phone that was sold or a guest
 // that should not remain in the history.
 func (s *Store) ForgetDevice(ctx context.Context, mac string) (ForgetResult, error) {
 	return s.ForgetDeviceWithOptions(ctx, mac, ForgetOptions{})
@@ -106,7 +109,16 @@ func (s *Store) ForgetDeviceWithOptions(ctx context.Context, mac string, opts Fo
 		count(`DELETE FROM dns_hourly WHERE client_device = ?`, id)
 	res.Handshakes = count(`DELETE FROM wifi_handshakes WHERE bssid = ? OR sta = ?`, m, m)
 	res.Groups = count(`DELETE FROM wifi_group_keys WHERE bssid = ? OR sta = ?`, m, m)
-	res.Mutes = count(`DELETE FROM anomaly_mutes WHERE device = ?`, model.EntityID(model.KindDevice, m))
+	devID := model.EntityID(model.KindDevice, m)
+	res.Mutes = count(`DELETE FROM anomaly_mutes WHERE device = ?`, devID)
+	res.Notes = count(`DELETE FROM annotations WHERE entity = ? OR instr(lower(text), ?) > 0`, devID, m) +
+		count(`DELETE FROM bookmarks WHERE entity = ? OR instr(lower(name), ?) > 0`, devID, m)
+	// A rail title can name the device whoever the event is about, and an
+	// incident keeps a copy of its anomaly, whose evidence may list MACs.
+	res.Timeline = count(`DELETE FROM timeline_events WHERE entity_id = ? OR related_id = ? OR entity_key = ? OR related_key = ? OR instr(lower(title), ?) > 0`, id, id, devID, devID, m)
+	res.Incidents = count(`DELETE FROM incidents WHERE instr(lower(anomaly), ?) > 0 OR instr(lower(title), ?) > 0 OR instr(lower(summary), ?) > 0
+		OR id IN (SELECT incident_id FROM incident_entities WHERE entity = ?)`, m, m, m, devID)
+	deleteOrphanIncidentRows(count)
 	if err == nil {
 		// Delete addresses that belonged only to this device. Shared
 		// addresses (a DNS answer, another device's lease) stay because
@@ -137,6 +149,13 @@ func (s *Store) ForgetDeviceWithOptions(ctx context.Context, mac string, opts Fo
 	return res, nil
 }
 
+// deleteOrphanIncidentRows removes what hangs off incidents just deleted.
+func deleteOrphanIncidentRows(count func(string, ...any) int64) {
+	count(`DELETE FROM incident_entities WHERE incident_id NOT IN (SELECT id FROM incidents)`)
+	count(`DELETE FROM incident_notes WHERE incident_id NOT IN (SELECT id FROM incidents)`)
+	count(`DELETE FROM incident_evidence WHERE incident_id NOT IN (SELECT id FROM incidents)`)
+}
+
 // PurgeOptions controls an age-based purge.
 type PurgeOptions struct {
 	// DryRun performs every count and rolls the transaction back.
@@ -146,6 +165,7 @@ type PurgeOptions struct {
 // PurgeResult counts what PurgeBefore removed.
 type PurgeResult struct {
 	Flows, Connections, DNS, Answers, Observations, Facts, Rollups, Entities, Handshakes, Mutes int64
+	Timeline, Notes, Incidents                                                                  int64
 	DryRun                                                                                      bool
 }
 
@@ -190,6 +210,12 @@ func (s *Store) PurgeBeforeWithOptions(ctx context.Context, before time.Time, op
 	r.Handshakes = count(`DELETE FROM wifi_handshakes WHERE ts < ?`, cut) +
 		count(`DELETE FROM wifi_group_keys WHERE ts < ?`, cut)
 	r.Mutes = count(`DELETE FROM anomaly_mutes WHERE until < ?`, cut)
+	// A purge is for a period that must not remain in the history, so unlike
+	// retention it takes notes, bookmarks and finished incidents with it.
+	r.Timeline = count(`DELETE FROM timeline_events WHERE ts < ?`, cut)
+	r.Notes = count(`DELETE FROM annotations WHERE ts < ?`, cut) + count(`DELETE FROM bookmarks WHERE ts < ?`, cut)
+	r.Incidents = count(`DELETE FROM incidents WHERE end_ts < ?`, cut)
+	deleteOrphanIncidentRows(count)
 	if err == nil {
 		// An entity may still be named by a raw row that survived the
 		// cutoff (a long-running connection, for example). Keep it in

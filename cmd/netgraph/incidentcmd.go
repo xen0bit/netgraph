@@ -29,6 +29,7 @@ commands:
   autopsy ID
   export ID [-o FILE]
   resolve ID
+  acknowledge ID
   reopen ID
   note ID "text"
   delete ID
@@ -46,10 +47,15 @@ func runIncident(args []string) error {
 	status := fs.String("status", "", "list: open, acknowledged or resolved")
 	limit := fs.Int("limit", 200, "list: maximum rows")
 	out := fs.String("o", "table", "show/list/export: table, json, or file for export")
-	if err := fs.Parse(args); err != nil {
+	if err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
-	be, closeFn, err := b.open()
+	open := b.open
+	switch cmd {
+	case "resolve", "reopen", "acknowledge", "note", "delete":
+		open = b.openWritable
+	}
+	be, closeFn, err := open()
 	if err != nil {
 		return err
 	}

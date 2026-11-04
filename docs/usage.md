@@ -99,14 +99,14 @@ TIME                 DEVICE           TYPE  NAME               RCODE     MS    A
 | `query weather` | observed traffic and a simple forecast |
 | `note "text" -at TIME` | add a note to the recorded moment |
 | `bookmark "name" -at TIME` | mark a moment |
-| `incident list/show/autopsy/export` | work with saved investigations |
+| `incident list/show/autopsy/export/resolve/acknowledge/reopen/note/delete` | work with saved investigations |
 | `graph -o FILE` | the window's graph: `.svg`, `.d2`, `.txt`, `.json`, or `-` for text on stdout |
 | `label MAC NAME...`, `label -clear MAC` | name a device by hand; it overrides DHCP, mDNS and every other source until cleared. With `-server` it goes through the API; without, it writes the database file (stop the server first) |
 | `import FILE.pcap...` | ingest captures directly (re-importing a file is a no-op) |
 | `db migrate`/`backup`/`retain`/`vacuum` | maintenance |
 | `db timeline -since -14d` | rebuild the Flight Recorder event index from existing raw data |
-| `db purge BEFORE` | delete everything older than `BEFORE` now, whatever the retention settings; `-dry-run` reports the counts only |
-| `db forget MAC` | remove one device and everything attributed to it (connections, lookups, facts, rollups, private address entities, Wi-Fi sync records); `-dry-run` previews it |
+| `db purge BEFORE` | delete everything older than `BEFORE` now, including notes, bookmarks and finished incidents, whatever the retention settings; `-dry-run` reports the counts only |
+| `db forget MAC` | remove one device and everything attributed to it (connections, lookups, facts, rollups, rail events, the notes, bookmarks and incidents that name it, private address entities, Wi-Fi sync records); `-dry-run` previews it |
 | `db enrich -asn-file FILE` | look up the network of connections stored without an [ASN table](deployment.md#networks-and-countries) |
 | `netgraph-sensor check` | preflight an interface, `CAP_NET_RAW`, link type and server authentication |
 
@@ -121,6 +121,45 @@ rest are one "N more destinations" node), `-dns` (lookups and answers,
 default on), `-identity` (services, Wi-Fi networks, and the hostnames,
 addresses, fingerprints and vendors devices share), `-layout
 elk|dagre`, `-theme light|dark`, `-ascii` (no box-drawing characters).
+
+## What-if policies
+
+`netgraph whatif -policy FILE` and the web UI's What-if dialog replay a
+proposed policy over the connections and lookups recorded in the window. It
+is a simulation: nothing is ever applied to a firewall, and traffic that
+never happened is invisible to it.
+
+```json
+{
+  "version": 1,
+  "zones": [{"name": "iot", "devices": ["label:plug-*", "role:camera"]},
+            {"name": "lan", "devices": ["any"]}],
+  "defaults": {"egress": "deny", "ingress": "deny", "intra_zone": "allow", "dns": "allow"},
+  "rules": [{"name": "updates", "from": "zone:iot", "to": "site:vendor.com", "ports": ["443/tcp"], "action": "allow"},
+            {"name": "admin", "from": "zone:lan", "to": "zone:iot", "action": "allow"},
+            {"name": "web", "from": "any", "to": "zone:lan", "ports": ["443/tcp"], "action": "allow"}],
+  "dns": {"block": ["*.ads.example"], "allow": []}
+}
+```
+
+A device belongs to the first zone that selects it, by `any`, `device:ID`,
+`label:GLOB`, `role:ROLE`, or a bare glob over its name or ID. A device in no
+zone is reported as *unknown*, never blocked.
+
+The first rule that matches decides. `from` and `to` follow who opened the
+connection, so an inbound connection is *from* the remote end *to* the
+device's zone. A device here is selected by `zone:NAME` (or `zone:any`); the
+remote end by `site:`, `domain:`, `ip:` (address or prefix), `asn:`,
+`country:`, a bare glob, or its zone when it is a device here too. `any`
+matches either.
+
+With no matching rule, the default applies: `egress` for connections out and
+between two zones, `ingress` for connections in, `intra_zone` inside one zone.
+A policy that omits them denies `egress` and `ingress`. An unknown field, an
+unknown zone or a malformed selector is an error rather than a rule that
+never matches. *Essential* marks blocked DNS, DHCP, NTP and router traffic,
+which the network itself depends on. Connections passing through, with neither
+end here, are out of scope.
 
 ## The TUI
 

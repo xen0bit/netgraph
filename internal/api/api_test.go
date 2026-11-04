@@ -732,3 +732,101 @@ func TestRecorderEndpoints(t *testing.T) {
 		t.Fatalf("whatif: %+v", wi)
 	}
 }
+
+func TestCapsuleEscapesAndFormats(t *testing.T) {
+	srv, st := serve(t, nil)
+	ctx := context.Background()
+	at := window.From.Add(time.Minute)
+	if _, err := st.CreateAnnotation(ctx, model.Annotation{TS: at.UnixMilli(), Text: "<script>alert(1)</script>"}); err != nil {
+		t.Fatal(err)
+	}
+	q := window.Values().Encode()
+	req, _ := http.NewRequest("GET", srv.URL+"/api/v1/capsule?"+q, nil)
+	req.Header.Set("Authorization", "Bearer rd-tok")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("capsule: %s %s", resp.Status, body)
+	}
+	if strings.Contains(string(body), "<script>") {
+		t.Error("a note reached the capsule unescaped")
+	}
+	if !strings.Contains(string(body), at.UTC().Format("2006-01-02 15:04:05Z")) {
+		t.Error("the capsule's times are not readable")
+	}
+}
+
+func TestIncidentAPIErrors(t *testing.T) {
+	srv, st := serve(t, nil)
+	ctx := context.Background()
+	inc, err := st.CreateIncident(ctx, model.Anomaly{Kind: "x", TS: window.From.UnixMilli()}, "", time.Time{}, time.Time{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := func(method, path, body string) int {
+		t.Helper()
+		req, _ := http.NewRequest(method, srv.URL+path, strings.NewReader(body))
+		req.Header.Set("Authorization", "Bearer rd-tok")
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	id := strconv.FormatInt(inc.ID, 10)
+	for _, c := range []struct {
+		method, path, body string
+		want               int
+	}{
+		{"PATCH", "/api/v1/incidents/" + id, `{"status":"bogus"}`, http.StatusBadRequest},
+		{"PATCH", "/api/v1/incidents/9999", `{"status":"resolved"}`, http.StatusNotFound},
+		{"DELETE", "/api/v1/incidents/9999", "", http.StatusNotFound},
+		{"POST", "/api/v1/incidents/9999/pin", `{"evidence":"x"}`, http.StatusNotFound},
+		{"POST", "/api/v1/incidents", `{"anomaly":{}}`, http.StatusBadRequest},
+		{"POST", "/api/v1/annotations", `{"text":"x","entity":"nonsense"}`, http.StatusBadRequest},
+		{"GET", "/api/v1/frame?scope=nonsense", "", http.StatusBadRequest},
+		{"GET", "/api/v1/diff?scope=nonsense", "", http.StatusBadRequest},
+		{"GET", "/api/v1/autopsy?kind=x&evidence=%7B", "", http.StatusBadRequest},
+		{"GET", "/api/v1/timeline?kinds=" + strings.Repeat("a,", 40), "", http.StatusBadRequest},
+		{"PATCH", "/api/v1/incidents/" + id, `{"status":"acknowledged"}`, http.StatusOK},
+		{"DELETE", "/api/v1/incidents/" + id, "", http.StatusNoContent},
+	} {
+		if got := call(c.method, c.path, c.body); got != c.want {
+			t.Errorf("%s %s = %d, want %d", c.method, c.path, got, c.want)
+		}
+	}
+}
+
+// A preview cites the evidence the saved incident would.
+func TestAutopsyPreviewKeepsEvidence(t *testing.T) {
+	srv, _ := serve(t, nil)
+	q := window.Values()
+	q.Set("kind", model.AnomalyScan)
+	q.Set("ts", strconv.FormatInt(window.From.UnixMilli(), 10))
+	q.Set("evidence", `{"ports":"22,80,443"}`)
+	req, _ := http.NewRequest("GET", srv.URL+"/api/v1/autopsy?"+q.Encode(), nil)
+	req.Header.Set("Authorization", "Bearer rd-tok")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var a model.Autopsy
+	if err := json.NewDecoder(resp.Body).Decode(&a); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range a.Scenes {
+		for _, e := range s.Evidence {
+			if e.Text == "22,80,443" {
+				return
+			}
+		}
+	}
+	t.Fatalf("evidence lost: %+v", a.Scenes)
+}

@@ -111,3 +111,56 @@ func TestBackfillTimeline(t *testing.T) {
 		t.Fatalf("timeline after backfill = %+v %v", page, err)
 	}
 }
+
+func TestDiffIsAboutPresence(t *testing.T) {
+	st, _, _ := homeStore(t)
+	ctx := context.Background()
+	// The same window twice differs in nothing; two windows that both reach
+	// a destination must not call it changed for moving different bytes.
+	d, err := st.Diff(ctx, win(0, time.Hour), win(0, time.Hour), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(d.Added)+len(d.Removed)+len(d.Changed) != 0 {
+		t.Fatalf("same window differs: %+v", d)
+	}
+	d, err = st.Diff(ctx, win(0, 5*time.Minute), win(0, time.Hour), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, x := range d.Changed {
+		if x.Kind == "destination" {
+			t.Fatalf("a destination changed: %+v", x)
+		}
+	}
+	all, err := st.Diff(ctx, win(-time.Hour, 0), win(0, time.Hour), "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	scoped, err := st.Diff(ctx, win(-time.Hour, 0), win(0, time.Hour), "device:3c:22:fb:01:02:03")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(scoped.Added) == 0 || len(scoped.Added) >= len(all.Added) {
+		t.Errorf("scope: %d of %d", len(scoped.Added), len(all.Added))
+	}
+	if _, err := st.Diff(ctx, win(0, 1), win(0, 1), "nonsense"); err == nil {
+		t.Error("bad scope accepted")
+	}
+}
+
+func TestStoryAndTimelineBounds(t *testing.T) {
+	st, _, _ := homeStore(t)
+	ctx := context.Background()
+	if _, err := st.Timeline(ctx, win(0, time.Hour), model.TimelineQuery{Kinds: make([]string, maxTimelineKinds+1)}); err == nil {
+		t.Error("too many kinds accepted")
+	}
+	// A moment before a sensor first reported does not include it.
+	fr, err := st.Frame(ctx, win(-48*time.Hour, -47*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(fr.Sensors) != 0 {
+		t.Errorf("frame before the sensor existed: %+v", fr.Sensors)
+	}
+}

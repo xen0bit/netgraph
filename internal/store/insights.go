@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/xen0bit/netgraph/internal/model"
+	wifipkg "github.com/xen0bit/netgraph/internal/wifi"
 )
 
 // Exposure builds a read-only inventory of reachable or weak things. It is
@@ -26,59 +27,58 @@ func (s *Store) Exposure(ctx context.Context, f model.Filter) (*model.ExposureRe
 		seen[k] = true
 		out.Findings = append(out.Findings, x)
 	}
-	if rep, err := s.Anomalies(ctx, f); err == nil {
-		for _, a := range rep.Anomalies {
-			if model.SeverityRank(a.Severity) < model.SeverityRank(model.SeverityMedium) {
-				continue
-			}
-			ev := []model.EvidenceRef{{Kind: "anomaly", ID: a.Kind + ":" + time.UnixMilli(a.TS).UTC().Format(time.RFC3339), TS: a.TS, Text: a.Summary}}
-			add(model.ExposureFinding{Kind: a.Kind, Severity: a.Severity, Entity: a.Entity, Label: a.DeviceName, Summary: a.Summary, Evidence: ev})
-		}
+	rep, err := s.Anomalies(ctx, f)
+	if err != nil {
+		return nil, err
 	}
-	if wifi, err := s.WiFi(ctx, f); err == nil {
-		for _, n := range wifi {
-			sec := strings.ToUpper(n.Security)
-			if n.Security == "" || strings.Contains(sec, "WEP") || strings.Contains(sec, "TKIP") {
-				sev := model.SeverityMedium
-				if strings.Contains(sec, "WEP") || n.Security == "" {
-					sev = model.SeverityHigh
-				}
-				add(model.ExposureFinding{
-					Kind: "wifi_weak_security", Severity: sev, Entity: model.EntityID(model.KindSSID, strings.ToLower(n.SSID)),
-					Label: n.SSID, Summary: n.SSID + " uses " + firstNonEmpty(n.Security, "open") + " security",
-					Evidence: []model.EvidenceRef{{Kind: "wifi", ID: n.BSSID, TS: n.LastSeen, Text: n.SSID}},
-				})
-			}
+	for _, a := range rep.Anomalies {
+		if model.SeverityRank(a.Severity) < model.SeverityRank(model.SeverityMedium) {
+			continue
 		}
+		ev := []model.EvidenceRef{{Kind: "anomaly", ID: a.Kind + ":" + time.UnixMilli(a.TS).UTC().Format(time.RFC3339), TS: a.TS, Text: a.Summary}}
+		add(model.ExposureFinding{Kind: a.Kind, Severity: a.Severity, Entity: firstNonEmpty(a.Device, a.Entity), Label: a.DeviceName, Summary: a.Summary, Evidence: ev})
 	}
-	if devs, err := s.Devices(ctx, f); err == nil {
-		for _, d := range devs {
-			if len(d.Serves) > 0 {
-				add(model.ExposureFinding{
-					Kind: "inbound_service", Severity: model.SeverityMedium, Entity: d.ID, Label: d.Label,
-					Summary:  d.Label + " serves " + strings.Join(d.Serves, ", ") + " to clients",
-					Evidence: []model.EvidenceRef{{Kind: "entity", ID: d.ID, TS: d.LastSeen, Text: d.Label}},
-				})
-			}
-			if d.Randomized && d.Inbound > 0 {
-				add(model.ExposureFinding{
-					Kind: "inbound_to_private_address", Severity: model.SeverityLow, Entity: d.ID, Label: d.Label,
-					Summary:  d.Label + " has a randomized address and accepts inbound connections",
-					Evidence: []model.EvidenceRef{{Kind: "entity", ID: d.ID, TS: d.LastSeen, Text: d.Label}},
-				})
-			}
+	wifi, err := s.WiFi(ctx, f)
+	if err != nil {
+		return nil, err
+	}
+	for _, n := range wifi {
+		// An empty security is a network only heard through its clients, not
+		// an open one: the sensor has not seen its beacon.
+		var sev string
+		switch n.Security {
+		case wifipkg.Open, wifipkg.WEP:
+			sev = model.SeverityHigh
+		case wifipkg.WPA:
+			sev = model.SeverityMedium
+		default:
+			continue
 		}
+		add(model.ExposureFinding{
+			Kind: "wifi_weak_security", Severity: sev, Entity: model.EntityID(model.KindSSID, strings.ToLower(n.SSID)),
+			Label: n.SSID, Summary: firstNonEmpty(n.SSID, n.BSSID) + " uses " + n.Security + " security",
+			Evidence: []model.EvidenceRef{{Kind: "wifi", ID: n.BSSID, TS: n.LastSeen, Text: n.SSID}},
+		})
 	}
-	now := s.cfg.Now().UnixMilli()
-	if sensors, err := s.Sensors(ctx); err == nil {
-		for _, sn := range sensors {
-			if now-sn.LastSeen > 5*60_000 {
-				add(model.ExposureFinding{
-					Kind: model.AnomalySensorSilent, Severity: model.SeverityMedium, Entity: model.EntityID(model.KindSensor, sn.Name),
-					Label: sn.Name, Summary: "sensor " + sn.Name + " has not reported recently",
-					Evidence: []model.EvidenceRef{{Kind: "sensor", ID: sn.Name, TS: sn.LastSeen, Text: sn.Name}},
-				})
-			}
+	devs, err := s.Devices(ctx, f)
+	if err != nil {
+		return nil, err
+	}
+	for _, d := range devs {
+		ev := []model.EvidenceRef{{Kind: "entity", ID: d.ID, TS: d.LastSeen, Text: d.Label}}
+		// Reachable from outside is exposure; a printer serving the LAN is
+		// only inventory.
+		switch {
+		case len(d.Serves) > 0 && d.Inbound > 0:
+			add(model.ExposureFinding{Kind: "inbound_service", Severity: model.SeverityMedium, Entity: d.ID, Label: d.Label,
+				Summary: d.Label + " serves " + strings.Join(d.Serves, ", ") + " to clients outside", Evidence: ev})
+		case len(d.Serves) > 0:
+			add(model.ExposureFinding{Kind: "local_service", Severity: model.SeverityLow, Entity: d.ID, Label: d.Label,
+				Summary: d.Label + " serves " + strings.Join(d.Serves, ", ") + " on the network", Evidence: ev})
+		}
+		if d.Randomized && d.Inbound > 0 {
+			add(model.ExposureFinding{Kind: "inbound_to_private_address", Severity: model.SeverityLow, Entity: d.ID, Label: d.Label,
+				Summary: d.Label + " has a randomized address and accepts inbound connections", Evidence: ev})
 		}
 	}
 	slices.SortFunc(out.Findings, func(a, b model.ExposureFinding) int {
@@ -92,86 +92,71 @@ func (s *Store) Exposure(ctx context.Context, f model.Filter) (*model.ExposureRe
 	return out, nil
 }
 
-// Coverage reports which sensors saw which devices, and where a devicemay be
+// Coverage reports which sensors saw which devices, and where a device may be
 // hidden by a blind spot.
 func (s *Store) Coverage(ctx context.Context, f model.Filter) (*model.CoverageReport, error) {
 	from, to := s.window(f)
 	out := &model.CoverageReport{FromMS: from, ToMS: to, Sensors: []model.CoverageSensor{}, Devices: []model.CoverageDevice{}}
-	names := map[int64]string{}
-	if rows, err := s.r.QueryContext(ctx, `SELECT id, name FROM sensors`); err == nil {
-		for rows.Next() {
-			var id int64
-			var name string
-			if rows.Scan(&id, &name) == nil {
-				names[id] = name
-			}
-		}
-		rows.Close()
-	}
 	type dev struct {
 		key, label string
 		sensors    map[string]bool
-		flows      int
 	}
 	devs := map[int64]*dev{}
-	if rows, err := s.r.QueryContext(ctx, `SELECT id, key, coalesce(nullif(label,''), key) FROM entities WHERE kind = 'device'`); err == nil {
-		for rows.Next() {
-			var id int64
-			var key, label string
-			if rows.Scan(&id, &key, &label) == nil {
-				devs[id] = &dev{key: key, label: label, sensors: map[string]bool{}}
-			}
-		}
-		rows.Close()
+	rows, err := s.r.QueryContext(ctx, `SELECT c.client_device, e.key, coalesce(nullif(e.label,''), e.key), n.name
+		FROM connections c
+		JOIN entities e ON e.id = c.client_device AND e.kind = 'device'
+		JOIN sensors n ON n.id = c.sensor_id
+		WHERE c.first_seen < ? AND c.last_seen >= ?
+		GROUP BY c.client_device, c.sensor_id`, to, from)
+	if err != nil {
+		return nil, err
 	}
-	if rows, err := s.r.QueryContext(ctx, `SELECT client_device, sensor_id, count(*) FROM connections
-		WHERE client_device != 0 AND first_seen < ? AND last_seen >= ? GROUP BY client_device, sensor_id`, to, from); err == nil {
-		for rows.Next() {
-			var id, sid int64
-			var n int
-			if rows.Scan(&id, &sid, &n) != nil {
-				continue
-			}
-			d := devs[id]
-			if d == nil {
-				continue
-			}
-			if name := names[sid]; name != "" {
-				d.sensors[name] = true
-			}
-			d.flows += n
+	defer rows.Close()
+	for rows.Next() {
+		var id int64
+		var key, label, sensor string
+		if err := rows.Scan(&id, &key, &label, &sensor); err != nil {
+			return nil, err
 		}
-		rows.Close()
+		d := devs[id]
+		if d == nil {
+			d = &dev{key: key, label: label, sensors: map[string]bool{}}
+			devs[id] = d
+		}
+		d.sensors[sensor] = true
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
 	for _, d := range devs {
 		ss := make([]string, 0, len(d.sensors))
 		for name := range d.sensors {
 			ss = append(ss, name)
 		}
 		slices.Sort(ss)
-		if len(ss) == 0 {
-			continue
-		}
 		out.Devices = append(out.Devices, model.CoverageDevice{
 			Device: model.EntityID(model.KindDevice, d.key), Label: d.label, Sensors: ss, OnlyOne: len(ss) == 1,
 		})
 	}
-	slices.SortFunc(out.Devices, func(a, b model.CoverageDevice) int { return cmp.Compare(a.Label, b.Label) })
-	if sensors, err := s.Sensors(ctx); err == nil {
-		for _, sn := range sensors {
-			cs := model.CoverageSensor{Name: sn.Name, LastSeen: sn.LastSeen, Version: sn.Version, Interfaces: sn.Interfaces}
-			for _, d := range out.Devices {
-				for _, name := range d.Sensors {
-					if name == sn.Name {
-						cs.Devices++
-						if d.OnlyOne {
-							cs.OnlyDevice++
-						}
-					}
+	slices.SortFunc(out.Devices, func(a, b model.CoverageDevice) int {
+		return cmp.Or(cmp.Compare(a.Label, b.Label), cmp.Compare(a.Device, b.Device))
+	})
+	sensors, err := s.Sensors(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, sn := range sensors {
+		cs := model.CoverageSensor{Name: sn.Name, LastSeen: sn.LastSeen, Version: sn.Version, Interfaces: sn.Interfaces}
+		for _, d := range out.Devices {
+			if slices.Contains(d.Sensors, sn.Name) {
+				cs.Devices++
+				if d.OnlyOne {
+					cs.OnlyDevice++
 				}
 			}
-			out.Sensors = append(out.Sensors, cs)
 		}
+		out.Sensors = append(out.Sensors, cs)
 	}
 	out.Gaps = append(out.Gaps,
 		"coverage is where traffic was observed, not an RF survey",
@@ -189,33 +174,45 @@ func (s *Store) Airspace(ctx context.Context, f model.Filter) (*model.AirspaceRe
 	if err != nil {
 		return nil, err
 	}
-	rogue := map[string]bool{}
-	if rep, err := s.Anomalies(ctx, f); err == nil {
-		for _, a := range rep.Anomalies {
-			if a.Kind == model.AnomalyRogueAP {
-				rogue[a.Summary] = true
-			}
+	// The anomaly engine names a new access point by BSSID. An open twin is
+	// named only by SSID, and of that SSID's radios it is the open ones.
+	rep, err := s.Anomalies(ctx, f)
+	if err != nil {
+		return nil, err
+	}
+	rogueBSSID, rogueSSID := map[string]bool{}, map[string]bool{}
+	for _, a := range rep.Anomalies {
+		switch {
+		case a.Kind != model.AnomalyRogueAP:
+		case a.Device != "":
+			rogueBSSID[strings.TrimPrefix(a.Device, model.KindDevice+":")] = true
+		case a.Severity == model.SeverityHigh:
+			rogueSSID[a.Entity] = true
 		}
 	}
 	for _, n := range wifi {
 		an := model.AirspaceNetwork{BSSID: n.BSSID, SSID: n.SSID, Security: n.Security, Channel: n.Channel, FirstSeen: n.FirstSeen, LastSeen: n.LastSeen}
-		rows, err := s.r.QueryContext(ctx, `SELECT d.key, coalesce(nullif(d.label,''), d.key)
+		an.Rogue = rogueBSSID[n.BSSID] || (n.Security == wifipkg.Open && rogueSSID[model.EntityID(model.KindSSID, strings.ToLower(n.SSID))])
+		rows, err := s.r.QueryContext(ctx, `SELECT coalesce(nullif(d.label,''), d.key)
 			FROM facts a JOIN entities d ON d.id = a.src
 			WHERE a.rel = 'associates' AND a.dst = (SELECT id FROM entities WHERE kind = 'device' AND key = ?)
-			  AND a.first_seen < ? AND a.last_seen >= ?`, n.BSSID, to, from)
-		if err == nil {
-			for rows.Next() {
-				var key, label string
-				if rows.Scan(&key, &label) == nil {
-					an.Clients = append(an.Clients, label)
-				}
-			}
-			rows.Close()
+			  AND a.first_seen < ? AND a.last_seen >= ?
+			GROUP BY d.id ORDER BY 1`, n.BSSID, to, from)
+		if err != nil {
+			return nil, err
 		}
-		for summary := range rogue {
-			if strings.Contains(summary, n.SSID) || strings.Contains(summary, n.BSSID) {
-				an.Rogue = true
+		for rows.Next() {
+			var label string
+			if err := rows.Scan(&label); err != nil {
+				rows.Close()
+				return nil, err
 			}
+			an.Clients = append(an.Clients, label)
+		}
+		err = rows.Err()
+		rows.Close()
+		if err != nil {
+			return nil, err
 		}
 		out.Networks = append(out.Networks, an)
 	}
@@ -230,41 +227,40 @@ func (s *Store) Airspace(ctx context.Context, f model.Filter) (*model.AirspaceRe
 // band over the observed buckets, never a claim about unseen traffic.
 func (s *Store) Weather(ctx context.Context, f model.Filter) (*model.WeatherReport, error) {
 	from, to := s.window(f)
-	span := time.Duration(to-from) * time.Millisecond
-	step := span / 60
-	if step < time.Minute {
-		step = time.Minute
-	}
-	if step > time.Hour {
-		step = time.Hour
-	}
-	series, err := s.Timeseries(ctx, f, step)
+	// Timeseries picks a round step, and may widen it to what the data at
+	// this age can answer, so the step reported is the one it used.
+	series, err := s.Timeseries(ctx, f, 0)
 	if err != nil {
 		return nil, err
 	}
-	out := &model.WeatherReport{FromMS: from, ToMS: to, StepMS: step.Milliseconds(), Points: []model.WeatherPoint{}}
+	step := series.StepMS
+	out := &model.WeatherReport{FromMS: from, ToMS: to, StepMS: step, Points: []model.WeatherPoint{}}
+	var whole []float64
 	for _, b := range series.Buckets {
 		out.Points = append(out.Points, model.WeatherPoint{TS: b.TS, BytesOut: b.BytesOut, BytesIn: b.BytesIn, Flows: b.FlowsNew, DNS: b.DNSQueries, Devices: b.Devices})
+		// A bucket the window cuts through holds part of a step's traffic
+		// and would drag the mean down.
+		if b.TS >= from && b.TS+step <= to {
+			whole = append(whole, float64(b.BytesOut+b.BytesIn))
+		}
 	}
-	// Last up to 24 observed buckets, then six forecast buckets.
-	obs := out.Points
-	n := min(24, len(obs))
-	if n > 0 {
+	// Up to the last 24 whole buckets, then six forecast buckets.
+	if n := min(24, len(whole)); n > 0 {
 		var sum, sum2 float64
-		for _, p := range obs[len(obs)-n:] {
-			v := float64(p.BytesOut + p.BytesIn)
+		for _, v := range whole[len(whole)-n:] {
 			sum += v
 			sum2 += v * v
 		}
 		mean := sum / float64(n)
 		sd := math.Sqrt(max(0, sum2/float64(n)-mean*mean))
-		for i := 1; i <= 6; i++ {
+		next := series.Buckets[len(series.Buckets)-1].TS + step
+		for i := range int64(6) {
 			out.Points = append(out.Points, model.WeatherPoint{
-				TS: to + int64(i)*step.Milliseconds(), Lower: uint64(max(0, mean-sd)), Upper: uint64(mean + sd), Forecast: true,
+				TS: next + i*step, Lower: uint64(max(0, mean-sd)), Upper: uint64(mean + sd), Forecast: true,
 			})
 		}
 	} else {
-		out.Gaps = append(out.Gaps, "no observed buckets to forecast from")
+		out.Gaps = append(out.Gaps, "no whole bucket to forecast from")
 	}
 	if series.Precision != model.PrecisionExact {
 		out.Gaps = append(out.Gaps, "the window is answered from hourly rollups")

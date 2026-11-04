@@ -22,39 +22,59 @@ func (s *Store) BackfillTimeline(ctx context.Context, since time.Time) (int64, e
 			(ts, kind, entity_id, entity_key, title, ref_table, ref_key, attrs)
 		 SELECT first_seen, 'device_new', id, kind || ':' || key,
 		        'new device ' || coalesce(nullif(label, ''), key),
-		        'entities', cast(id AS TEXT), '{}'
+		        'entities', cast(id AS TEXT), json_object('mac', key)
 		 FROM entities WHERE kind = 'device' AND first_seen >= ?`,
 		`INSERT OR IGNORE INTO timeline_events
-			(ts, kind, entity_id, entity_key, title, ref_table, ref_key, attrs)
+			(ts, kind, entity_id, entity_key, related_key, title, ref_table, ref_key, attrs)
 		 SELECT o.ts, 'observation', o.device,
-		        coalesce(e.kind || ':' || e.key, ''), o.type || ' ' || o.ip,
+		        coalesce(e.kind || ':' || e.key, ''),
+		        CASE WHEN o.ip != '' THEN 'ip:' || o.ip ELSE '' END,
+		        CASE WHEN o.ip != '' THEN o.type || ' ' || o.ip ELSE o.type END,
 		        'observations', cast(o.id AS TEXT), json_object('type', o.type)
 		 FROM observations o LEFT JOIN entities e ON e.id = o.device
 		 WHERE o.ts >= ?`,
 		`INSERT OR IGNORE INTO timeline_events
-			(ts, kind, entity_id, entity_key, title, ref_table, ref_key, attrs)
+			(ts, kind, entity_id, entity_key, related_id, related_key, title, ref_table, ref_key, attrs)
 		 SELECT d.ts, 'dns', d.client_device,
-		        coalesce(e.kind || ':' || e.key, ''), d.qname,
+		        coalesce(e.kind || ':' || e.key, ''),
+		        coalesce(q.id, 0), 'domain:' || d.qname, d.qname,
 		        'dns', cast(d.id AS TEXT), json_object('qtype', d.qtype, 'rcode', d.rcode)
 		 FROM dns d LEFT JOIN entities e ON e.id = d.client_device
+		 LEFT JOIN entities q ON q.kind = 'domain' AND q.key = d.qname
 		 WHERE d.ts >= ?`,
 		`INSERT OR IGNORE INTO timeline_events
-			(ts, kind, entity_id, entity_key, title, ref_table, ref_key, attrs)
+			(ts, kind, entity_id, entity_key, related_id, related_key, title, ref_table, ref_key, attrs)
 		 SELECT c.first_seen, 'flow_open', c.client_device,
 		        coalesce(e.kind || ':' || e.key, ''),
+		        coalesce(r.id, 0), 'ip:' || c.remote_ip,
 		        'opened ' || coalesce(nullif(c.sni, ''), nullif(c.http_host, ''), nullif(c.qname, ''), c.remote_ip),
 		        'connections', c.flow_key, json_object('direction', c.direction)
 		 FROM connections c LEFT JOIN entities e ON e.id = c.client_device
+		 LEFT JOIN entities r ON r.kind = 'ip' AND r.key = c.remote_ip
 		 WHERE c.first_seen >= ?`,
 		`INSERT OR IGNORE INTO timeline_events
-			(ts, kind, entity_id, entity_key, title, ref_table, ref_key, attrs)
+			(ts, kind, entity_id, entity_key, related_id, related_key, title, ref_table, ref_key, attrs)
 		 SELECT c.last_seen, 'flow_close', c.client_device,
 		        coalesce(e.kind || ':' || e.key, ''),
+		        coalesce(r.id, 0), 'ip:' || c.remote_ip,
 		        'closed ' || coalesce(nullif(c.sni, ''), nullif(c.http_host, ''), nullif(c.qname, ''), c.remote_ip),
 		        'connections', c.flow_key || ':close',
 		        json_object('direction', c.direction, 'reason', c.end_reason)
 		 FROM connections c LEFT JOIN entities e ON e.id = c.client_device
+		 LEFT JOIN entities r ON r.kind = 'ip' AND r.key = c.remote_ip
 		 WHERE c.final = 1 AND c.last_seen >= ?`,
+		// Human memory is authoritative, not derived, but its rail events
+		// are rebuilt with everything else after the index is dropped.
+		`INSERT OR IGNORE INTO timeline_events
+			(ts, kind, entity_key, title, ref_table, ref_key, attrs)
+		 SELECT ts, 'annotation', entity,
+		        CASE WHEN kind != '' THEN kind || ': ' || text ELSE text END,
+		        'annotations', cast(id AS TEXT), '{}'
+		 FROM annotations WHERE ts >= ?`,
+		`INSERT OR IGNORE INTO timeline_events
+			(ts, kind, entity_key, title, ref_table, ref_key, attrs)
+		 SELECT ts, 'bookmark', entity, name, 'bookmarks', cast(id AS TEXT), '{}'
+		 FROM bookmarks WHERE ts >= ?`,
 	}
 	for _, q := range steps {
 		res, err := s.w.ExecContext(ctx, q, from)

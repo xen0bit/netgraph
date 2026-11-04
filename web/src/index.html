@@ -48,6 +48,7 @@
     <span id="rec-time" class="mono"></span>
     <select id="rec-speed" aria-label="Playback speed"><option value="1">1×</option><option value="10">10×</option><option value="60">60×</option></select>
     <select id="rec-lookback" aria-label="Frame lookback"><option value="300000">5m</option><option value="900000">15m</option><option value="3600000">1h</option></select>
+    <select id="rec-rail" aria-label="Events on the rail"><option value="changes">Changes</option><option value="all">All events</option></select>
     <button id="rec-now">Now</button>
     <button id="rec-note">Note</button>
     <button id="rec-bookmark">Mark</button>
@@ -125,6 +126,7 @@
   <footer class="status"><span id="status" role="status" aria-live="polite"></span><button id="connect" type="button" hidden>Connect</button><span id="version"></span></footer>
 
   <dialog id="note-dialog" class="note">
+    <form method="dialog"><button class="icon close" title="Close" aria-label="Close">✕</button></form>
     <h2>Add a note</h2>
     <p class="muted">Notes are kept with the recorded moment and appear on the event rail.</p>
     <input id="note-entity" type="text" aria-label="Entity (optional)" placeholder="device:aa:bb:cc:00:00:01 (optional)">
@@ -133,6 +135,7 @@
   </dialog>
 
   <dialog id="whatif-dialog" class="whatif">
+    <form method="dialog"><button class="icon close" title="Close" aria-label="Close">✕</button></form>
     <h2>What-if change simulator</h2>
     <p class="muted">Read-only. It evaluates a proposed policy against traffic that was actually observed in the current window.</p>
     <textarea id="whatif-policy" spellcheck="false" aria-label="Policy JSON" rows="12"></textarea>
@@ -141,6 +144,7 @@
   </dialog>
 
   <dialog id="ask-dialog" class="ask">
+    <form method="dialog"><button class="icon close" title="Close" aria-label="Close">✕</button></form>
     <h2>Ask netgraph</h2>
     <form id="ask-form" autocomplete="off">
       <input id="ask-q" type="text" aria-label="Question" placeholder="What did the printer do yesterday?" required>

@@ -28,7 +28,7 @@ func memoryFlags(name string) (*flag.FlagSet, *backendFlags, *string, *string, *
 
 func runNote(args []string) error {
 	fs, b, at, entity, kind := memoryFlags("note")
-	if err := fs.Parse(args); err != nil {
+	if err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
 	text := strings.TrimSpace(strings.Join(fs.Args(), " "))
@@ -39,7 +39,7 @@ func runNote(args []string) error {
 	if err != nil {
 		return err
 	}
-	be, closeFn, err := b.open()
+	be, closeFn, err := b.openWritable()
 	if err != nil {
 		return err
 	}
@@ -58,7 +58,7 @@ func runNote(args []string) error {
 
 func runBookmark(args []string) error {
 	fs, b, at, entity, _ := memoryFlags("bookmark")
-	if err := fs.Parse(args); err != nil {
+	if err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
 	name := strings.TrimSpace(strings.Join(fs.Args(), " "))
@@ -69,7 +69,7 @@ func runBookmark(args []string) error {
 	if err != nil {
 		return err
 	}
-	be, closeFn, err := b.open()
+	be, closeFn, err := b.openWritable()
 	if err != nil {
 		return err
 	}

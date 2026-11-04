@@ -759,7 +759,6 @@ type IncidentDetail struct {
 	Incident
 	Notes    []IncidentNote `json:"notes,omitempty"`
 	Evidence []EvidenceRef  `json:"evidence,omitempty"`
-	Autopsy  *Autopsy       `json:"autopsy,omitempty"`
 }
 
 // Impact is one connection or lookup affected by a proposed policy.
@@ -792,8 +791,9 @@ type ImpactGroup struct {
 // WhatIfSummary is the headline result of a policy simulation.
 type WhatIfSummary struct {
 	Connections int `json:"connections"`
-	Blocked     int `json:"blocked"`
-	Essential   int `json:"essential"`
+	Blocked     int `json:"blocked"`   // connections the policy would stop
+	Essential   int `json:"essential"` // of Blocked, ones the network depends on
+	Lookups     int `json:"lookups"`   // DNS lookups the policy would stop
 	Unknown     int `json:"unknown"`
 	OutOfScope  int `json:"out_of_scope"`
 	Unchanged   int `json:"unchanged"`
@@ -826,8 +826,8 @@ type ToolCall struct {
 	Args map[string]string `json:"args,omitempty"`
 }
 
-// Answer is a grounded response to a question. A claim without evidence is
-// never allowed to survive validation.
+// Answer is a grounded response to a question. Ask drops any claim that has
+// no evidence behind it.
 type Answer struct {
 	Question   string        `json:"question"`
 	Answer     string        `json:"answer"`
@@ -926,6 +926,13 @@ type WeatherReport struct {
 	Gaps   []string       `json:"gaps,omitempty"`
 }
 
+// Incident statuses.
+const (
+	IncidentOpen         = "open"
+	IncidentAcknowledged = "acknowledged"
+	IncidentResolved     = "resolved"
+)
+
 // Annotation is a human note pinned to a moment and optionally an entity.
 type Annotation struct {
 	ID      int64  `json:"id"`
@@ -968,6 +975,29 @@ type WiFiNetwork struct {
 	Clients   int    `json:"clients"`
 	FirstSeen int64  `json:"first_seen"`
 	LastSeen  int64  `json:"last_seen"`
+}
+
+// ApplyScope narrows f to a Flight Recorder scope: device:MAC, domain:name or
+// ip:addr. An empty scope changes nothing.
+func (f *Filter) ApplyScope(scope string) error {
+	if scope == "" {
+		return nil
+	}
+	kind, key, _ := SplitEntityID(scope)
+	if key != "" {
+		switch kind {
+		case KindDevice:
+			f.Device = key
+			return nil
+		case KindDomain:
+			f.DomainExact = key
+			return nil
+		case KindIP:
+			f.IP = key
+			return nil
+		}
+	}
+	return fmt.Errorf("unknown scope %q: want device:MAC, domain:name or ip:addr", scope)
 }
 
 // Values encodes f as URL query parameters.

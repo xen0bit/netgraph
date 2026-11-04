@@ -3,11 +3,56 @@ package store
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/xen0bit/netgraph/internal/model"
 )
+
+// Limits on what people type. Rail titles carry these to every client.
+const (
+	maxNoteText  = 4096
+	maxShortText = 256
+)
+
+// inTx runs fn in one write transaction. The writer pool has one connection,
+// so this queues behind an ingest batch rather than interleaving with it.
+func (s *Store) inTx(ctx context.Context, fn func(*sql.Tx) error) error {
+	if s.w == nil {
+		return errors.New("database is open read-only")
+	}
+	tx, err := s.w.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := fn(tx); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// normEntity validates an entity ID someone typed. Device IDs are normalised
+// so that db forget finds whatever was attached to the device.
+func normEntity(id string) (string, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return "", nil
+	}
+	kind, key, ok := model.SplitEntityID(id)
+	if !ok || kind == "" || key == "" || len(id) > maxShortText {
+		return "", fmt.Errorf("%w: entity %q is not kind:key", ErrInvalid, id)
+	}
+	if kind == model.KindDevice {
+		mac, ok := normMAC(key)
+		if !ok {
+			return "", fmt.Errorf("%w: device %q is not a MAC", ErrInvalid, key)
+		}
+		return model.EntityID(kind, mac), nil
+	}
+	return id, nil
+}
 
 // CreateAnnotation stores a human note and puts it on the Flight Recorder
 // rail. Notes are user data: retention never deletes them.
@@ -16,23 +61,33 @@ func (s *Store) CreateAnnotation(ctx context.Context, a model.Annotation) (*mode
 	if a.Text == "" {
 		return nil, fmt.Errorf("%w: annotation text is required", ErrInvalid)
 	}
+	if len(a.Text) > maxNoteText || len(a.Kind) > maxShortText || len(a.Author) > maxShortText || a.TS < 0 {
+		return nil, fmt.Errorf("%w: annotation field out of range", ErrInvalid)
+	}
+	var err error
+	if a.Entity, err = normEntity(a.Entity); err != nil {
+		return nil, err
+	}
 	now := s.cfg.Now().UnixMilli()
 	if a.TS == 0 {
 		a.TS = now
 	}
 	a.Created = now
-	if err := s.w.QueryRowContext(ctx, `INSERT INTO annotations (ts, entity, kind, text, author, created)
-		VALUES (?, ?, ?, ?, ?, ?) RETURNING id`, a.TS, a.Entity, a.Kind, a.Text, a.Author, a.Created).Scan(&a.ID); err != nil {
-		return nil, err
-	}
 	title := a.Text
 	if a.Kind != "" {
 		title = a.Kind + ": " + a.Text
 	}
-	_, err := s.w.ExecContext(ctx, `INSERT OR IGNORE INTO timeline_events
-		(ts, kind, entity_key, title, ref_table, ref_key, attrs)
-		VALUES (?, 'annotation', ?, ?, 'annotations', ?, '{}')`,
-		a.TS, a.Entity, title, fmt.Sprint(a.ID))
+	err = s.inTx(ctx, func(tx *sql.Tx) error {
+		if err := tx.QueryRowContext(ctx, `INSERT INTO annotations (ts, entity, kind, text, author, created)
+			VALUES (?, ?, ?, ?, ?, ?) RETURNING id`, a.TS, a.Entity, a.Kind, a.Text, a.Author, a.Created).Scan(&a.ID); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO timeline_events
+			(ts, kind, entity_key, title, ref_table, ref_key, attrs)
+			VALUES (?, 'annotation', ?, ?, 'annotations', ?, '{}')`,
+			a.TS, a.Entity, title, fmt.Sprint(a.ID))
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -43,8 +98,8 @@ func (s *Store) CreateAnnotation(ctx context.Context, a model.Annotation) (*mode
 func (s *Store) Annotations(ctx context.Context, f model.Filter) ([]model.Annotation, error) {
 	from, to := s.window(f)
 	rows, err := s.r.QueryContext(ctx, `SELECT id, ts, entity, kind, text, author, created
-		FROM annotations WHERE ts >= ? AND ts < ? AND (? = '' OR entity = ?)
-		ORDER BY ts DESC, id DESC LIMIT ?`, from, to, f.Device, f.Device, limit(f, 500, 10000))
+		FROM annotations WHERE ts >= ? AND ts < ? AND (? = '' OR entity = ? OR entity = 'device:' || lower(?))
+		ORDER BY ts DESC, id DESC LIMIT ?`, from, to, f.Device, f.Device, f.Device, limit(f, 500, 10000))
 	if err != nil {
 		return nil, err
 	}
@@ -62,15 +117,7 @@ func (s *Store) Annotations(ctx context.Context, f model.Filter) ([]model.Annota
 
 // DeleteAnnotation removes a note and its rail event.
 func (s *Store) DeleteAnnotation(ctx context.Context, id int64) error {
-	res, err := s.w.ExecContext(ctx, `DELETE FROM annotations WHERE id = ?`, id)
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrNotFound
-	}
-	_, _ = s.w.ExecContext(ctx, `DELETE FROM timeline_events WHERE ref_table = 'annotations' AND ref_key = ?`, fmt.Sprint(id))
-	return nil
+	return s.deleteMemory(ctx, "annotations", id)
 }
 
 // CreateBookmark marks a moment.
@@ -79,19 +126,29 @@ func (s *Store) CreateBookmark(ctx context.Context, b model.Bookmark) (*model.Bo
 	if b.Name == "" {
 		return nil, fmt.Errorf("%w: bookmark name is required", ErrInvalid)
 	}
+	if len(b.Name) > maxShortText || b.TS < 0 {
+		return nil, fmt.Errorf("%w: bookmark field out of range", ErrInvalid)
+	}
+	var err error
+	if b.Entity, err = normEntity(b.Entity); err != nil {
+		return nil, err
+	}
 	now := s.cfg.Now().UnixMilli()
 	if b.TS == 0 {
 		b.TS = now
 	}
 	b.Created = now
-	if err := s.w.QueryRowContext(ctx, `INSERT INTO bookmarks (ts, entity, name, created)
-		VALUES (?, ?, ?, ?) RETURNING id`, b.TS, b.Entity, b.Name, b.Created).Scan(&b.ID); err != nil {
-		return nil, err
-	}
-	_, err := s.w.ExecContext(ctx, `INSERT OR IGNORE INTO timeline_events
-		(ts, kind, entity_key, title, ref_table, ref_key, attrs)
-		VALUES (?, 'bookmark', ?, ?, 'bookmarks', ?, '{}')`,
-		b.TS, b.Entity, b.Name, fmt.Sprint(b.ID))
+	err = s.inTx(ctx, func(tx *sql.Tx) error {
+		if err := tx.QueryRowContext(ctx, `INSERT INTO bookmarks (ts, entity, name, created)
+			VALUES (?, ?, ?, ?) RETURNING id`, b.TS, b.Entity, b.Name, b.Created).Scan(&b.ID); err != nil {
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO timeline_events
+			(ts, kind, entity_key, title, ref_table, ref_key, attrs)
+			VALUES (?, 'bookmark', ?, ?, 'bookmarks', ?, '{}')`,
+			b.TS, b.Entity, b.Name, fmt.Sprint(b.ID))
+		return err
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -102,8 +159,8 @@ func (s *Store) CreateBookmark(ctx context.Context, b model.Bookmark) (*model.Bo
 func (s *Store) Bookmarks(ctx context.Context, f model.Filter) ([]model.Bookmark, error) {
 	from, to := s.window(f)
 	rows, err := s.r.QueryContext(ctx, `SELECT id, ts, entity, name, created
-		FROM bookmarks WHERE ts >= ? AND ts < ? AND (? = '' OR entity = ?)
-		ORDER BY ts DESC, id DESC LIMIT ?`, from, to, f.Device, f.Device, limit(f, 500, 10000))
+		FROM bookmarks WHERE ts >= ? AND ts < ? AND (? = '' OR entity = ? OR entity = 'device:' || lower(?))
+		ORDER BY ts DESC, id DESC LIMIT ?`, from, to, f.Device, f.Device, f.Device, limit(f, 500, 10000))
 	if err != nil {
 		return nil, err
 	}
@@ -121,27 +178,20 @@ func (s *Store) Bookmarks(ctx context.Context, f model.Filter) ([]model.Bookmark
 
 // DeleteBookmark removes a bookmark and its rail event.
 func (s *Store) DeleteBookmark(ctx context.Context, id int64) error {
-	res, err := s.w.ExecContext(ctx, `DELETE FROM bookmarks WHERE id = ?`, id)
-	if err != nil {
-		return err
-	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return ErrNotFound
-	}
-	_, _ = s.w.ExecContext(ctx, `DELETE FROM timeline_events WHERE ref_table = 'bookmarks' AND ref_key = ?`, fmt.Sprint(id))
-	return nil
+	return s.deleteMemory(ctx, "bookmarks", id)
 }
 
-// AnnotationAt is a small helper for tests and future callers.
-func (s *Store) AnnotationAt(ctx context.Context, id int64) (*model.Annotation, error) {
-	var a model.Annotation
-	err := s.r.QueryRowContext(ctx, `SELECT id, ts, entity, kind, text, author, created FROM annotations WHERE id = ?`, id).
-		Scan(&a.ID, &a.TS, &a.Entity, &a.Kind, &a.Text, &a.Author, &a.Created)
-	if err == sql.ErrNoRows {
-		return nil, ErrNotFound
-	}
-	if err != nil {
-		return nil, err
-	}
-	return &a, nil
+// deleteMemory removes one row of a fixed table and its rail event together.
+func (s *Store) deleteMemory(ctx context.Context, table string, id int64) error {
+	return s.inTx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE id = ?`, id)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrNotFound
+		}
+		_, err = tx.ExecContext(ctx, `DELETE FROM timeline_events WHERE ref_table = ? AND ref_key = ?`, table, fmt.Sprint(id))
+		return err
+	})
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strconv"
@@ -13,13 +14,27 @@ import (
 	"github.com/xen0bit/netgraph/internal/model"
 )
 
+// maxSceneEvidence bounds what one autopsy scene cites: a busy device's story
+// has thousands of records, and the reel only needs to point at them.
+const maxSceneEvidence = 50
+
 // CreateIncident pins an anomaly (or a manual window) as a saved object.
 func (s *Store) CreateIncident(ctx context.Context, a model.Anomaly, title string, from, to time.Time) (*model.Incident, error) {
+	if a.Kind == "" {
+		return nil, fmt.Errorf("%w: an incident needs an anomaly kind", ErrInvalid)
+	}
 	if title == "" {
 		title = a.Summary
 	}
 	if title == "" {
 		title = strings.ReplaceAll(a.Kind, "_", " ")
+	}
+	if len(title) > maxNoteText || len(a.Kind) > maxShortText {
+		return nil, fmt.Errorf("%w: incident field too long", ErrInvalid)
+	}
+	now := s.cfg.Now()
+	if a.TS == 0 {
+		a.TS = now.UnixMilli()
 	}
 	if from.IsZero() {
 		from = time.UnixMilli(a.TS).Add(-10 * time.Minute)
@@ -27,29 +42,37 @@ func (s *Store) CreateIncident(ctx context.Context, a model.Anomaly, title strin
 	if to.IsZero() {
 		to = time.UnixMilli(a.TS).Add(10 * time.Minute)
 	}
-	now := s.cfg.Now().UnixMilli()
+	if !from.Before(to) {
+		return nil, fmt.Errorf("%w: from must be before to", ErrInvalid)
+	}
 	b, _ := json.Marshal(a)
 	var id int64
-	err := s.w.QueryRowContext(ctx, `INSERT INTO incidents
-		(opened, updated, start_ts, end_ts, kind, severity, status, title, summary, anomaly)
-		VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?) RETURNING id`,
-		now, now, ms(from), ms(to), a.Kind, a.Severity, title, a.Summary, string(b)).Scan(&id)
+	err := s.inTx(ctx, func(tx *sql.Tx) error {
+		err := tx.QueryRowContext(ctx, `INSERT INTO incidents
+			(opened, updated, start_ts, end_ts, kind, severity, status, title, summary, anomaly)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+			now.UnixMilli(), now.UnixMilli(), ms(from), ms(to), a.Kind, a.Severity, model.IncidentOpen, title, a.Summary, string(b)).Scan(&id)
+		if err != nil {
+			return err
+		}
+		for _, e := range []string{a.Device, a.Entity} {
+			if e == "" {
+				continue
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO incident_entities (incident_id, entity, role) VALUES (?, ?, 'subject')`, id, e); err != nil {
+				return err
+			}
+		}
+		for k := range a.Evidence {
+			ev := "anomaly:" + a.Kind + ":" + strconv.FormatInt(a.TS, 10) + ":" + k
+			if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO incident_evidence (incident_id, evidence, pinned) VALUES (?, ?, 1)`, id, ev); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 	if err != nil {
 		return nil, err
-	}
-	for _, e := range []string{a.Device, a.Entity} {
-		if e == "" {
-			continue
-		}
-		if _, err := s.w.ExecContext(ctx, `INSERT OR IGNORE INTO incident_entities (incident_id, entity, role) VALUES (?, ?, 'subject')`, id, e); err != nil {
-			return nil, err
-		}
-	}
-	for k := range a.Evidence {
-		ev := "anomaly:" + a.Kind + ":" + strconv.FormatInt(a.TS, 10) + ":" + k
-		if _, err := s.w.ExecContext(ctx, `INSERT OR IGNORE INTO incident_evidence (incident_id, evidence, pinned) VALUES (?, ?, 1)`, id, ev); err != nil {
-			return nil, err
-		}
 	}
 	return s.Incident(ctx, id)
 }
@@ -60,7 +83,7 @@ func (s *Store) Incidents(ctx context.Context, status string, limit int) ([]mode
 		limit = 200
 	}
 	rows, err := s.r.QueryContext(ctx, `SELECT id, opened, updated, start_ts, end_ts, kind, severity, status, title, summary
-		FROM incidents WHERE (? = '' OR status = ?) ORDER BY updated DESC LIMIT ?`, status, status, limit)
+		FROM incidents WHERE (? = '' OR status = ?) ORDER BY updated DESC, id DESC LIMIT ?`, status, status, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -71,10 +94,20 @@ func (s *Store) Incidents(ctx context.Context, status string, limit int) ([]mode
 		if err := rows.Scan(&in.ID, &in.OpenedMS, &in.UpdatedMS, &in.StartMS, &in.EndMS, &in.Kind, &in.Severity, &in.Status, &in.Title, &in.Summary); err != nil {
 			return nil, err
 		}
-		in.Entities, _ = s.incidentEntities(ctx, in.ID)
 		out = append(out, in)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	// Close first: a query per row while holding this one takes two pool
+	// connections per request, which concurrent requests can deadlock on.
+	rows.Close()
+	for i := range out {
+		if out[i].Entities, err = s.incidentEntities(ctx, out[i].ID); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 func (s *Store) incidentEntities(ctx context.Context, id int64) ([]string, error) {
@@ -106,7 +139,9 @@ func (s *Store) Incident(ctx context.Context, id int64) (*model.Incident, error)
 	if err != nil {
 		return nil, err
 	}
-	in.Entities, _ = s.incidentEntities(ctx, id)
+	if in.Entities, err = s.incidentEntities(ctx, id); err != nil {
+		return nil, err
+	}
 	return &in, nil
 }
 
@@ -129,6 +164,10 @@ func (s *Store) IncidentDetail(ctx context.Context, id int64) (*model.IncidentDe
 		}
 		d.Notes = append(d.Notes, n)
 	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
@@ -144,6 +183,10 @@ func (s *Store) IncidentDetail(ctx context.Context, id int64) (*model.IncidentDe
 		}
 		d.Evidence = append(d.Evidence, model.EvidenceRef{Kind: "incident", ID: e})
 	}
+	if err := ev.Err(); err != nil {
+		ev.Close()
+		return nil, err
+	}
 	if err := ev.Close(); err != nil {
 		return nil, err
 	}
@@ -152,46 +195,81 @@ func (s *Store) IncidentDetail(ctx context.Context, id int64) (*model.IncidentDe
 
 // UpdateIncident changes status/title/summary and optionally adds a note.
 func (s *Store) UpdateIncident(ctx context.Context, id int64, status, title, summary, note, author string) (*model.Incident, error) {
-	now := s.cfg.Now().UnixMilli()
+	switch status {
+	case "", model.IncidentOpen, model.IncidentAcknowledged, model.IncidentResolved:
+	default:
+		return nil, fmt.Errorf("%w: status %q is not open, acknowledged or resolved", ErrInvalid, status)
+	}
+	if len(title) > maxNoteText || len(summary) > maxNoteText || len(note) > maxNoteText || len(author) > maxShortText {
+		return nil, fmt.Errorf("%w: incident field too long", ErrInvalid)
+	}
 	if status == "" && title == "" && summary == "" && note == "" {
 		return s.Incident(ctx, id)
 	}
-	_, err := s.w.ExecContext(ctx, `UPDATE incidents SET updated = ?,
-		status = CASE WHEN ? != '' THEN ? ELSE status END,
-		title = CASE WHEN ? != '' THEN ? ELSE title END,
-		summary = CASE WHEN ? != '' THEN ? ELSE summary END
-		WHERE id = ?`, now, status, status, title, title, summary, summary, id)
+	now := s.cfg.Now().UnixMilli()
+	err := s.inTx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `UPDATE incidents SET updated = ?,
+			status = CASE WHEN ? != '' THEN ? ELSE status END,
+			title = CASE WHEN ? != '' THEN ? ELSE title END,
+			summary = CASE WHEN ? != '' THEN ? ELSE summary END
+			WHERE id = ?`, now, status, status, title, title, summary, summary, id)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrNotFound
+		}
+		if note == "" {
+			return nil
+		}
+		_, err = tx.ExecContext(ctx, `INSERT INTO incident_notes (incident_id, ts, author, body) VALUES (?, ?, ?, ?)`, id, now, author, note)
+		return err
+	})
 	if err != nil {
 		return nil, err
-	}
-	if note != "" {
-		_, err = s.w.ExecContext(ctx, `INSERT INTO incident_notes (incident_id, ts, author, body) VALUES (?, ?, ?, ?)`, id, now, author, note)
-		if err != nil {
-			return nil, err
-		}
 	}
 	return s.Incident(ctx, id)
 }
 
 // PinEvidence adds an evidence reference to an incident.
 func (s *Store) PinEvidence(ctx context.Context, id int64, evidence string) error {
-	if evidence == "" {
-		return fmt.Errorf("%w: empty evidence", ErrInvalid)
+	if evidence == "" || len(evidence) > maxNoteText {
+		return fmt.Errorf("%w: evidence must be 1..%d bytes", ErrInvalid, maxNoteText)
 	}
-	_, err := s.w.ExecContext(ctx, `INSERT OR IGNORE INTO incident_evidence (incident_id, evidence, pinned) VALUES (?, ?, 1)`, id, evidence)
-	return err
+	return s.inTx(ctx, func(tx *sql.Tx) error {
+		var one int
+		if err := tx.QueryRowContext(ctx, `SELECT 1 FROM incidents WHERE id = ?`, id).Scan(&one); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return ErrNotFound
+			}
+			return err
+		}
+		_, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO incident_evidence (incident_id, evidence, pinned) VALUES (?, ?, 1)`, id, evidence)
+		return err
+	})
 }
 
 // DeleteIncident removes an incident and its notes/evidence.
 func (s *Store) DeleteIncident(ctx context.Context, id int64) error {
-	_, err := s.w.ExecContext(ctx, `DELETE FROM incidents WHERE id = ?`, id)
-	if err != nil {
-		return err
-	}
-	_, _ = s.w.ExecContext(ctx, `DELETE FROM incident_entities WHERE incident_id = ?`, id)
-	_, _ = s.w.ExecContext(ctx, `DELETE FROM incident_notes WHERE incident_id = ?`, id)
-	_, _ = s.w.ExecContext(ctx, `DELETE FROM incident_evidence WHERE incident_id = ?`, id)
-	return nil
+	return s.inTx(ctx, func(tx *sql.Tx) error {
+		res, err := tx.ExecContext(ctx, `DELETE FROM incidents WHERE id = ?`, id)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return ErrNotFound
+		}
+		for _, q := range []string{
+			`DELETE FROM incident_entities WHERE incident_id = ?`,
+			`DELETE FROM incident_notes WHERE incident_id = ?`,
+			`DELETE FROM incident_evidence WHERE incident_id = ?`,
+		} {
+			if _, err := tx.ExecContext(ctx, q, id); err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // Autopsy builds a deterministic evidence reel for an anomaly. It is
@@ -230,9 +308,12 @@ func (s *Store) Autopsy(ctx context.Context, a model.Anomaly, f model.Filter) (*
 	}
 	sf := model.Filter{From: time.UnixMilli(from), To: time.UnixMilli(to)}
 	st, err := s.Story(ctx, subject, sf)
-	if err != nil {
-		out.Gaps = append(out.Gaps, "the subject is not in the recorded window")
+	if errors.Is(err, ErrNotFound) {
+		out.Gaps = append(out.Gaps, "the subject is no longer in the recorded data")
 		return out, nil
+	}
+	if err != nil {
+		return nil, err
 	}
 	if st.Label != "" {
 		out.Entities = append(out.Entities, st.Entity)
@@ -240,21 +321,21 @@ func (s *Store) Autopsy(ctx context.Context, a model.Anomaly, f model.Filter) (*
 			ID: "subject", AtMS: from, Title: "Subject",
 			Narrative: fmt.Sprintf("%s (%s) has %d recorded intervals in this window.", st.Label, st.Entity, len(st.Segments)),
 			Camera:    model.Camera{Focus: st.Entity},
-			Evidence:  st.Evidence,
+			Evidence:  firstN(st.Evidence, maxSceneEvidence),
 		})
 	}
 	if len(st.Segments) > 0 {
 		first := st.Segments[0]
 		out.Scenes = append(out.Scenes, model.Scene{
 			ID: "first", AtMS: first.FromMS, Title: "First recorded activity",
-			Narrative: fmt.Sprintf("%s began at %s; the evidence is %s.", first.Label, time.UnixMilli(first.FromMS).UTC().Format(time.RFC3339), first.Kind),
+			Narrative: fmt.Sprintf("%s began at %s; the evidence is %s.", firstNonEmpty(first.Label, first.Entity, first.Kind), time.UnixMilli(first.FromMS).UTC().Format(time.RFC3339), first.Kind),
 			Camera:    model.Camera{Focus: st.Entity},
 			Evidence:  first.Evidence,
 		})
 		last := st.Segments[len(st.Segments)-1]
 		out.Scenes = append(out.Scenes, model.Scene{
 			ID: "last", AtMS: last.FromMS, Title: "Latest recorded activity",
-			Narrative: fmt.Sprintf("The latest interval is %s at %s.", last.Label, time.UnixMilli(last.FromMS).UTC().Format(time.RFC3339)),
+			Narrative: fmt.Sprintf("The latest interval is %s at %s.", firstNonEmpty(last.Label, last.Entity, last.Kind), time.UnixMilli(last.FromMS).UTC().Format(time.RFC3339)),
 			Camera:    model.Camera{Focus: st.Entity},
 			Evidence:  last.Evidence,
 		})
@@ -266,9 +347,10 @@ func (s *Store) Autopsy(ctx context.Context, a model.Anomaly, f model.Filter) (*
 			Camera:    model.Camera{Focus: st.Entity},
 		})
 	}
-	if len(st.Gaps) > 0 {
-		out.Gaps = append(out.Gaps, st.Gaps...)
+	if len(st.Evidence) > maxSceneEvidence {
+		out.Gaps = append(out.Gaps, fmt.Sprintf("the subject scene cites the first %d of %d records", maxSceneEvidence, len(st.Evidence)))
 	}
+	out.Gaps = append(out.Gaps, st.Gaps...)
 	slices.SortFunc(out.Scenes, func(x, y model.Scene) int {
 		return cmpScene(x, y)
 	})
@@ -357,7 +439,9 @@ func (s *Store) IncidentAutopsy(ctx context.Context, id int64) (*model.Autopsy, 
 		return nil, err
 	}
 	var a model.Anomaly
-	_ = json.Unmarshal([]byte(raw), &a)
+	if err := json.Unmarshal([]byte(raw), &a); err != nil {
+		return nil, fmt.Errorf("incident %d: stored anomaly: %w", id, err)
+	}
 	f := model.Filter{From: time.UnixMilli(start), To: time.UnixMilli(end)}
 	out, err := s.Autopsy(ctx, a, f)
 	if err != nil {
@@ -379,7 +463,7 @@ func (s *Store) ExportIncident(ctx context.Context, id int64) ([]byte, error) {
 	}
 	bundle := map[string]any{
 		"schema": "netgraph.incident.v1", "incident": d, "autopsy": a,
-		"generated": time.Now().UTC().Format(time.RFC3339),
+		"generated": s.cfg.Now().UTC().Format(time.RFC3339),
 	}
 	return json.MarshalIndent(bundle, "", "  ")
 }

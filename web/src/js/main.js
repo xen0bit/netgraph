@@ -896,10 +896,12 @@ async function renderInsights(seq) {
     const findings = (exposure?.findings || []).map((f) => `<li>${badge(f.severity)} <b>${esc(f.kind.replaceAll("_", " "))}</b> ${esc(f.summary)}</li>`).join("");
     const sensors = (coverage?.sensors || []).map((s) => `<tr><td>${esc(s.name)}</td><td>${s.devices}</td><td>${s.only_device}</td><td>${stamp(s.last_seen)}</td></tr>`).join("");
     const only = (coverage?.devices || []).filter((d) => d.only_one).slice(0, 20).map((d) => `<li>${esc(d.label)} <span class="muted">only by ${esc(d.sensors.join(", "))}</span></li>`).join("");
-    const nets = (airspace?.networks || []).slice(0, 50).map((n) => `<tr><td class="mono">${esc(n.bssid)}</td><td>${esc(n.ssid)}</td><td>${esc(n.security || "open")}</td><td>${n.channel}</td><td>${(n.clients || []).length}</td><td>${n.rogue ? badge("high", "rogue") : ""}</td></tr>`).join("");
+    const nets = (airspace?.networks || []).slice(0, 50).map((n) => `<tr><td class="mono">${esc(n.bssid)}</td><td>${esc(n.ssid)}</td><td>${esc(n.security || "unknown")}</td><td>${n.channel}</td><td>${(n.clients || []).length}</td><td>${n.rogue ? badge("rogue", "sev-high") : ""}</td></tr>`).join("");
     const pts = (weather?.points || []);
-    const max = Math.max(1, ...pts.map((p) => p.bytes_out + p.bytes_in));
-    const bars = pts.map((p) => `<span class="wbar${p.forecast ? " forecast" : ""}" title="${stamp(p.ts)} ${bytes(p.bytes_out + p.bytes_in)}" style="height:${Math.max(2, ((p.bytes_out + p.bytes_in) / max) * 54)}px"></span>`).join("");
+    // A forecast has no bytes of its own: it is drawn as its band's top.
+    const level = (p) => (p.forecast ? p.upper || 0 : p.bytes_out + p.bytes_in);
+    const max = Math.max(1, ...pts.map(level));
+    const bars = pts.map((p) => `<span class="wbar${p.forecast ? " forecast" : ""}" title="${stamp(p.ts)} ${p.forecast ? `forecast ${bytes(p.lower || 0)} to ${bytes(p.upper || 0)}` : bytes(p.bytes_out + p.bytes_in)}" style="height:${Math.max(2, (level(p) / max) * 54)}px"></span>`).join("");
     box.innerHTML = `<div class="insight-grid">
       <section class="card"><h3>Exposure</h3><p class="muted">Reachable or weak things, from evidence.</p><ul class="tight">${findings || "<li class=\"muted\">Nothing stands out.</li>"}</ul>${(exposure?.gaps || []).map((g) => `<p class="muted">${esc(g)}</p>`).join("")}</section>
       <section class="card"><h3>Sensor coverage</h3><table class="mini"><thead><tr><th>Sensor</th><th>Devices</th><th>Only seen</th><th>Last seen</th></tr></thead><tbody>${sensors}</tbody></table>${only ? `<h4>Only one sensor saw</h4><ul class="tight">${only}</ul>` : ""}<p class="muted">Coverage is where traffic was observed, not an RF survey.</p></section>
@@ -984,6 +986,7 @@ async function openEntity(id, { anomaly } = {}) {
       const a = await track(api("autopsy", {
         kind: anomaly.kind, severity: anomaly.severity, ts: anomaly.ts,
         device: anomaly.device || "", entity: anomaly.entity || "", summary: anomaly.summary || "",
+        evidence: JSON.stringify(anomaly.evidence || {}),
       }));
       renderAutopsy(a);
     } catch (err) {
@@ -1093,7 +1096,7 @@ function setLive(on) {
   state.live = on;
   if (on && state.rec.on) {
     state.rec.on = false;
-    state.rec.playing = false;
+    stopPlay();
     $("#recorder-bar").hidden = true;
     $("#event-rail").hidden = true;
     $("#recorder").setAttribute("aria-pressed", "false");
@@ -1197,7 +1200,7 @@ async function runWhatIf() {
     const s = r.summary || {};
     status.textContent = `${s.connections || 0} connections evaluated`;
     const impact = (x) => `<li><b>${esc(x.device_name || "unknown device")}</b> → ${esc(x.destination || "?")} <span class="mono">${esc(x.port || "")}</span> <span class="muted">${esc(x.reason || "")}${x.rule ? ` (${esc(x.rule)})` : ""}</span></li>`;
-    box.innerHTML = `<p><b>${s.blocked || 0}</b> blocked, <b>${s.essential || 0}</b> essential, <b>${s.unknown || 0}</b> unknown, <b>${s.unchanged || 0}</b> unchanged.</p>
+    box.innerHTML = `<p><b>${s.blocked || 0}</b> blocked (<b>${s.essential || 0}</b> essential), <b>${s.lookups || 0}</b> lookups blocked, <b>${s.unknown || 0}</b> unknown, <b>${s.unchanged || 0}</b> unchanged.</p>
       ${(r.essential || []).length ? `<h3>Essential dependencies</h3><ul>${r.essential.map(impact).join("")}</ul>` : ""}
       ${(r.blocked || []).length ? `<h3>Would be blocked</h3><ul>${r.blocked.slice(0, 100).map(impact).join("")}</ul>` : ""}
       ${(r.unknown || []).length ? `<h3>Unknown</h3><ul>${r.unknown.slice(0, 50).map(impact).join("")}</ul>` : ""}
@@ -1238,14 +1241,69 @@ function openAsk() {
 
 async function openIncident(id) {
   try {
-    const a = await track(api(`incidents/${id}/autopsy`));
-    renderAutopsy(a);
+    const [a, d] = await Promise.all([track(api(`incidents/${id}/autopsy`)), track(api(`incidents/${id}`))]);
+    renderAutopsy(a, d);
   } catch (e) {
     setStatus(e.message, true);
   }
 }
 
-function renderAutopsy(a) {
+// What a saved incident adds to its reel: its status, its notes and the
+// buttons that change them.
+function incidentTools(d) {
+  const next = { acknowledge: "acknowledged", resolve: "resolved", reopen: "open" };
+  const buttons = Object.entries(next).filter(([, s]) => s !== d.status)
+    .map(([verb, s]) => `<button type="button" data-status="${s}">${verb[0].toUpperCase() + verb.slice(1)}</button>`).join(" ");
+  const notes = (d.notes || []).map((n) => `<li><time>${stamp(n.ts)}</time> ${esc(n.body)}</li>`).join("");
+  return `<div class="incident-tools">
+    <p>${badge(d.status)} ${esc(d.title)}</p>
+    ${notes ? `<ul class="evidence">${notes}</ul>` : ""}
+    <div class="actions">
+      ${buttons}
+      <input id="incident-note" type="text" aria-label="Add a note to this incident" placeholder="Add a note">
+      <button type="button" id="incident-note-save">Add note</button>
+      <button type="button" id="incident-export">Export</button>
+      <button type="button" id="incident-delete">Delete</button>
+    </div>
+  </div>`;
+}
+
+function wireIncidentTools(d) {
+  const box = $("#autopsy-body");
+  const update = async (body) => {
+    try {
+      await send("PATCH", `incidents/${d.id}`, body);
+      await openIncident(d.id);
+      refresh();
+    } catch (e) {
+      setStatus(e.message, true);
+    }
+  };
+  box.querySelectorAll("[data-status]").forEach((b) => { b.onclick = () => update({ status: b.dataset.status }); });
+  $("#incident-note-save").onclick = () => {
+    const note = $("#incident-note").value.trim();
+    if (note) update({ note, author: "web" });
+  };
+  $("#incident-export").onclick = async () => {
+    try {
+      download(`netgraph-incident-${d.id}.json`, await track(api(`incidents/${d.id}/export`, {}, true)), "application/json");
+    } catch (e) {
+      setStatus(e.message, true);
+    }
+  };
+  $("#incident-delete").onclick = async () => {
+    if (!confirm(`Delete incident #${d.id}?`)) return;
+    try {
+      await send("DELETE", `incidents/${d.id}`);
+      $("#autopsy-dialog").close();
+      refresh();
+    } catch (e) {
+      setStatus(e.message, true);
+    }
+  };
+}
+
+function renderAutopsy(a, incident) {
   const dlg = $("#autopsy-dialog");
   $("#autopsy-title").textContent = `${a.anomaly?.kind?.replaceAll("_", " ") || (a.incident ? `Incident #${a.incident}` : "Incident")} autopsy`;
   $("#autopsy-meta").textContent = `${stamp(a.from)} → ${stamp(a.to)} · ${a.scenes?.length || 0} scenes`;
@@ -1255,7 +1313,8 @@ function renderAutopsy(a) {
     ${(s.evidence || []).length ? `<ul class="evidence">${s.evidence.map((e) => `<li><span class="badge">${esc(e.kind)}</span> ${esc(e.text || e.id)}</li>`).join("")}</ul>` : ""}
     <button type="button" data-open="${s.at}">Open this moment</button>
   </article>`).join("");
-  $("#autopsy-body").innerHTML = scenes + (a.gaps || []).map((g) => `<p class="muted">gap: ${esc(g)}</p>`).join("");
+  $("#autopsy-body").innerHTML = (incident ? incidentTools(incident) : "") + scenes + (a.gaps || []).map((g) => `<p class="muted">gap: ${esc(g)}</p>`).join("");
+  if (incident) wireIncidentTools(incident);
   $("#autopsy-body").querySelectorAll("[data-open]").forEach((b) => {
     b.onclick = () => {
       const ts = Number(b.dataset.open);
@@ -1295,12 +1354,12 @@ function renderRecorder() {
   if (state.live) $("#rec-time").textContent += " · live edge";
 }
 
-function setRecAt(ts, { refresh = true } = {}) {
+function setRecAt(ts) {
   state.rec.at = Math.max(0, Math.round(ts));
   state.to = state.rec.at;
   state.span = state.rec.lookback;
   state.live = false;
-  if (refresh) refresh(); else renderRecorder();
+  refresh();
 }
 
 function stopPlay() {
@@ -1330,8 +1389,8 @@ function togglePlay() {
 function toggleRecorder(on = !state.rec.on) {
   state.rec.on = on;
   if (on) {
-    state.rec.at = state.rec.at && state.rec.at > 0 ? state.rec.at : state.to;
-    if (state.rec.at > Date.now()) state.rec.at = Date.now();
+    // Start from the moment on screen, not wherever the recorder last was.
+    state.rec.at = Math.min(state.to, Date.now());
     state.to = state.rec.at;
     state.span = state.rec.lookback;
     state.live = false;
@@ -1361,7 +1420,10 @@ async function renderRail(seq) {
   box.hidden = false;
   let page;
   try {
-    page = await track(api("timeline", { from: state.to - units.d, to: state.to + 1, limit: 40, entity: state.rec.follow || "" }));
+    // Flows and lookups are the bulk of the rail and would push a note out of
+    // the last forty events within seconds on a busy network.
+    const kinds = $("#rec-rail").value === "all" ? "" : "annotation,bookmark,device_new,observation";
+    page = await track(api("timeline", { from: state.to - units.d, to: state.to + 1, limit: 40, entity: state.rec.follow || "", kinds }));
   } catch (e) {
     box.innerHTML = `<p class="muted">${esc(e.message)}</p>`;
     return;
@@ -1526,6 +1588,7 @@ function init() {
     state.rec.lookback = Number($("#rec-lookback").value) || 300000;
     setRecAt(state.rec.at);
   };
+  $("#rec-rail").onchange = () => refresh();
   $("#rec-speed").onchange = () => { if (state.rec.playing) { stopPlay(); togglePlay(); } };
   for (const b of $$(".presets button")) b.onclick = () => setWindow(Date.now(), parseSpan(b.dataset.span), { live: state.live });
   const fromTo = () => {

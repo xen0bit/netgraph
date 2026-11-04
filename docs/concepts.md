@@ -53,9 +53,9 @@ they must not depend on the resolver of the machine replaying them.
 | `dns`, `dns_answers` | lookups and answers | raw retention |
 | `observations` | identity events as received, for timelines | raw retention |
 | `traffic_hourly`, `dns_hourly` | hourly rollups per device and destination | rollup retention |
-| `timeline_events` | the Flight Recorder's compact event rail: device joins, DNS, flow open/close, observations | raw retention |
-| `frame_cache` | disposable computed moments | bounded by size and age |
-| `annotations`, `bookmarks` | human notes and marked moments on the rail | until deleted |
+| `timeline_events` | the Flight Recorder's compact event rail: device joins, DNS, flow open/close, observations, sensor stats, notes and bookmarks | raw retention; the rail events of notes and bookmarks live as long as the note |
+| `annotations`, `bookmarks` | human notes and marked moments on the rail | until deleted, or erased by `db forget`/`db purge` |
+| `incidents`, `incident_*` | saved investigations | until deleted, or erased by `db forget`/`db purge` |
 
 A fact's rows are its **periods**. Seeing a relationship again within
 `-fact-gap` (1 h) extends the current period; after a longer silence a new
