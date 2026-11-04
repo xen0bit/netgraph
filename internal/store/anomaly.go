@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"slices"
@@ -40,6 +41,16 @@ type anomalyDevice struct {
 	vendor              string
 }
 
+// A window ending within anomalyLiveEdge of now is a live one, and its report
+// is reused for anomalyLiveTTL as the window moves.
+const (
+	anomalyLiveEdge = 30 * time.Second
+	anomalyLiveTTL  = 10 * time.Second
+)
+
+// errAnomalyRunAborted is what waiting requests see if the run panicked.
+var errAnomalyRunAborted = errors.New("anomaly checks did not finish")
+
 // Anomalies runs the anomaly checks over a window. Without a day of history
 // before the window (Learning) it runs only those that need none: beacons,
 // failed lookups, DNS tunnels and access points disagreeing on security.
@@ -49,15 +60,78 @@ func (s *Store) Anomalies(ctx context.Context, f model.Filter) (*model.AnomalyRe
 	// The cache lock is not held while the checks run: Ingest invalidates
 	// the cache on every batch and must not wait behind a slow report. A
 	// report computed while data changed is returned but not cached.
-	key := fmt.Sprintf("%d|%d|%s", from, to, f.Device)
-	s.anomMu.Lock()
-	if s.anomRep != nil && s.anomKey == key && s.cfg.Now().Sub(s.anomAt) < time.Minute {
-		rep := s.anomRep
-		s.anomMu.Unlock()
-		return rep, nil
+	//
+	// A window ending now moves on every request, so its key is its span
+	// rather than its exact edges: a live view would otherwise run every
+	// check on every refresh. It is cached for less, since the report
+	// depends on the clock (sensor_silent).
+	key, ttl := fmt.Sprintf("%d|%d|%s", from, to, f.Device), time.Minute
+	now := s.cfg.Now()
+	if d := now.Sub(time.UnixMilli(to)); d > -anomalyLiveEdge && d < anomalyLiveEdge {
+		key, ttl = fmt.Sprintf("live|%d|%s", to-from, f.Device), anomalyLiveTTL
 	}
-	gen := s.anomGen
-	s.anomMu.Unlock()
+	for {
+		s.anomMu.Lock()
+		if s.anomRep != nil && s.anomKey == key && now.Sub(s.anomAt) < ttl {
+			rep := s.anomRep
+			s.anomMu.Unlock()
+			return rep.At(from, to), nil
+		}
+		run := s.anomFlight[key]
+		if run == nil {
+			run = &anomalyRun{done: make(chan struct{})}
+			if s.anomFlight == nil {
+				s.anomFlight = map[string]*anomalyRun{}
+			}
+			s.anomFlight[key] = run
+			gen := s.anomGen
+			s.anomMu.Unlock()
+			return s.leadAnomalies(ctx, f, from, to, key, gen, run)
+		}
+		s.anomMu.Unlock()
+		select {
+		case <-run.done:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+		if run.err == nil {
+			return run.rep.At(from, to), nil
+		}
+		// The request running the checks failed, perhaps only because its
+		// client went away. This one's own attempt decides.
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+	}
+}
+
+// anomalyRun is one computation of a report, which later requests for the
+// same key wait for.
+type anomalyRun struct {
+	done chan struct{}
+	rep  *model.AnomalyReport
+	err  error
+}
+
+// leadAnomalies computes a report for everyone waiting on run.
+func (s *Store) leadAnomalies(ctx context.Context, f model.Filter, from, to int64, key string, gen uint64, run *anomalyRun) (*model.AnomalyReport, error) {
+	run.err = errAnomalyRunAborted
+	defer func() {
+		s.anomMu.Lock()
+		delete(s.anomFlight, key)
+		if run.err == nil && s.anomGen == gen {
+			s.anomKey, s.anomAt, s.anomRep = key, s.cfg.Now(), run.rep
+		}
+		s.anomMu.Unlock()
+		close(run.done)
+	}()
+	run.rep, run.err = s.computeAnomalies(ctx, f, from, to)
+	return run.rep, run.err
+}
+
+// computeAnomalies runs every check over the window.
+func (s *Store) computeAnomalies(ctx context.Context, f model.Filter, from, to int64) (*model.AnomalyReport, error) {
+	s.anomRuns.Add(1)
 	rep := &model.AnomalyReport{FromMS: from, ToMS: to, HistoryMS: AnomalyHistory.Milliseconds(), BaselineMS: anomalyBaseline.Milliseconds(), Anomalies: []model.Anomaly{}}
 	since, err := s.FirstSensorSeen(ctx)
 	if err != nil {
@@ -115,11 +189,6 @@ func (s *Store) Anomalies(ctx context.Context, f model.Filter) (*model.AnomalyRe
 		return cmp.Or(cmp.Compare(x.TS, y.TS), cmp.Compare(x.Kind, y.Kind), cmp.Compare(x.Device, y.Device), cmp.Compare(x.Entity, y.Entity))
 	})
 	rep.Anomalies = append(rep.Anomalies, out...)
-	s.anomMu.Lock()
-	if s.anomGen == gen {
-		s.anomKey, s.anomAt, s.anomRep = key, s.cfg.Now(), rep
-	}
-	s.anomMu.Unlock()
 	return rep, nil
 }
 

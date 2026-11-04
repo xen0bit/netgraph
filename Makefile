@@ -127,6 +127,7 @@ lint:
 	@test -z "$$(gofmt -l .)" || (gofmt -l .; echo "gofmt: files above need formatting"; exit 1)
 	$(GO) vet ./...
 	$(GO) vet -tags lab ./test/lab/...
+	$(GO) vet -tags browser ./test/browser/...
 	GOOS=js GOARCH=wasm $(GO) vet ./cmd/web
 	$(GOLANGCI_LINT) run
 
@@ -155,6 +156,11 @@ cross:
 docker:
 	docker build -f deploy/Dockerfile --target sensor -t netgraph-sensor:dev .
 	docker build -f deploy/Dockerfile --target server -t netgraph:dev .
+
+## browser: drive the web UI in a local headless Chrome (no Docker)
+.PHONY: browser
+browser: web.build
+	$(GO) test -tags browser -count=1 -timeout 10m -v ./test/browser/...
 
 ## lab: run the isolated docker-compose end-to-end lab
 .PHONY: lab

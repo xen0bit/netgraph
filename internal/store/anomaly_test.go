@@ -269,3 +269,143 @@ func TestAnomaliesLearning(t *testing.T) {
 		}
 	}
 }
+
+// A live view asks for a window ending now on every refresh. It must not run
+// every check each time, and requests that arrive together share one run.
+func TestAnomaliesLiveWindowUsesCache(t *testing.T) {
+	now := testutil.Base
+	st, err := Open(filepath.Join(t.TempDir(), "ng.db"), Config{Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	live := func() model.Filter { return model.Filter{From: now.Add(-time.Hour), To: now} }
+
+	first, err := st.Anomalies(ctx, live())
+	if err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(2 * time.Second)
+	moved, err := st.Anomalies(ctx, live())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := st.anomRuns.Load(); n != 1 {
+		t.Errorf("a window two seconds on ran the checks %d times, want 1", n)
+	}
+	if moved.ToMS != now.UnixMilli() || moved.FromMS != now.Add(-time.Hour).UnixMilli() {
+		t.Errorf("the report names window [%d, %d), not the one asked for", moved.FromMS, moved.ToMS)
+	}
+	if first.ToMS == moved.ToMS {
+		t.Error("the shared report was changed for the later request")
+	}
+	// It expires, since sensor_silent depends on the clock.
+	now = now.Add(anomalyLiveTTL)
+	if _, err := st.Anomalies(ctx, live()); err != nil {
+		t.Fatal(err)
+	}
+	if n := st.anomRuns.Load(); n != 2 {
+		t.Errorf("after the live TTL the checks ran %d times, want 2", n)
+	}
+	// A different span is a different report.
+	if _, err := st.Anomalies(ctx, model.Filter{From: now.Add(-2 * time.Hour), To: now}); err != nil {
+		t.Fatal(err)
+	}
+	if n := st.anomRuns.Load(); n != 3 {
+		t.Errorf("another span ran the checks %d times, want 3", n)
+	}
+	// A historical window keeps its exact key.
+	old := model.Filter{From: now.Add(-3 * time.Hour), To: now.Add(-2 * time.Hour)}
+	for range 2 {
+		if _, err := st.Anomalies(ctx, old); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n := st.anomRuns.Load(); n != 4 {
+		t.Errorf("a repeated historical window ran the checks %d times, want 4", n)
+	}
+	other := model.Filter{From: old.From.Add(time.Second), To: old.To.Add(time.Second)}
+	if _, err := st.Anomalies(ctx, other); err != nil {
+		t.Fatal(err)
+	}
+	if n := st.anomRuns.Load(); n != 5 {
+		t.Errorf("a shifted historical window ran the checks %d times, want 5", n)
+	}
+}
+
+// A waiter survives the run it waited on failing: its client going away must
+// not fail another client's request.
+func TestAnomaliesWaiterOutlivesCancelledRun(t *testing.T) {
+	now := testutil.Base
+	st, err := Open(filepath.Join(t.TempDir(), "ng.db"), Config{Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	f := model.Filter{From: now.Add(-time.Hour), To: now}
+	run := &anomalyRun{done: make(chan struct{}), err: context.Canceled}
+	st.anomMu.Lock()
+	st.anomFlight = map[string]*anomalyRun{fmt.Sprintf("live|%d|", time.Hour.Milliseconds()): run}
+	st.anomMu.Unlock()
+	got := make(chan error, 1)
+	go func() {
+		_, err := st.Anomalies(context.Background(), f)
+		got <- err
+	}()
+	time.Sleep(50 * time.Millisecond) // let it reach the wait
+	st.anomMu.Lock()
+	clear(st.anomFlight)
+	st.anomMu.Unlock()
+	close(run.done)
+	if err := <-got; err != nil {
+		t.Errorf("waiter failed with the other request's error: %v", err)
+	}
+}
+
+func TestDataRange(t *testing.T) {
+	now := testutil.Base
+	st, err := Open(filepath.Join(t.TempDir(), "ng.db"), Config{Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	empty, err := st.DataRange(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if empty.FirstMS != 0 || empty.LastMS != 0 || empty.NowMS != now.UnixMilli() {
+		t.Errorf("empty store: %+v", empty)
+	}
+	if empty.RawFromMS >= empty.NowMS || empty.RollupFromMS > empty.RawFromMS {
+		t.Errorf("retention bounds: %+v", empty)
+	}
+}
+
+// Ingest arrives more often than slow checks finish. If it stopped a running
+// report being cached, a busy network would never have a cached report at all.
+func TestAnomalyReportSurvivesIngestWhileRunning(t *testing.T) {
+	now := testutil.Base
+	st, err := Open(filepath.Join(t.TempDir(), "ng.db"), Config{Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	gen := st.anomGen
+	st.invalidateAnomaliesThrottled() // nothing cached, as during a first run
+	if st.anomGen != gen {
+		t.Error("ingest marked the running report out of date")
+	}
+	// It does drop a report past its allowance.
+	st.anomRep, st.anomKey, st.anomAt = &model.AnomalyReport{}, "k", now.Add(-time.Minute)
+	st.invalidateAnomaliesThrottled()
+	if st.anomRep != nil {
+		t.Error("ingest kept a report older than its allowance")
+	}
+	// A change a person made still applies at once.
+	gen = st.anomGen
+	st.invalidateAnomalies()
+	if st.anomGen == gen {
+		t.Error("an explicit invalidation did not mark running reports out of date")
+	}
+}

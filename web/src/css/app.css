@@ -191,7 +191,13 @@ td .muted { color: var(--fg-2); }
 dialog { border: 1px solid var(--border); border-radius: 10px; background: var(--bg); color: var(--fg); box-shadow: var(--shadow); }
 dialog h2 { margin-top: 0; font-size: 16px; }
 dialog input { width: 100%; }
-dialog menu { padding: 0; margin: 12px 0 0; display: flex; justify-content: flex-end; }
+dialog menu { padding: 0; margin: 12px 0 0; display: flex; justify-content: flex-end; gap: 8px; }
+#input-dialog { width: min(440px, 94vw); }
+#input-dialog button.danger { background: var(--err, #dc2626); border-color: var(--err, #dc2626); color: #fff; }
+.rec-track { position: relative; flex: 1; min-width: 160px; height: 26px; display: flex; align-items: center; }
+.rec-track canvas { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; opacity: .55; }
+.rec-track input[type="range"] { position: relative; width: 100%; margin: 0; background: transparent; }
+.empty-action { margin-left: 8px; }
 
 @media (max-width: 760px) {
   .bar { padding: 8px 16px; gap: 8px; }

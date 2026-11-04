@@ -54,6 +54,7 @@ make test          # unit and integration tests, -race
 make test32        # packet/decoder tests as a 32-bit process (MIPS/ARMv5 paths)
 make lint          # gofmt, go vet (all tag sets), golangci-lint
 make fuzz          # every Fuzz target for FUZZTIME (20s)
+make browser       # the web UI's journeys in a local headless Chrome, no Docker ($NETGRAPH_CHROME)
 make lab           # the Docker lab (below)
 NETGRAPH_SCALE=1 go test -run TestScale -v ./internal/store/   # load test with timings
 ```

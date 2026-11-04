@@ -2,9 +2,9 @@
 
 All query endpoints are `GET`, return JSON, and take the window and
 filter as parameters. When the server has a read token, send it as
-`Authorization: Bearer <token>`. The live stream is the one exception:
-`EventSource` cannot set headers, so it also accepts `?token=`. Query
-tokens elsewhere are rejected, since they leak into logs and Referer
+`Authorization: Bearer <token>`. The live stream also accepts `?token=` for
+clients like `EventSource` that cannot set headers; the web UI does not use
+it. Query tokens elsewhere are rejected, since they leak into logs and Referer
 headers. Responses larger than a few bytes are gzip-compressed when the
 client accepts it; the live stream is not compressed. Times in responses
 are unix milliseconds.
@@ -28,6 +28,7 @@ are unix milliseconds.
 
 | Endpoint | Returns |
 |---|---|
+| `GET /api/v1/range` | `{first_ms, last_ms, raw_from_ms, rollup_from_ms, now_ms}`: the span of the data held (zeros when there is none) and where each retention tier begins. Takes no window |
 | `GET /api/v1/summary` | `{devices, flows, inbound, peak_connections, dns_queries, domains, remote_ips, bytes_out, bytes_in, precision, ...}`; bytes are what devices here sent and received |
 | `GET /api/v1/devices` | `[{id, mac, label, user_label, auto_label, vendor, vendor_short, randomized, role, ips, hostnames, services, serves, fingerprints, user_agents, flows, inbound, dns_queries, bytes_out, bytes_in, remotes, active_from, active_to, first_seen, last_seen}]`; `serves` lists the ports clients connected to (`443/tcp`), `inbound` how many connections came in from outside |
 | `GET /api/v1/destinations` | `[{key, kind, label, connections, devices, bytes_out, bytes_in, first_seen, last_seen, ports, remote_ips}]`: remote ends aggregated by name, or by address when no name is known, busiest first. One name with several addresses is one row; `ports` is `443/tcp` style and `remote_ips` lists the addresses. Uses the window and filters. |
