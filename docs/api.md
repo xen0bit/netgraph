@@ -71,7 +71,9 @@ are unix milliseconds.
 | `GET /api/v1/bookmarks` | bookmarks in the window (`?entity=` optional). |
 | `POST /api/v1/bookmarks` | `{ts, entity?, name}`; also appears on the timeline. |
 | `DELETE /api/v1/bookmarks/{id}` | remove a bookmark. |
-| `GET /api/v1/capsule` | a self-contained HTML time capsule for the window (metadata only; no packets or keys). |
+| `GET /api/v1/capsule` | a self-contained HTML time capsule for the window (metadata only; no packets or keys). It replays offline when the server has the web UI's files |
+| `GET /api/v1/reel` | `?step=` and the graph's options: `{from, to, step, steps, precision, graph, series: [{edge, points: [[step index, up, down]]}], markers, unassigned}`: the window's graph with each edge's traffic per step, for scrubbing without asking again. `precision` is `exact`, `minute` or `hour`; `unassigned` counts bytes on no drawn edge |
+| `GET /api/v1/reel/markers` | `[{ts, kind, severity, title, entity}]`: notes, bookmarks, new devices and anomalies in the window |
 | `GET /api/v1/export?kind=flows` | CSV of every field the API returns for that table (`devices`, `flows`, `dns`, `facts`, `anomalies`, `wifi`). It uses the same window and filters and streams most kinds from the database, so it is not limited to what the browser loaded. Default safety caps: connections and facts 100,000 rows, lookups 50,000, Wi-Fi networks 10,000, devices and anomalies materialised in memory. Add `all=1` to stream every matching row (hard ceiling 5,000,000); the web "All CSV" uses it. Read token |
 | `GET /api/v1/anomalies` | the window's [anomalies](concepts.md#anomalies), most severe first: `{from, to, since, learning, anomalies: [{kind, severity, ts, device, device_name, entity, summary, evidence}]}`. Only the `device` filter applies. Read token |
 | `GET /api/v1/anomalies/mutes` | `{mutes: [{kind, device, entity, until, note, created}]}`, active mutes only. Read token |

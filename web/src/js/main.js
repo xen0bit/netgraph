@@ -1,6 +1,7 @@
 // netgraph web UI. Everything comes straight from the JSON API; the map is
 // drawn here, on a canvas (map/map.js).
 import { LivingMap } from "./map/map.js";
+import { reelFrame, reelDiff } from "./reel.js";
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
@@ -59,7 +60,7 @@ const state = {
   open: "",
   // Flight Recorder: when on, the window ends at this moment and the event
   // rail shows what happened just before it.
-  rec: { on: false, at: Date.now(), lookback: 5 * 60_000, follow: "", playing: false, diffA: 0 },
+  rec: { on: false, at: Date.now(), lookback: 5 * 60_000, follow: "", playing: false, diffA: 0, view: null, loop: null, diff: null },
 };
 
 function loadHash() {
@@ -922,6 +923,7 @@ async function withExpansions(g) {
 }
 
 function toggleExpand(id) {
+  if (state.rec.on) { setStatus("Leave the Recorder to open nodes in place"); return; }
   const node = state.graph?.nodes?.find((n) => n.id === id);
   const from = node?.attrs?.expanded_from;
   if (from) expanded.delete(from);
@@ -980,6 +982,13 @@ async function renderGraph(seq) {
   const moment = state.live ? state.span : state.rec.on ? ["recorder", state.rec.follow] : [state.to, state.span];
   const view = JSON.stringify([graphOpts(), state.filter, moment]);
   let g;
+  // A reel is drawn and redrawn only when it is a different reel: the head
+  // moving is not a new graph. Its frame still needs showing.
+  if (state.rec.on && reel && diagram.graphSource === reel && reelKey === JSON.stringify([recView(), { ...graphOpts(), anomalies: "0" }, state.filter, state.rec.follow])) {
+    diagram.done();
+    drawFrame();
+    return;
+  }
   try {
     if (!pinsLoaded) {
       const pins = await track(api("map/pins"));
@@ -987,19 +996,23 @@ async function renderGraph(seq) {
       diagram.setPins(pins || []);
     }
     // Anomalies are outlined when their report arrives: their checks can take
-    // far longer than the graph, which must not wait for them.
-    g = await track(api("graph", { ...graphOpts(), anomalies: "0" }).then(withExpansions));
+    // far longer than the graph, which must not wait for them. The Recorder
+    // draws its graph from the reel, the same for every moment in it.
+    g = state.rec.on ? (await loadReel()).graph : await track(api("graph", { ...graphOpts(), anomalies: "0" }).then(withExpansions));
   } catch (e) {
     if (seq === refreshSeq) diagram.message(esc(e.message));
     return;
   }
   if (seq !== refreshSeq) return;
   state.graph = g;
+  diagram.graphSource = state.rec.on ? reel : null;
   if (state.live || reportSeq === seq) markGraph(g, lastReport);
   if (!g.nodes?.length) {
     diagram.message(`No activity in this window.${emptyAction()}`);
   } else {
     diagram.show(g, { keepView: view === lastView, spanMS: state.span });
+    if (state.rec.on) drawFrame();
+    else if (diagram.frame) diagram.applyFrame(null);
   }
   lastView = view;
   const hidden = diagram.hiddenCount();
@@ -1465,8 +1478,7 @@ function setLive(on) {
   state.live = on;
   if (on && state.rec.on) {
     state.rec.on = false;
-    state.rec.follow = "";
-    stopPlay();
+    leaveRecorder();
     $("#recorder-bar").hidden = true;
     $("#event-rail").hidden = true;
     $("#recorder").setAttribute("aria-pressed", "false");
@@ -1727,7 +1739,20 @@ function renderAutopsy(a, incident) {
 // --- Flight Recorder ------------------------------------------------------------------
 
 let recTimer = null;
-let recSeek = null;
+let recSettle = null;
+
+// recView is the stretch of time the timeline shows, and the reel covers. It
+// holds still as the head moves: the timeline is a map of time.
+function recView() {
+  const v = state.rec.view;
+  const now = Date.now();
+  if (v && state.to >= v.from && state.to <= v.to) return v;
+  const first = dataRange?.first_ms || now - units.d;
+  const to = Math.max(now, state.to);
+  const from = Math.min(state.to - state.rec.lookback, Math.max(first, state.to - 6 * units.h));
+  state.rec.view = { from, to };
+  return state.rec.view;
+}
 
 function renderRecorder() {
   const bar = $("#recorder-bar");
@@ -1736,17 +1761,12 @@ function renderRecorder() {
   bar.hidden = !state.rec.on;
   $("#event-rail").hidden = !state.rec.on;
   if (!state.rec.on) return;
-  const now = Date.now();
+  const { from: lo, to: hi } = recView();
   const head = $("#rec-head");
-  // What the server holds, always including where the Recorder is now. With
-  // nothing known yet it is the last day, not a guess at retention.
-  const lo = Math.min(dataRange?.first_ms || now - units.d, state.to);
-  const hi = Math.max(now, state.to);
   head.min = String(lo);
   head.max = String(hi);
   head.step = "1000";
   head.value = String(state.to);
-  renderDensity(lo, hi);
   $("#rec-time").textContent = stamp(state.to);
   $("#rec-play").textContent = state.rec.playing ? "❚❚" : "▶";
   $("#rec-lookback").value = String(state.rec.lookback);
@@ -1755,26 +1775,31 @@ function renderRecorder() {
   f.textContent = state.rec.follow ? `Following ${state.rec.follow}` : "";
   $("#rec-unfollow").hidden = !state.rec.follow;
   $("#rec-diff").textContent = state.rec.diffA ? "Diff B" : "Diff A";
-  if (state.live) $("#rec-time").textContent += " · live edge";
+  $("#rec-loop").textContent = state.rec.loop?.b ? "Loop ✕" : state.rec.loop ? "Loop end" : "Loop";
+  $("#rec-loop").setAttribute("aria-pressed", String(Boolean(state.rec.loop?.b)));
+  renderTimeline(lo, hi);
 }
 
-// renderDensity draws where the traffic is behind the slider, so the eye can
-// find the moments worth seeking to. It is drawn from a series fetched at most
-// once a minute for a given range: the shape does not change as the head moves.
-let density = { key: "", at: 0, series: null, loading: false };
-function renderDensity(lo, hi) {
+// renderTimeline draws the track behind the slider: where the traffic is, the
+// moments worth seeking to, and the older stretch only rollups can answer. The
+// series is fetched at most once a minute for a given stretch of time.
+let timelineData = { key: "", at: 0, series: null, markers: [], loading: false };
+function renderTimeline(lo, hi) {
   const c = $("#rec-density");
   if (!c) return;
-  const key = `${lo}|${state.filter}|${state.rec.follow}`;
-  const stale = density.key !== key || Date.now() - density.at > 60_000;
-  if (stale && !density.loading && c.clientWidth > 0) {
-    density.loading = true;
+  const key = `${lo}|${hi}|${state.filter}|${state.rec.follow}`;
+  const stale = timelineData.key !== key || Date.now() - timelineData.at > 60_000;
+  if (stale && !timelineData.loading && c.clientWidth > 0) {
+    timelineData.loading = true;
     const buckets = Math.max(Math.floor(c.clientWidth / 3), 30);
-    const step = Math.max(Math.ceil((hi - lo) / buckets / 1000), 60);
-    api("timeseries", { from: lo, to: hi, step: `${step}s` })
-      .then((s) => { density = { key, at: Date.now(), series: s, loading: false }; })
-      .catch(() => { density = { ...density, key, at: Date.now(), loading: false }; })
-      .then(() => renderDensity(lo, hi));
+    const step = Math.max(Math.ceil((hi - lo) / buckets / 1000), 10);
+    Promise.all([
+      api("timeseries", { from: lo, to: hi, step: `${step}s` }).catch(() => null),
+      api("reel/markers", { from: lo, to: hi }).catch(() => []),
+    ]).then(([series, markers]) => {
+      timelineData = { key, at: Date.now(), series, markers: markers || [], loading: false };
+      if (state.rec.on) renderTimeline(lo, hi);
+    });
   }
   const dpr = window.devicePixelRatio || 1;
   const W = c.clientWidth, H = c.clientHeight;
@@ -1782,22 +1807,87 @@ function renderDensity(lo, hi) {
   c.height = H * dpr;
   const g = c.getContext("2d");
   g.scale(dpr, dpr);
-  const bs = density.series?.buckets;
-  if (!bs?.length || hi <= lo) return;
-  const peak = Math.max(1, ...bs.map((b) => b.bytes_in + b.bytes_out));
-  g.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#2563eb";
-  const step = density.series.step || density.series.step_ms || 0;
-  for (const b of bs) {
-    const v = b.bytes_in + b.bytes_out;
-    if (!v) continue;
-    // Square-rooted: one huge transfer must not flatten every other moment.
-    const h = Math.max(2, Math.sqrt(v / peak) * H);
-    const x0 = ((b.ts - lo) / (hi - lo)) * W, x1 = ((b.ts + step - lo) / (hi - lo)) * W;
-    g.fillRect(x0, H - h, Math.max(x1 - x0, 1), h);
+  if (hi <= lo) return;
+  const x = (t) => ((t - lo) / (hi - lo)) * W;
+  const css = getComputedStyle(document.documentElement);
+  // Older than raw retention: the Recorder can answer, but only by the hour.
+  const raw = dataRange?.raw_from_ms;
+  if (raw && raw > lo) {
+    g.fillStyle = css.getPropertyValue("--bg-3").trim() || "#ddd";
+    g.fillRect(0, 0, x(Math.min(raw, hi)), H);
+  }
+  const loop = state.rec.loop;
+  if (loop?.a) {
+    g.fillStyle = "rgba(124, 58, 237, .18)";
+    const end = loop.b || state.to;
+    g.fillRect(x(Math.min(loop.a, end)), 0, Math.max(Math.abs(x(end) - x(loop.a)), 1), H);
+  }
+  const bs = timelineData.series?.buckets;
+  if (bs?.length) {
+    const peak = Math.max(1, ...bs.map((b) => b.bytes_in + b.bytes_out));
+    g.fillStyle = css.getPropertyValue("--accent").trim() || "#2563eb";
+    const step = timelineData.series.step || 0;
+    for (const b of bs) {
+      const v = b.bytes_in + b.bytes_out;
+      if (!v) continue;
+      // Square-rooted: one huge transfer must not flatten every other moment.
+      const h = Math.max(2, Math.sqrt(v / peak) * (H - 8));
+      const x0 = x(b.ts), x1 = x(b.ts + step);
+      g.fillRect(x0, H - h, Math.max(x1 - x0, 1), h);
+    }
+  }
+  const colors = { anomaly: "#dc2626", annotation: "#7c3aed", bookmark: "#7c3aed", device_new: "#16a34a" };
+  for (const m of timelineData.markers) {
+    g.fillStyle = m.severity === "low" ? "#d97706" : colors[m.kind] || "#6b7280";
+    g.fillRect(x(m.ts) - 1, 0, 2, 7);
+  }
+}
+
+// The reel of the timeline's stretch of time, once per view of it.
+let reel = null;
+let reelKey = "";
+let reelLoad = null;
+function loadReel() {
+  const v = recView();
+  const opts = { ...graphOpts(), anomalies: "0" };
+  const key = JSON.stringify([v, opts, state.filter, state.rec.follow]);
+  if (key === reelKey && reel) return Promise.resolve(reel);
+  if (key === reelKey && reelLoad) return reelLoad;
+  reelKey = key;
+  const load = track(api("reel", { ...opts, from: v.from, to: v.to })).then((r) => {
+    if (reelKey === key) reel = r;
+    return r;
+  }).finally(() => { if (reelLoad === load) reelLoad = null; });
+  reelLoad = load;
+  return load;
+}
+
+function drawFrame() {
+  if (state.tab !== "graph" || !reel || !state.rec.on) return;
+  diagram.applyFrame(reelFrame(reel, state.to, state.rec.lookback), state.rec.lookback);
+}
+
+// scrubTo moves the head with nothing asked of the server: the map draws from
+// the reel straight away. The tables and summary catch up when it stops.
+function scrubTo(ts, { settle = true } = {}) {
+  const v = recView();
+  const t = Math.round(Math.min(Math.max(ts, v.from), Math.min(v.to, Date.now())));
+  state.rec.at = t;
+  state.to = t;
+  state.span = state.rec.lookback;
+  state.live = false;
+  if (state.rec.diff) clearDiff();
+  $("#rec-head").value = String(t);
+  $("#rec-time").textContent = stamp(t);
+  drawFrame();
+  if (settle) {
+    clearTimeout(recSettle);
+    recSettle = setTimeout(refresh, 250);
   }
 }
 
 function setRecAt(ts) {
+  clearTimeout(recSettle);
   state.rec.at = Math.max(0, Math.round(ts));
   state.to = state.rec.at;
   state.span = state.rec.lookback;
@@ -1807,30 +1897,51 @@ function setRecAt(ts) {
 
 let playRun = 0;
 function stopPlay() {
+  const was = state.rec.playing;
   state.rec.playing = false;
   playRun++;
   clearTimeout(recTimer);
   recTimer = null;
   renderRecorder();
+  if (was && state.tab === "graph" && state.rec.on) refresh();
 }
 
-// togglePlay starts a loop that waits for each moment to be drawn before asking
-// for the next, so a slow server gets fewer frames rather than a pile of
-// requests. The head advances by the time that really passed, so the speed
-// stays true however few frames there are.
+const atEnd = (t) => t >= Math.min(recView().to, Date.now());
+
+// togglePlay runs the head forward by real elapsed time times the speed. On the
+// map that is every animation frame, drawn from the reel with no requests. A
+// table has to ask the server, so it waits for each answer before the next.
 function togglePlay() {
   if (state.rec.playing) return stopPlay();
   state.rec.playing = true;
   state.rec.at = Math.min(state.rec.at, Date.now());
+  if (atEnd(state.rec.at)) {
+    const l = state.rec.loop;
+    state.rec.at = l?.a || recView().from;
+    state.to = state.rec.at;
+  }
   const run = ++playRun;
   let last = performance.now();
+  const speed = () => Number($("#rec-speed").value) || 1;
+  const advance = (now) => {
+    let next = state.rec.at + (now - last) * speed();
+    last = now;
+    const l = state.rec.loop;
+    if (l?.b && next >= Math.max(l.a, l.b)) next = Math.min(l.a, l.b);
+    return next;
+  };
+  const frame = (now) => {
+    if (run !== playRun) return;
+    const next = advance(now);
+    if (atEnd(next)) { scrubTo(next, { settle: false }); stopPlay(); return; }
+    scrubTo(next, { settle: false });
+    requestAnimationFrame(frame);
+  };
   const tick = async () => {
     if (run !== playRun) return;
     const started = performance.now();
-    const speed = Number($("#rec-speed").value) || 1;
-    const next = state.rec.at + (started - last) * speed;
-    last = started;
-    if (next >= Date.now()) {
+    const next = advance(started);
+    if (atEnd(next)) {
       setRecAt(Date.now());
       stopPlay();
       return;
@@ -1839,7 +1950,8 @@ function togglePlay() {
     if (run !== playRun) return;
     recTimer = setTimeout(tick, Math.max(0, 1000 - (performance.now() - started)));
   };
-  recTimer = setTimeout(tick, 1000);
+  if (state.tab === "graph" && reel) requestAnimationFrame(frame);
+  else recTimer = setTimeout(tick, 1000);
   renderRecorder();
 }
 
@@ -1853,15 +1965,25 @@ function toggleRecorder(on = !state.rec.on) {
     // hour with data in it to its last five minutes could show nothing.
     state.rec.lookback = [5, 15, 60].map((m) => m * units.m).find((v) => v >= state.span) ?? units.h;
     state.span = state.rec.lookback;
+    state.rec.view = null;
     if (state.live) setLive(false);
     state.live = false;
   } else {
-    // Following filters every view, and its controls are leaving with the bar.
-    state.rec.follow = "";
-    stopPlay();
+    leaveRecorder();
   }
   renderRecorder();
   refresh();
+}
+
+// leaveRecorder drops what only makes sense inside it. Following filters every
+// view, and its controls are leaving with the bar.
+function leaveRecorder() {
+  state.rec.follow = "";
+  state.rec.loop = null;
+  stopPlay();
+  clearDiff();
+  diagram.applyFrame(null);
+  lastView = null;
 }
 
 function follow(id) {
@@ -1871,15 +1993,46 @@ function follow(id) {
   state.rec.at = state.to;
   state.rec.lookback = state.span > 0 && state.span <= units.h ? state.span : 5 * units.m;
   state.span = state.rec.lookback;
+  state.rec.view = null;
   state.live = false;
   renderRecorder();
   refresh();
+}
+
+// jumpMarker seeks to the next or previous moment on the timeline.
+function jumpMarker(dir) {
+  const ms = timelineData.markers;
+  const t = state.to;
+  const m = dir > 0 ? ms.find((x) => x.ts > t + 500) : [...ms].reverse().find((x) => x.ts < t - 500);
+  if (!m) { setStatus(dir > 0 ? "no later marks in view" : "no earlier marks in view"); return; }
+  setStatus(m.title);
+  // A little after the moment, so its traffic is in the frame.
+  setRecAt(Math.min(m.ts + 1000, recView().to));
+}
+
+function zoomTimeline(e) {
+  e.preventDefault();
+  const v = recView();
+  const r = $("#rec-density").getBoundingClientRect();
+  const at = v.from + ((e.clientX - r.left) / r.width) * (v.to - v.from);
+  const k = Math.exp(e.deltaY * 0.002);
+  const now = Date.now();
+  const floor = Math.min(dataRange?.first_ms || now - 30 * units.d, state.to);
+  const span = Math.min(Math.max((v.to - v.from) * k, Math.max(10 * units.m, state.rec.lookback * 2)), Math.max(now, state.to) - floor);
+  let from = at - ((at - v.from) / (v.to - v.from)) * span;
+  from = Math.max(floor, Math.min(from, state.to));
+  const to = Math.max(Math.min(from + span, Math.max(now, state.to)), state.to);
+  state.rec.view = { from: Math.min(from, to - span), to };
+  renderRecorder();
+  clearTimeout(recSettle);
+  recSettle = setTimeout(refresh, 300);
 }
 
 async function renderRail(seq) {
   const box = $("#event-rail");
   if (!box) return;
   if (!state.rec.on) { box.hidden = true; return; }
+  if (state.rec.diff) return;
   box.hidden = false;
   let page;
   try {
@@ -1909,6 +2062,13 @@ async function renderRail(seq) {
   });
 }
 
+function clearDiff() {
+  if (!state.rec.diff) return;
+  state.rec.diff = null;
+  diagram.setDiff(null);
+  $("#diff-legend").hidden = true;
+}
+
 async function renderDiffBox() {
   const box = $("#event-rail");
   if (!state.rec.diffA) {
@@ -1919,19 +2079,35 @@ async function renderDiffBox() {
   }
   const a = state.rec.diffA;
   state.rec.diffA = 0;
+  state.rec.diff = { a, b: state.to };
   box.hidden = false;
   box.innerHTML = `<div class="rail-head"><b>Diff</b><span class="muted">${esc(stamp(a))} → ${esc(stamp(state.to))}</span></div><p class="muted">Comparing…</p>`;
+  // On the map: both moments must be in the reel, so widen it if A is not.
   try {
-    const d = await api("diff", { at_a: a, at_b: state.to, lookback: state.rec.lookback });
+    if (state.tab === "graph") {
+      const v = recView();
+      if (a - state.rec.lookback < v.from) {
+        state.rec.view = { from: a - state.rec.lookback, to: v.to };
+        renderRecorder();
+      }
+      const r = await loadReel();
+      if (diagram.graph !== r.graph) diagram.show(r.graph, { keepView: true, spanMS: state.rec.lookback });
+      const fa = reelFrame(r, a, state.rec.lookback), fb = reelFrame(r, state.to, state.rec.lookback);
+      diagram.setDiff(reelDiff(fa, fb));
+      diagram.applyFrame(new Map([...fa, ...fb]), state.rec.lookback);
+      $("#diff-legend").hidden = false;
+    }
+    const d = await api("diff", { at_a: a, at_b: state.to, lookback: `${Math.round(state.rec.lookback / 1000)}s` });
     const row = (kind, x) => `<li><span class="badge">${esc(kind)}</span> <b>${esc(x.kind)}</b> ${esc(x.label || x.key)}${x.before || x.after ? ` <span class="muted">${esc(x.before || "")}${x.before && x.after ? " → " : ""}${esc(x.after || "")}</span>` : ""}</li>`;
     const lines = [
       ...(d.added || []).map((x) => row("added", x)),
       ...(d.removed || []).map((x) => row("removed", x)),
       ...(d.changed || []).map((x) => row("changed", x)),
     ];
-    box.innerHTML = `<div class="rail-head"><b>Diff</b><span class="muted">${esc(stamp(a))} → ${esc(stamp(state.to))}</span></div>
+    box.innerHTML = `<div class="rail-head"><b>Diff</b><span class="muted">${esc(stamp(a))} → ${esc(stamp(state.to))}</span> <button type="button" id="diff-clear">Clear</button></div>
       ${lines.length ? `<ul class="rail-list">${lines.join("")}</ul>` : `<p class="muted">No differences in devices, destinations, DNS, Wi-Fi, sensors or anomalies.</p>`}
       ${(d.gaps || []).map((g) => `<p class="muted">gap: ${esc(g)}</p>`).join("")}`;
+    $("#diff-clear").onclick = () => { clearDiff(); drawFrame(); refresh(); };
   } catch (e) {
     box.innerHTML = `<p class="muted">${esc(e.message)}</p>`;
   }
@@ -2051,17 +2227,22 @@ function init() {
   $("#note-save").onclick = saveNote;
   $("#rec-diff").onclick = renderDiffBox;
   $("#rec-unfollow").onclick = () => { state.rec.follow = ""; refresh(); };
-  $("#rec-head").oninput = () => {
-    clearTimeout(recSeek);
-    const ts = Number($("#rec-head").value);
-    recSeek = setTimeout(() => setRecAt(ts), 120);
+  $("#rec-head").oninput = () => scrubTo(Number($("#rec-head").value));
+  $(".rec-track").addEventListener("wheel", zoomTimeline, { passive: false });
+  $("#rec-prev").onclick = () => jumpMarker(-1);
+  $("#rec-next").onclick = () => jumpMarker(1);
+  $("#rec-loop").onclick = () => {
+    const l = state.rec.loop;
+    state.rec.loop = !l ? { a: state.to, b: 0 } : !l.b ? { a: l.a, b: state.to } : null;
+    renderRecorder();
   };
   $("#rec-lookback").onchange = () => {
     state.rec.lookback = Number($("#rec-lookback").value) || 300000;
+    state.rec.view = null;
     setRecAt(state.rec.at);
   };
   $("#rec-rail").onchange = () => refresh();
-  $("#rec-speed").onchange = () => { if (state.rec.playing) { stopPlay(); togglePlay(); } };
+  // The speed is read as it plays.
   for (const b of $$(".presets button")) b.onclick = () => setWindow(Date.now(), parseSpan(b.dataset.span), { live: state.live });
   const fromTo = () => {
     const f = new Date($("#from").value).getTime(), t = new Date($("#to").value).getTime();

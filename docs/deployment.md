@@ -54,6 +54,7 @@ netgraph serve -db /var/lib/netgraph/netgraph.db -listen :8443
 | `-wifi-key-file` | `$NETGRAPH_WIFI_KEY_FILE`; unit: `wifi.keys` | WPA/WPA2 passphrases, PMKs and WEP keys for Wi-Fi sensors ([Wi-Fi capture](#wi-fi-capture)); needs an ingest token |
 | `-raw-retention` | `14d` | keep raw connections, lookups and observations |
 | `-rollup-retention` | `180d` | keep hourly rollups and facts |
+| `-minute-retention` | `30d` | keep per-minute traffic, which the Recorder's timeline and long timelines read |
 | `-exact-max` | `48h` | longer windows are answered from hourly rollups |
 | `-fact-gap` | `1h` | silence after which a relationship starts a new period |
 | `-asn-file` | `$NETGRAPH_ASN_FILE`; release builds: built in | an ASN table: the network and country of remote addresses ([networks](#networks-and-countries)); `none` for no table |

@@ -124,6 +124,8 @@ func New(cfg Config) *Server {
 	s.mux.HandleFunc("GET /healthz", s.version)
 	read := func(p string, h http.HandlerFunc) { s.mux.Handle("GET "+p, s.requireRead(h)) }
 	read("/api/v1/range", s.dataRange)
+	read("/api/v1/reel", s.reel)
+	read("/api/v1/reel/markers", s.reelMarkers)
 	read("/api/v1/summary", s.summary)
 	read("/api/v1/devices", s.devices)
 	read("/api/v1/flows", s.flows)
@@ -600,6 +602,25 @@ func (s *Server) deleteMapPins(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) reel(w http.ResponseWriter, r *http.Request) {
+	var step time.Duration
+	if v := r.URL.Query().Get("step"); v != "" {
+		d, err := model.ParseDuration(v)
+		if err != nil {
+			httpError(w, http.StatusBadRequest, fmt.Errorf("step: %w", err))
+			return
+		}
+		step = d
+	}
+	answer(s, w, r, func(ctx context.Context, f model.Filter) (*model.Reel, error) {
+		return s.cfg.Store.Reel(ctx, f, model.ParseGraphOptions(r.URL.Query()), step)
+	})
+}
+
+func (s *Server) reelMarkers(w http.ResponseWriter, r *http.Request) {
+	answer(s, w, r, s.cfg.Store.ReelMarkers)
 }
 
 func (s *Server) dataRange(w http.ResponseWriter, r *http.Request) {

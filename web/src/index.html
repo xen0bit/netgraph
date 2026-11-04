@@ -49,9 +49,12 @@
       <input type="range" id="rec-head" min="0" max="100" step="1" aria-label="Recorded moment">
     </div>
     <span id="rec-time" class="mono"></span>
-    <select id="rec-speed" aria-label="Playback speed"><option value="1">1×</option><option value="10">10×</option><option value="60">60×</option></select>
+    <select id="rec-speed" aria-label="Playback speed"><option value="1">1×</option><option value="10">10×</option><option value="60" selected>60×</option><option value="600">600×</option></select>
     <select id="rec-lookback" aria-label="Frame lookback"><option value="300000">5m</option><option value="900000">15m</option><option value="3600000">1h</option></select>
     <select id="rec-rail" aria-label="Events on the rail"><option value="changes">Changes</option><option value="all">All events</option></select>
+    <button id="rec-prev" class="icon" title="Previous mark">⏮</button>
+    <button id="rec-next" class="icon" title="Next mark">⏭</button>
+    <button id="rec-loop" title="Set where a loop starts, then where it ends">Loop</button>
     <button id="rec-now">Now</button>
     <button id="rec-note">Note</button>
     <button id="rec-bookmark">Mark</button>
@@ -109,6 +112,7 @@
           <button id="map-selection-clear" type="button">Clear</button>
         </div>
       </div>
+      <div id="diff-legend" class="legend" hidden><span class="diff-added">added</span><span class="diff-removed">removed</span><span class="diff-changed">much busier or quieter</span></div>
       <div id="graph-note" class="note"></div>
       <div class="legend" aria-label="How to read the graph">
         <span><b>Arrows point from client to server.</b> Width is volume. Dots flow <b class="flow-up">up</b> to the server and <b class="flow-down">down</b> from it.</span>

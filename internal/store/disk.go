@@ -65,6 +65,10 @@ func (s *Store) EmergencyTrim(ctx context.Context, target int64, allowRollups bo
 				struct {
 					n *int64
 					q string
+				}{&r.Rollups, `DELETE FROM traffic_minute WHERE bucket IN (SELECT bucket FROM traffic_minute ORDER BY bucket LIMIT 1440)`},
+				struct {
+					n *int64
+					q string
 				}{&r.Rollups, `DELETE FROM traffic_hourly WHERE bucket IN (SELECT bucket FROM traffic_hourly ORDER BY bucket LIMIT 24)`},
 				struct {
 					n *int64

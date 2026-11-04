@@ -31,6 +31,7 @@ var tableErasure = map[string]string{
 	"incident_entities": "forget, purge",
 	"incident_notes":    "forget, purge",
 	"incident_evidence": "forget, purge",
+	"traffic_minute":    "forget, purge, disk guard",
 	"map_pins":          "forget, purge; too small for the disk guard to matter",
 }
 

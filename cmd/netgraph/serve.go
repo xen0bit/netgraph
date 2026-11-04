@@ -50,6 +50,7 @@ func runServe(args []string) error {
 	trimRollups := fs.Bool("trim-rollups", false, "with -max-db-mb, allow emergency retention to delete the oldest rollups and facts too")
 	raw := fs.String("raw-retention", "14d", "keep raw flows, DNS and observations this long")
 	rollup := fs.String("rollup-retention", "180d", "keep hourly rollups and facts this long")
+	minute := fs.String("minute-retention", "30d", "keep per-minute traffic, which the timeline scrubs through, this long")
 	gap := fs.String("fact-gap", "1h", "silence after which a relationship starts a new period")
 	exactMax := fs.String("exact-max", "48h", "longest window answered from raw records; longer ones use hourly rollups")
 	logLevel := fs.String("log-level", "info", "debug, info, warn or error")
@@ -84,6 +85,10 @@ func runServe(args []string) error {
 	rawD, err := model.ParseDuration(*raw)
 	if err != nil {
 		return fmt.Errorf("-raw-retention: %w", err)
+	}
+	minuteD, err := model.ParseDuration(*minute)
+	if err != nil {
+		return fmt.Errorf("-minute-retention: %w", err)
 	}
 	rollD, err := model.ParseDuration(*rollup)
 	if err != nil {
@@ -168,7 +173,7 @@ func runServe(args []string) error {
 		debug.FreeOSMemory() // parsing left several times the table's size behind
 		log.Info("loaded asn table", "file", *asnFile, "ranges", table.Len(), "took", time.Since(t0).Round(time.Millisecond))
 	}
-	st, err := store.Open(*db, store.Config{RawRetention: rawD, RollupRetention: rollD, FactGap: gapD, ExactMax: exactD, Logger: log, OnNewDevice: onNew,
+	st, err := store.Open(*db, store.Config{RawRetention: rawD, RollupRetention: rollD, MinuteRetention: minuteD, FactGap: gapD, ExactMax: exactD, Logger: log, OnNewDevice: onNew,
 		ASN: networks.Load})
 	if err != nil {
 		return err
