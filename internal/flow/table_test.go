@@ -199,3 +199,122 @@ func TestTableMemory(t *testing.T) {
 	}
 	runtime.KeepAlive(tb)
 }
+
+func tcpPkt(at time.Duration, src, dst netip.AddrPort, flags uint8, seq uint32, seg int) *Packet {
+	p := pkt(at, src, dst, flags, 40+seg, nil)
+	p.Seq, p.SegLen = seq, seg
+	return p
+}
+
+// handshake runs a connection and returns everything it exported.
+func handshake(t *testing.T, packets func(tb *Table)) wire.Flow {
+	t.Helper()
+	r := &recorder{}
+	tb := New(Config{ActiveTimeout: time.Hour}, r.emit)
+	packets(tb)
+	tb.Flush(t0.Add(time.Hour), "shutdown")
+	var out wire.Flow
+	for _, f := range r.flows {
+		out.Retrans += f.Retrans
+		if f.RTTServerUS > 0 {
+			out.RTTServerUS = f.RTTServerUS
+		}
+		if f.RTTClientUS > 0 {
+			out.RTTClientUS = f.RTTClientUS
+		}
+	}
+	return out
+}
+
+func TestHandshakeLegs(t *testing.T) {
+	got := handshake(t, func(tb *Table) {
+		tb.Add(tcpPkt(0, client, server, SYN, 100, 0))
+		tb.Add(tcpPkt(20*time.Millisecond, server, client, SYN|ACK, 500, 0))
+		tb.Add(tcpPkt(23*time.Millisecond, client, server, ACK, 101, 0))
+	})
+	if got.RTTServerUS != 20_000 || got.RTTClientUS != 3_000 || got.Retrans != 0 {
+		t.Errorf("legs: %+v", got)
+	}
+}
+
+// A retransmitted SYN can't say which one was answered.
+func TestRetriedHandshakeMeasuresNothing(t *testing.T) {
+	got := handshake(t, func(tb *Table) {
+		tb.Add(tcpPkt(0, client, server, SYN, 100, 0))
+		tb.Add(tcpPkt(time.Second, client, server, SYN, 100, 0))
+		tb.Add(tcpPkt(time.Second+20*time.Millisecond, server, client, SYN|ACK, 500, 0))
+		tb.Add(tcpPkt(time.Second+23*time.Millisecond, client, server, ACK, 101, 0))
+	})
+	if got.RTTServerUS != 0 || got.RTTClientUS != 0 || got.Retrans != 1 {
+		t.Errorf("retried: %+v", got)
+	}
+}
+
+// Joined mid-stream, there's no handshake to measure, and a clock going backwards or
+// a gap of minutes isn't a round trip.
+func TestNoMeasurementFromNonsense(t *testing.T) {
+	got := handshake(t, func(tb *Table) {
+		tb.Add(tcpPkt(0, client, server, ACK, 100, 10))
+		tb.Add(tcpPkt(time.Millisecond, server, client, ACK, 500, 10))
+	})
+	if got.RTTServerUS != 0 || got.RTTClientUS != 0 {
+		t.Errorf("mid-stream: %+v", got)
+	}
+	got = handshake(t, func(tb *Table) {
+		tb.Add(tcpPkt(time.Minute, client, server, SYN, 100, 0))
+		tb.Add(tcpPkt(0, server, client, SYN|ACK, 500, 0))
+	})
+	if got.RTTServerUS != 0 {
+		t.Errorf("backwards: %+v", got)
+	}
+	got = handshake(t, func(tb *Table) {
+		tb.Add(tcpPkt(0, client, server, SYN, 100, 0))
+		tb.Add(tcpPkt(2*time.Minute, server, client, SYN|ACK, 500, 0))
+	})
+	if got.RTTServerUS != 0 {
+		t.Errorf("a two minute gap: %+v", got)
+	}
+}
+
+func TestRetransmitsAreCountedEachWay(t *testing.T) {
+	got := handshake(t, func(tb *Table) {
+		tb.Add(tcpPkt(0, client, server, ACK, 1000, 100))
+		tb.Add(tcpPkt(1, client, server, ACK, 1100, 100))
+		tb.Add(tcpPkt(2, client, server, ACK, 1000, 100)) // again
+		tb.Add(tcpPkt(3, server, client, ACK, 5000, 100))
+		tb.Add(tcpPkt(4, server, client, ACK, 5000, 100)) // again
+		tb.Add(tcpPkt(5, client, server, ACK, 1200, 0))   // a bare ACK isn't data
+		tb.Add(tcpPkt(6, client, server, ACK, 1200, 0))
+	})
+	if got.Retrans != 2 {
+		t.Errorf("retrans %d", got.Retrans)
+	}
+}
+
+// Sequence numbers wrap; a long connection crossing zero isn't resending everything.
+func TestSequenceWrapIsNotARetransmit(t *testing.T) {
+	got := handshake(t, func(tb *Table) {
+		tb.Add(tcpPkt(0, client, server, ACK, 0xffffff00, 0x80))
+		tb.Add(tcpPkt(1, client, server, ACK, 0xffffff80, 0x80))
+		tb.Add(tcpPkt(2, client, server, ACK, 0, 0x80))
+		tb.Add(tcpPkt(3, client, server, ACK, 0x80, 0x80))
+	})
+	if got.Retrans != 0 {
+		t.Errorf("retrans %d across the wrap", got.Retrans)
+	}
+}
+
+// Whatever a packet claims: no panic, and legs within bounds.
+func FuzzMeasure(f *testing.F) {
+	f.Add(uint8(SYN), uint32(0), 0, int64(0), true)
+	f.Add(uint8(SYN|ACK), uint32(0xffffffff), 65535, int64(-1000), false)
+	f.Fuzz(func(t *testing.T, flags uint8, seq uint32, seg int, nanos int64, fromSrc bool) {
+		e := &entry{}
+		for i := range 4 {
+			e.measure(&Packet{TS: t0.Add(time.Duration(nanos) * time.Duration(i)), TCPFlags: flags, Seq: seq, SegLen: seg}, fromSrc)
+		}
+		if e.rttServer < 0 || e.rttServer > maxRTT || e.rttClient < 0 || e.rttClient > maxRTT {
+			t.Errorf("legs %v %v", e.rttServer, e.rttClient)
+		}
+	})
+}

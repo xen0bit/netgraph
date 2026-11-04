@@ -145,6 +145,7 @@ func New(cfg Config) *Server {
 	read("/api/v1/home", s.home)
 	read("/api/v1/passport", s.passport)
 	read("/api/v1/presence", s.presence)
+	read("/api/v1/quality", s.quality)
 	read("/api/v1/notify", s.notifyChannels)
 	read("/api/v1/ask/config", s.askConfig)
 	s.mux.Handle("POST /api/v1/notify/test", s.require(RoleAdmin, s.notifyTest))
@@ -1002,6 +1003,10 @@ func (s *Server) notifyTest(w http.ResponseWriter, r *http.Request) {
 		out["error"] = err.Error()
 	}
 	writeJSON(w, out)
+}
+
+func (s *Server) quality(w http.ResponseWriter, r *http.Request) {
+	answer(s, w, r, s.cfg.Store.Quality)
 }
 
 func (s *Server) presence(w http.ResponseWriter, r *http.Request) {

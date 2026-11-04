@@ -492,6 +492,8 @@ body[data-role="viewer"] #ask-model { display: none; }
 body.privacy .privacy-chip { display: inline-block; }
 body.privacy [data-export], body.privacy #g-svg, body.privacy #g-d2, body.privacy #rec-capsule { display: none !important; }
 
+#quality-body table.mini tr[data-open] { cursor: pointer; }
+
 /* Phones: the window is presets only, everything is one column, and what isn't
    the map folds away on the map. */
 @media (max-width: 760px) {

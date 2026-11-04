@@ -190,7 +190,7 @@ func TestAskByKindAndRanking(t *testing.T) {
 	if got := ask("any new devices?"); !strings.Contains(got, "new device") {
 		t.Errorf("new: %s", got)
 	}
-	if got := ask("why is the internet slow?"); !strings.Contains(got, "can't measure") {
+	if got := ask("why is the internet slow?"); !strings.Contains(got, "wrong") && !strings.Contains(got, "few connections") && !strings.Contains(got, "your own network") {
 		t.Errorf("slow: %s", got)
 	}
 	// An owner a person set is a word Ask knows.

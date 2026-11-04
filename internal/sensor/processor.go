@@ -324,7 +324,7 @@ func (p *Processor) reassemble(ts time.Time, f *frame, mac string) {
 	full.fragMore = false
 	full.fragOff = 0
 	full.payload = nil
-	full.sport, full.dport, full.seq, full.tcpFlags = 0, 0, 0, 0
+	full.sport, full.dport, full.seq, full.tcpFlags, full.tcpSegLen = 0, 0, 0, 0, 0
 	parseL4(&full)
 	p.processFrame(ts, &full, mac)
 }
@@ -345,7 +345,7 @@ func (p *Processor) processFrame(ts time.Time, f *frame, mac string) {
 	if !f.frag && (f.proto != flow.ProtoTCP && f.proto != flow.ProtoUDP || f.l4 != nil) {
 		opened := p.flows.Add(&flow.Packet{
 			TS: ts, Proto: f.proto, Src: src, Dst: dst, SrcMAC: f.srcMAC,
-			Len: f.ipLen, TCPFlags: f.tcpFlags, Seq: f.seq, Payload: f.payload,
+			Len: f.ipLen, TCPFlags: f.tcpFlags, Seq: f.seq, SegLen: f.tcpSegLen, Payload: f.payload,
 		})
 		if opened && p.rdns != nil {
 			// A host is named from its first connection, not when the

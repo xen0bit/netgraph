@@ -327,6 +327,13 @@ func (c *Client) Airspace(ctx context.Context, f model.Filter) (*model.AirspaceR
 	return &v, err
 }
 
+// Quality reports how the network is doing.
+func (c *Client) Quality(ctx context.Context, f model.Filter) (*model.Quality, error) {
+	var v model.Quality
+	err := c.getJSON(ctx, "/api/v1/quality", f.Values(), &v)
+	return &v, err
+}
+
 func (c *Client) Weather(ctx context.Context, f model.Filter) (*model.WeatherReport, error) {
 	var v model.WeatherReport
 	err := c.getJSON(ctx, "/api/v1/weather", f.Values(), &v)

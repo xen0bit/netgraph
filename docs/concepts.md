@@ -378,3 +378,13 @@ always beats it, and clearing that answer brings it back.
 A private MAC can't be merged into the device it probably is: history stays under
 each address. A link is a person's statement that the two are the same, which shares
 a name, an owner and groups, and can be undone.
+
+## Is it me or the ISP?
+
+A sensor sees each TCP handshake pass. From the SYN to the SYN-ACK is the way to the
+server, and from there to the ACK the way back to the client, so a sensor on the router
+measures the two sides of itself separately. A SYN sent twice measures nothing, since it
+can't say which one was answered. Data sent at or below what that side has already sent
+counts as a retransmit; packets arriving out of order look the same, so that overcounts a
+little. None of this measures speed, and the delay to a slow site reads like a slow line,
+so a verdict says what the numbers look like, and only compares with a week of history.
