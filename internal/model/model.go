@@ -778,6 +778,17 @@ type Anomaly struct {
 	Evidence   map[string]string `json:"evidence,omitempty"`
 }
 
+// AuditEntry is one change someone made through the API.
+type AuditEntry struct {
+	ID     int64  `json:"id"`
+	TS     int64  `json:"ts"`
+	Actor  string `json:"actor"`
+	Role   string `json:"role"`
+	Action string `json:"action"`
+	Target string `json:"target,omitempty"`
+	Remote string `json:"remote,omitempty"`
+}
+
 // Finding statuses: its life from when a check first reports it.
 const (
 	FindingNew          = "new"

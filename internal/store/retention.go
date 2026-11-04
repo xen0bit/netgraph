@@ -66,6 +66,7 @@ func (s *Store) Retain(ctx context.Context) (RetentionResult, error) {
 		{&r.Mutes, `DELETE FROM anomaly_mutes WHERE until < ?`, now.UnixMilli(), true},
 		// Closed findings follow the rollups their evidence came from; open ones stay
 		// until someone or a quiet week closes them.
+		{&r.Mutes, `DELETE FROM audit_log WHERE ts < ?`, roll, true},
 		{&r.Mutes, `DELETE FROM findings WHERE status IN ('resolved', 'dismissed') AND last_seen < ?`, roll, true},
 	}
 	// Each chunk takes the ingest lock for itself, so ingest runs between

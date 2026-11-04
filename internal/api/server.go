@@ -45,6 +45,12 @@ type Config struct {
 	// An empty token disables that check.
 	IngestToken string
 	ReadToken   string
+	// OperatorToken and AdminToken separate reading from changing things. While both
+	// are empty, the read token does everything, as it did before they existed.
+	OperatorToken string
+	AdminToken    string
+	// Proxy trusts a reverse proxy to say who someone is. Nil trusts none.
+	Proxy *ProxyAuth
 	// Notify is where alerts go, for Settings. Nil when there are none.
 	Notify Notify
 	// LLM is a language model Ask may use when asked to. Nil when there's none.
@@ -72,6 +78,7 @@ type Server struct {
 
 	ingestTok   atomic.Pointer[string]
 	readTok     atomic.Pointer[string]
+	roleTok     atomic.Pointer[roleTokens]
 	ingestStats ingestMetrics
 	liveSubs    atomic.Int32
 	modelAsks   chan struct{}
@@ -123,19 +130,24 @@ func New(cfg Config) *Server {
 	}
 	s := &Server{cfg: cfg, mux: http.NewServeMux(), log: cfg.Logger, done: make(chan struct{}), modelAsks: make(chan struct{}, maxModelAsks)}
 	s.SetTokens(cfg.IngestToken, cfg.ReadToken)
+	s.SetRoleTokens(cfg.OperatorToken, cfg.AdminToken)
 	s.keys.Store(cfg.WiFi)
 	s.mux.HandleFunc("POST /api/v1/ingest", s.ingest)
 	s.mux.HandleFunc("GET /api/v1/wifi/keys", s.wifiKeys)
 	s.mux.HandleFunc("GET /api/v1/version", s.version)
 	s.mux.HandleFunc("GET /healthz", s.version)
-	read := func(p string, h http.HandlerFunc) { s.mux.Handle("GET "+p, s.requireRead(h)) }
+	read := func(p string, h http.HandlerFunc) { s.mux.Handle("GET "+p, s.require(RoleViewer, h)) }
+	s.mux.HandleFunc("POST /api/v1/session", s.createSession)
+	s.mux.HandleFunc("DELETE /api/v1/session", s.endSession)
+	read("/api/v1/me", s.me)
+	s.mux.Handle("GET /api/v1/audit", s.require(RoleAdmin, s.auditLog))
 	read("/api/v1/range", s.dataRange)
 	read("/api/v1/home", s.home)
 	read("/api/v1/passport", s.passport)
 	read("/api/v1/presence", s.presence)
 	read("/api/v1/notify", s.notifyChannels)
 	read("/api/v1/ask/config", s.askConfig)
-	s.mux.Handle("POST /api/v1/notify/test", s.requireRead(http.HandlerFunc(s.notifyTest)))
+	s.mux.Handle("POST /api/v1/notify/test", s.require(RoleAdmin, s.notifyTest))
 	read("/api/v1/findings", s.findings)
 	read("/api/v1/findings/{id}", s.finding)
 	read("/api/v1/devices/links", s.deviceLinks)
@@ -172,29 +184,29 @@ func New(cfg Config) *Server {
 	read("/api/v1/incidents/{id}/autopsy", s.incidentAutopsy)
 	read("/api/v1/incidents/{id}/export", s.exportIncident)
 	read("/api/v1/export", s.export)
-	s.mux.Handle("GET /api/v1/live", s.requireLive(http.HandlerFunc(s.live)))
+	s.mux.Handle("GET /api/v1/live", s.gate(RoleViewer, true, s.live))
 	read("/metrics", s.metrics)
 	read("/api/v1/map/pins", s.mapPins)
-	s.mux.Handle("PUT /api/v1/map/pins", s.requireRead(http.HandlerFunc(s.setMapPins)))
-	s.mux.Handle("DELETE /api/v1/map/pins", s.requireRead(http.HandlerFunc(s.deleteMapPins)))
-	s.mux.Handle("PUT /api/v1/devices/{mac}/label", s.requireRead(http.HandlerFunc(s.setLabel)))
-	s.mux.Handle("PUT /api/v1/devices/{mac}/profile", s.requireRead(http.HandlerFunc(s.setProfile)))
-	s.mux.Handle("POST /api/v1/devices/{mac}/link", s.requireRead(http.HandlerFunc(s.decideLink)))
-	s.mux.Handle("PATCH /api/v1/findings/{id}", s.requireRead(http.HandlerFunc(s.updateFinding)))
-	s.mux.Handle("POST /api/v1/findings/{id}/fine", s.requireRead(http.HandlerFunc(s.findingFine)))
-	s.mux.Handle("POST /api/v1/findings/seen", s.requireRead(http.HandlerFunc(s.findingsSeen)))
-	s.mux.Handle("POST /api/v1/anomalies/mute", s.requireRead(http.HandlerFunc(s.muteAnomaly)))
-	s.mux.Handle("POST /api/v1/whatif", s.requireRead(http.HandlerFunc(s.whatif)))
-	s.mux.Handle("POST /api/v1/ask", s.requireRead(http.HandlerFunc(s.ask)))
-	s.mux.Handle("POST /api/v1/annotations", s.requireRead(http.HandlerFunc(s.createAnnotation)))
-	s.mux.Handle("DELETE /api/v1/annotations/{id}", s.requireRead(http.HandlerFunc(s.deleteAnnotation)))
-	s.mux.Handle("POST /api/v1/bookmarks", s.requireRead(http.HandlerFunc(s.createBookmark)))
-	s.mux.Handle("DELETE /api/v1/bookmarks/{id}", s.requireRead(http.HandlerFunc(s.deleteBookmark)))
-	s.mux.Handle("POST /api/v1/incidents", s.requireRead(http.HandlerFunc(s.createIncident)))
-	s.mux.Handle("PATCH /api/v1/incidents/{id}", s.requireRead(http.HandlerFunc(s.updateIncident)))
-	s.mux.Handle("DELETE /api/v1/incidents/{id}", s.requireRead(http.HandlerFunc(s.deleteIncident)))
-	s.mux.Handle("POST /api/v1/incidents/{id}/pin", s.requireRead(http.HandlerFunc(s.pinEvidence)))
-	s.mux.Handle("DELETE /api/v1/anomalies/mute", s.requireRead(http.HandlerFunc(s.unmuteAnomaly)))
+	s.mux.Handle("PUT /api/v1/map/pins", s.require(RoleOperator, s.setMapPins))
+	s.mux.Handle("DELETE /api/v1/map/pins", s.require(RoleOperator, s.deleteMapPins))
+	s.mux.Handle("PUT /api/v1/devices/{mac}/label", s.require(RoleOperator, s.setLabel))
+	s.mux.Handle("PUT /api/v1/devices/{mac}/profile", s.require(RoleOperator, s.setProfile))
+	s.mux.Handle("POST /api/v1/devices/{mac}/link", s.require(RoleOperator, s.decideLink))
+	s.mux.Handle("PATCH /api/v1/findings/{id}", s.require(RoleOperator, s.updateFinding))
+	s.mux.Handle("POST /api/v1/findings/{id}/fine", s.require(RoleOperator, s.findingFine))
+	s.mux.Handle("POST /api/v1/findings/seen", s.require(RoleOperator, s.findingsSeen))
+	s.mux.Handle("POST /api/v1/anomalies/mute", s.require(RoleOperator, s.muteAnomaly))
+	s.mux.Handle("POST /api/v1/whatif", s.require(RoleViewer, s.whatif))
+	s.mux.Handle("POST /api/v1/ask", s.require(RoleViewer, s.ask))
+	s.mux.Handle("POST /api/v1/annotations", s.require(RoleOperator, s.createAnnotation))
+	s.mux.Handle("DELETE /api/v1/annotations/{id}", s.require(RoleOperator, s.deleteAnnotation))
+	s.mux.Handle("POST /api/v1/bookmarks", s.require(RoleOperator, s.createBookmark))
+	s.mux.Handle("DELETE /api/v1/bookmarks/{id}", s.require(RoleOperator, s.deleteBookmark))
+	s.mux.Handle("POST /api/v1/incidents", s.require(RoleOperator, s.createIncident))
+	s.mux.Handle("PATCH /api/v1/incidents/{id}", s.require(RoleOperator, s.updateIncident))
+	s.mux.Handle("DELETE /api/v1/incidents/{id}", s.require(RoleOperator, s.deleteIncident))
+	s.mux.Handle("POST /api/v1/incidents/{id}/pin", s.require(RoleOperator, s.pinEvidence))
+	s.mux.Handle("DELETE /api/v1/anomalies/mute", s.require(RoleOperator, s.unmuteAnomaly))
 	s.mux.HandleFunc("GET /", s.web)
 	return s
 }
@@ -313,28 +325,6 @@ func tokenOKQuery(r *http.Request, want string, allowQuery bool) bool {
 		got = r.URL.Query().Get("token")
 	}
 	return subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
-}
-
-func (s *Server) requireRead(h http.HandlerFunc) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !tokenOK(r, s.readToken()) {
-			w.Header().Set("WWW-Authenticate", `Bearer realm="netgraph"`)
-			httpError(w, http.StatusUnauthorized, errors.New("missing or wrong read token"))
-			return
-		}
-		h(w, r)
-	})
-}
-
-func (s *Server) requireLive(h http.HandlerFunc) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if !tokenOKQuery(r, s.readToken(), true) {
-			w.Header().Set("WWW-Authenticate", `Bearer realm="netgraph"`)
-			httpError(w, http.StatusUnauthorized, errors.New("missing or wrong read token"))
-			return
-		}
-		h(w, r)
-	})
 }
 
 func httpError(w http.ResponseWriter, code int, err error) {
@@ -1088,6 +1078,7 @@ func (s *Server) createAnnotation(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, err)
 		return
 	}
+	a.Author = author(r, a.Author)
 	out, err := s.cfg.Store.CreateAnnotation(r.Context(), a)
 	if err != nil {
 		s.fail(w, err)
@@ -1337,6 +1328,11 @@ func (s *Server) askConfig(w http.ResponseWriter, _ *http.Request) {
 func (s *Server) askModel(w http.ResponseWriter, r *http.Request, q string, f model.Filter, now time.Time) {
 	if s.cfg.LLM == nil {
 		httpError(w, http.StatusBadRequest, errors.New("this server has no language model configured"))
+		return
+	}
+	// It can cost money, and sends data elsewhere: more than a viewer's say.
+	if id := identityOf(r.Context()); id.Role < RoleOperator {
+		httpError(w, http.StatusForbidden, fmt.Errorf("your role is %s; using the model needs operator", id.Role))
 		return
 	}
 	select {
@@ -1603,7 +1599,7 @@ func (s *Server) updateIncident(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, err)
 		return
 	}
-	out, err := s.cfg.Store.UpdateIncident(r.Context(), id, in.Status, in.Title, in.Summary, in.Note, in.Author)
+	out, err := s.cfg.Store.UpdateIncident(r.Context(), id, in.Status, in.Title, in.Summary, in.Note, author(r, in.Author))
 	if err != nil {
 		s.fail(w, err)
 		return
