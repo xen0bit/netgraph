@@ -293,7 +293,8 @@ func (c *Client) WhatIf(ctx context.Context, p *policy.Policy, f model.Filter, s
 
 // Ask sends a question to the server's grounded intent engine.
 func (c *Client) Ask(ctx context.Context, question string, f model.Filter) (*model.Answer, error) {
-	body, err := json.Marshal(map[string]any{"q": question, "from": f.From, "to": f.To})
+	_, offset := time.Now().Zone()
+	body, err := json.Marshal(map[string]any{"q": question, "from": f.From, "to": f.To, "tz": offset / 60})
 	if err != nil {
 		return nil, err
 	}

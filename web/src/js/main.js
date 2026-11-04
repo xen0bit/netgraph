@@ -2051,9 +2051,25 @@ async function runWhatIf() {
 
 // --- ask -----------------------------------------------------------------------------
 
+// askMap is a small map of what an answer's about, made the first time it's needed.
+let askMap = null;
+async function drawAskMap(a) {
+  const el = $("#ask-map");
+  el.hidden = !a.focus;
+  if (!a.focus) return;
+  if (!askMap) askMap = new LivingMap(el, { onSelect: (id) => { $("#ask-dialog").close(); openEntity(id); }, onEdge: () => {}, onExpand: () => {}, onMenu: () => {}, onPin: () => {}, onSelection: () => {} });
+  askMap.setTheme(theme());
+  const g = await api("graph", new URLSearchParams({ from: a.from, to: a.to, device: a.focus.slice("device:".length), top: 8, collapse: "1", sites: "1", dns: "0", anomalies: "0", networks: "1" })).catch(() => null);
+  if (!g?.nodes?.length) { el.hidden = true; return; }
+  askMap.show(g);
+  askMap.fit();
+}
+
 function renderAnswer(a) {
   const box = $("#ask-answer");
-  box.innerHTML = `<p><b>${esc(a.answer || "No answer.")}</b></p>
+  const asked = a.from && a.to ? `<p class="muted">From ${esc(stamp(a.from))} to ${esc(stamp(a.to))}${a.confidence ? ` · ${esc(a.confidence)} confidence` : ""}</p>` : "";
+  drawAskMap(a).catch(() => {});
+  box.innerHTML = `<p><b>${esc(a.answer || "No answer.")}</b></p>${asked}
     ${(a.claims || []).map((c) => `<p>${esc(c.text)} ${(c.evidence || []).map((e) => `<button class="cite" data-kind="${esc(e.kind)}" data-id="${esc(e.id)}" data-ts="${e.ts || 0}">${esc(e.kind)}</button>`).join(" ")}</p>`).join("")}
     ${(a.gaps || []).length ? `<p class="muted">Gaps: ${esc(a.gaps.join("; "))}</p>` : ""}
     ${(a.plan || []).length ? `<details><summary>How I answered</summary><ol>${a.plan.map((p) => `<li><span class="badge">${esc(p.tool)}</span> ${esc(Object.entries(p.args || {}).map(([k, v]) => `${k}=${v}`).join(" "))}</li>`).join("")}</ol></details>` : ""}
@@ -3097,7 +3113,7 @@ function init() {
     if (!q) return;
     $("#ask-answer").innerHTML = `<p class="muted">Investigating…</p>`;
     try {
-      const a = await send("POST", "ask", { q, from: String(state.to - state.span), to: String(state.to) });
+      const a = await send("POST", "ask", { q, from: String(state.to - state.span), to: String(state.to), tz: -new Date().getTimezoneOffset() });
       renderAnswer(a);
     } catch (err) {
       $("#ask-answer").innerHTML = `<p class="muted">${esc(err.message)}</p>`;

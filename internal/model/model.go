@@ -1089,6 +1089,9 @@ type Answer struct {
 	Plan       []ToolCall    `json:"plan,omitempty"`
 	Followups  []string      `json:"followups,omitempty"`
 	Gaps       []string      `json:"gaps,omitempty"`
+	FromMS     int64         `json:"from,omitempty"`  // the window it answers
+	ToMS       int64         `json:"to,omitempty"`    //
+	Focus      string        `json:"focus,omitempty"` // the device it's about, if one
 }
 
 // ExposureFinding is one observation about what is reachable or weak.

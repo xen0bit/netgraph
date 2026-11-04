@@ -477,6 +477,8 @@ form.profile output { grid-column: 1 / -1; }
 .finding-note { display: flex; gap: var(--sp-1); }
 .finding-note input { flex: 1; min-width: 0; }
 
+.ask-map { height: 240px; min-height: 0; flex: none; margin-top: var(--sp-2); border: 1px solid var(--border); border-radius: var(--radius); }
+
 /* Phones: the window is presets only, everything is one column, and what isn't
    the map folds away on the map. */
 @media (max-width: 760px) {

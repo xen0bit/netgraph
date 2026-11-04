@@ -196,10 +196,11 @@
     <form method="dialog"><button class="icon close" title="Close" aria-label="Close">✕</button></form>
     <h2>Ask netgraph</h2>
     <form id="ask-form" autocomplete="off">
-      <input id="ask-q" type="text" aria-label="Question" placeholder="What did alice-iphone do? What changed? Any anomalies?" required>
+      <input id="ask-q" type="text" aria-label="Question" placeholder="What did the printer do yesterday? Who's home? Biggest uploader this week?" required>
       <button type="submit">Ask</button>
     </form>
     <div id="ask-answer" aria-live="polite"></div>
+    <div id="ask-map" class="ask-map diagram" hidden aria-label="The device this answer is about"></div>
   </dialog>
 
   <dialog id="autopsy-dialog" class="autopsy">
