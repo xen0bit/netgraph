@@ -62,6 +62,9 @@ that are easy to break.
 - **netgraph never touches a firewall.** `internal/policy` only reads and writes text. An export
   is built from what's parsed or reduced to a safe alphabet, so a hostname can't add a rule, and
   anything it can't express is commented out and warned about: a dropped deny is a hole.
+- **The archive follows erasure.** `internal/archive` holds what retention would delete, and
+  `db forget` and `db purge` rewrite it, finding it from the database (`archive_location`). Retention
+  only deletes what's safely in a file. Its rows carry no database ids, as those rows will be gone.
 - **Every table has an erasure decision** in `tableErasure`
   (`internal/store/erasure_tables_test.go`): a new one fails that test until
   it's added to `db forget`, `db purge` and the disk guard as it needs.

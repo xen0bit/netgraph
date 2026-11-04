@@ -63,6 +63,12 @@ type Config struct {
 	ASN func() *asn.DB
 	// Now is the clock; tests set it.
 	Now func() time.Time
+	// ArchiveDir, when set, keeps hourly rollups in files as they pass retention.
+	ArchiveDir string
+	// ArchiveRaw also keeps raw connections and lookups, which are much larger.
+	ArchiveRaw bool
+	// ArchiveMaxBytes removes the archive's oldest days beyond this. Zero is no limit.
+	ArchiveMaxBytes int64
 }
 
 func (c *Config) defaults() {
@@ -196,6 +202,10 @@ func Open(path string, cfg Config) (*Store, error) {
 	if err := s.ing.warm(context.Background()); err != nil {
 		s.Close()
 		return nil, err
+	}
+	if err := s.recordArchiveDir(context.Background()); err != nil {
+		s.Close()
+		return nil, fmt.Errorf("recording the archive's location: %w", err)
 	}
 	return s, nil
 }

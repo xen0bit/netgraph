@@ -92,6 +92,7 @@ TIME                 DEVICE           TYPE  NAME               RCODE     MS    A
 | `query story ID` | one entity's intervals, milestones and evidence |
 | `query diff -at-a ... -at-b ...` | what changed between two moments |
 | `whatif -policy FILE` | test a proposed policy against observed traffic; read-only |
+| `archive list -dir DIR`, `archive read -dir DIR` | what the long-term archive holds, and its rows as JSON lines |
 | `policy learn -device MAC` | propose the least a device needs, from what it did in the last two weeks |
 | `policy export -policy FILE -format nftables` | write `nftables`, `openwrt` or `opnsense` configuration for you to apply |
 | `ask "question"` | answer from recorded evidence; prints claims and citations |

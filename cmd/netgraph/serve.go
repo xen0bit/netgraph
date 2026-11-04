@@ -73,6 +73,9 @@ func runServe(args []string) error {
 	raw := fs.String("raw-retention", "14d", "keep raw flows, DNS and observations this long")
 	rollup := fs.String("rollup-retention", "180d", "keep hourly rollups and facts this long")
 	minute := fs.String("minute-retention", "30d", "keep per-minute traffic, which the timeline scrubs through, this long")
+	archiveDir := fs.String("archive-dir", envOr("NETGRAPH_ARCHIVE_DIR", ""), "keep hourly rollups in compressed files here as they pass -rollup-retention; $NETGRAPH_ARCHIVE_DIR")
+	archiveRaw := fs.Bool("archive-raw", false, "with -archive-dir, also keep raw connections and lookups as they pass -raw-retention: much larger, and far more detailed")
+	archiveMax := fs.Int("archive-max-mb", 0, "with -archive-dir, remove the oldest days beyond this many MiB (default no limit)")
 	gap := fs.String("fact-gap", "1h", "silence after which a relationship starts a new period")
 	exactMax := fs.String("exact-max", "48h", "longest window answered from raw records; longer ones use hourly rollups")
 	logLevel := fs.String("log-level", "info", "debug, info, warn or error")
@@ -245,7 +248,10 @@ func runServe(args []string) error {
 		debug.FreeOSMemory() // parsing left several times the table's size behind
 		log.Info("loaded asn table", "file", *asnFile, "ranges", table.Len(), "took", time.Since(t0).Round(time.Millisecond))
 	}
-	st, err := store.Open(*db, store.Config{RawRetention: rawD, RollupRetention: rollD, MinuteRetention: minuteD, FactGap: gapD, ExactMax: exactD, Logger: log, OnNewDevice: onNew,
+	if (*archiveRaw || *archiveMax > 0) && *archiveDir == "" {
+		return errors.New("-archive-raw and -archive-max-mb need -archive-dir")
+	}
+	st, err := store.Open(*db, store.Config{ArchiveDir: *archiveDir, ArchiveRaw: *archiveRaw, ArchiveMaxBytes: int64(*archiveMax) << 20, RawRetention: rawD, RollupRetention: rollD, MinuteRetention: minuteD, FactGap: gapD, ExactMax: exactD, Logger: log, OnNewDevice: onNew,
 		ASN: networks.Load})
 	if err != nil {
 		return err
@@ -380,6 +386,11 @@ func runServe(args []string) error {
 	}
 	if cfg.Web == nil {
 		log.Warn("this build has no web UI embedded; use -web-dir or a release build")
+	}
+	if *archiveDir == "" {
+		if dir, err := st.RecordedArchive(ctx); err == nil && dir != "" {
+			log.Warn("this database has an archive, but -archive-dir isn't set: what passes retention now is deleted, not kept. db forget and db purge still reach it", "dir", dir)
+		}
 	}
 	log.Info("netgraph serving", "version", buildinfo.Version, "listen", scheme+"://"+ln.Addr().String(), "db", *db)
 	errc := make(chan error, 1)

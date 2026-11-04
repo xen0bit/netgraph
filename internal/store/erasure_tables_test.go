@@ -12,6 +12,7 @@ import (
 var tableErasure = map[string]string{
 	"sensors":           "operational: a sensor's name and counters, not about any device",
 	"sensor_config":     "operational: settings for a sensor, not about any device",
+	"archive_location":  "operational: where the archive is. What's in it follows forget and purge",
 	"ingest_seq":        "operational: batch sequence numbers",
 	"entities":          "forget, purge",
 	"facts":             "forget, purge, disk guard",
