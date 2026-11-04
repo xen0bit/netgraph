@@ -1092,6 +1092,7 @@ type Answer struct {
 	FromMS     int64         `json:"from,omitempty"`  // the window it answers
 	ToMS       int64         `json:"to,omitempty"`    //
 	Focus      string        `json:"focus,omitempty"` // the device it's about, if one
+	Model      string        `json:"model,omitempty"` // which language model wrote it; empty is none
 }
 
 // ExposureFinding is one observation about what is reachable or weak.

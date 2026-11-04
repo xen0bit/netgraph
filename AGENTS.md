@@ -60,6 +60,10 @@ that are easy to break.
   and errors never repeat one (an http client's error quotes its URL), and they're
   read from files or the environment, not flags. Text off the network stays inert in
   a chat message or an email header.
+- **AI gets read-only tools.** `internal/tools.Backend` has no method that writes, so
+  neither MCP nor the LLM mode can change anything; keep it that way. A model's
+  statement with no real tool call behind it is dropped (`llm.finish`). LLM use is off
+  unless configured, and asked for per question, and a model off the network warns first.
 - **d2 keys are always quoted** (`graph.quote`): an unquoted
   `example.com` or address is parsed as nested containers.
 - **A device's type is a judgement.** `internal/classify` is a pure function over

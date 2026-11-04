@@ -59,6 +59,7 @@ netgraph serve -db /var/lib/netgraph/netgraph.db -listen :8443
 | `-fact-gap` | `1h` | silence after which a relationship starts a new period |
 | `-asn-file` | `$NETGRAPH_ASN_FILE`; release builds: built in | an ASN table: the network and country of remote addresses ([networks](#networks-and-countries)); `none` for no table |
 | `-notify-file` | `$NETGRAPH_NOTIFY` | notification channels, one URL a line: see [Notifications](#notifications) |
+| `-llm-file` | `$NETGRAPH_LLM` | let Ask use a language model: an OpenAI-compatible URL such as `http://localhost:11434/v1?model=llama3.2`, or `https://api.example.com/v1?model=name&key=KEY`. Off by default: a model on another network receives your network's data, and the page warns before sending any |
 | `-mqtt-file` | `$NETGRAPH_MQTT` | publish to Home Assistant: see [Home Assistant](#home-assistant) |
 | `-alert-webhook` | `$NETGRAPH_ALERT_WEBHOOK` | POST a JSON alert when a new device joins, and optionally for anomalies and scheduled reports ([alerts](#new-device-alerts)) |
 | `-report-every` | off | with `-alert-webhook`, POST a summary report every interval, for example `24h` |

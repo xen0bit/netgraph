@@ -8,6 +8,7 @@
 //	netgraph tui
 //	netgraph import capture.pcap
 //	netgraph db     migrate|backup|retain|vacuum
+//	netgraph mcp
 //	netgraph version
 package main
 
@@ -47,6 +48,8 @@ func main() {
 		err = runLabel(os.Args[2:])
 	case "whatif":
 		err = runWhatIf(os.Args[2:])
+	case "mcp":
+		err = runMCP(os.Args[2:])
 	case "ask":
 		err = runAsk(os.Args[2:])
 	case "note":
@@ -80,6 +83,7 @@ commands:
   label      name a device by hand (or -clear the name)
   whatif     test a proposed policy against observed traffic
   ask        answer a question from recorded evidence, with citations
+  mcp        serve read-only tools to an AI assistant, on stdin and stdout
   note       add a timestamped note to the Flight Recorder rail
   bookmark   mark a moment
   incident   list, show, autopsy, export or resolve saved investigations
