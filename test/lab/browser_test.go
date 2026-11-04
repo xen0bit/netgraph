@@ -144,7 +144,7 @@ func checkWebUI(t *testing.T, devtools, ui, token, shotDir string, expect []stri
 	for i, tab := range []string{"devices", "flows", "dns", "facts", "sensors"} {
 		var text string
 		err := chromedp.Run(ctx,
-			chromedp.Click(fmt.Sprintf(`.tabs button[data-tab="%s"]`, tab), chromedp.ByQuery),
+			clickTab(tab),
 			chromedp.WaitVisible(fmt.Sprintf(`#t-%s tbody`, tab), chromedp.ByQuery),
 			chromedp.Text(fmt.Sprintf(`#t-%s`, tab), &text, chromedp.ByQuery),
 			shot(fmt.Sprintf("%d-%s", i+1, tab)),
@@ -161,7 +161,7 @@ func checkWebUI(t *testing.T, devtools, ui, token, shotDir string, expect []stri
 	// name, and reopen its details from a link.
 	var sortHead, hash, csv, found, deep string
 	err = chromedp.Run(ctx,
-		chromedp.Click(`.tabs button[data-tab="flows"]`, chromedp.ByQuery),
+		clickTab("flows"),
 		chromedp.WaitVisible(`#t-flows tbody tr[data-i]`, chromedp.ByQuery),
 		chromedp.Click(`#t-flows thead button.sort[data-col="8"]`, chromedp.ByQuery),
 		chromedp.Text(`#t-flows thead th[aria-sort="descending"]`, &sortHead, chromedp.ByQuery),
@@ -212,7 +212,7 @@ func checkWebUI(t *testing.T, devtools, ui, token, shotDir string, expect []stri
 	// it is learning.
 	var learning string
 	err = chromedp.Run(ctx,
-		chromedp.Click(`.tabs button[data-tab="anomalies"]`, chromedp.ByQuery),
+		clickTab("anomalies"),
 		chromedp.WaitVisible(`#t-anomalies thead`, chromedp.ByQuery),
 		chromedp.Text(`#anomaly-note`, &learning, chromedp.ByQuery),
 		shot("anomalies"),
@@ -242,9 +242,9 @@ func checkWebUI(t *testing.T, devtools, ui, token, shotDir string, expect []stri
 
 	// The Incidents and Insights tabs must render.
 	err = chromedp.Run(ctx,
-		chromedp.Click(`.tabs button[data-tab="incidents"]`, chromedp.ByQuery),
+		clickTab("incidents"),
 		chromedp.WaitVisible(`#t-incidents`, chromedp.ByQuery),
-		chromedp.Click(`.tabs button[data-tab="insights"]`, chromedp.ByQuery),
+		clickTab("insights"),
 		chromedp.WaitVisible(`#insights-body .card`, chromedp.ByQuery),
 	)
 	if err != nil {
@@ -324,10 +324,10 @@ func checkKeepsView(t *testing.T, ctx context.Context) {
 		chromedp.Evaluate(`window.__draws = 0; new MutationObserver(() => window.__draws++).observe(document.querySelector("#graph-note"), {childList: true}); 0`, nil),
 		chromedp.Evaluate(pan, nil),
 		chromedp.Evaluate(transform, &panned),
-		chromedp.Click(`.tabs button[data-tab="devices"]`, chromedp.ByQuery),
+		clickTab("devices"),
 		chromedp.WaitVisible(`#t-devices tbody`, chromedp.ByQuery),
 		chromedp.Evaluate(`window.__draws`, &draws),
-		chromedp.Click(`.tabs button[data-tab="graph"]`, chromedp.ByQuery),
+		clickTab("graph"),
 		drawn(&draws),
 		chromedp.Evaluate(transform, &afterTab),
 
@@ -364,4 +364,18 @@ func TestWebUI(t *testing.T) {
 		t.Skip("set NETGRAPH_UI_URL and NETGRAPH_DEVTOOLS")
 	}
 	checkWebUI(t, devtools, ui, os.Getenv("NETGRAPH_READ_TOKEN"), os.Getenv("NETGRAPH_SHOTS"), strings.Fields(os.Getenv("NETGRAPH_EXPECT")))
+}
+
+// clickTab reaches a view the way a person does: its area, then the view in it.
+func clickTab(tab string) chromedp.Action {
+	area := map[string]string{"flows": "activity", "dns": "activity", "facts": "activity", "destinations": "activity",
+		"anomalies": "findings", "incidents": "findings", "insights": "findings", "sensors": "settings", "graph": "map"}[tab]
+	if area == "" {
+		area = tab
+	}
+	acts := chromedp.Tasks{chromedp.Click(fmt.Sprintf(`.tabs button[data-area="%s"]`, area), chromedp.ByQuery)}
+	if area == "activity" || area == "findings" || area == "settings" {
+		acts = append(acts, chromedp.Click(fmt.Sprintf(`#subtabs button[data-tab="%s"]`, tab), chromedp.ByQuery))
+	}
+	return acts
 }

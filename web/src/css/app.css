@@ -12,6 +12,11 @@
   --err: #b91c1c;
   --sel: #dbeafe;
   --shadow: 0 8px 24px rgba(0, 0, 0, .12);
+  --line: var(--border);
+  --bg-1: var(--bg-2);
+  --radius: 8px;
+  --sp-1: 4px; --sp-2: 8px; --sp-3: 12px; --sp-4: 16px; --sp-5: 24px;
+  --text-xs: 12px; --text-sm: 13px; --text-lg: 16px; --text-xl: 22px;
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   color-scheme: light;
 }
@@ -29,12 +34,22 @@
 }
 
 * { box-sizing: border-box; }
+/* hidden means hidden, whatever display a class gives the element. */
+[hidden] { display: none !important; }
 html, body { height: 100%; }
 body {
   margin: 0; background: var(--bg); color: var(--fg);
   font: 14px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
-  display: grid; grid-template-rows: auto auto auto auto 1fr auto; min-height: 100vh;
+  /* A column, not a grid of counted rows: the Recorder's strips come and go. */
+  display: flex; flex-direction: column; height: 100dvh; overflow: hidden;
 }
+body > * { flex: none; }
+body > main { flex: 1 1 0; }
+/* Views about now, not about a window, have no use for the time controls. */
+body[data-plain] .window, body[data-plain] .timeline, body[data-plain] .filters,
+body[data-plain] .recorder, body[data-plain] .event-rail { display: none !important; }
+/* The Recorder has its own timeline; two would squeeze the map. */
+body.rec-on .timeline { display: none; }
 button, input, select {
   font: inherit; color: inherit; background: var(--bg); border: 1px solid var(--border);
   border-radius: 6px; padding: 4px 10px;
@@ -82,6 +97,12 @@ button.toggle[aria-pressed="true"] { background: var(--ok); color: var(--bg); bo
 .tabs { display: flex; gap: 2px; padding: 0 16px; border-bottom: 1px solid var(--border); overflow-x: auto; }
 .tabs button { border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: none; padding: 8px 12px; color: var(--fg-2); }
 .tabs button[aria-selected="true"] { color: var(--fg); border-bottom-color: var(--accent); font-weight: 600; }
+.subtabs { display: flex; gap: var(--sp-1); align-items: center; padding: var(--sp-2) var(--sp-4) 0; overflow-x: auto; }
+.subtabs[hidden] { display: none; }
+.subtabs button { border: 0; background: none; color: var(--fg-2); padding: 3px 10px; border-radius: 999px; font-size: var(--text-sm); white-space: nowrap; }
+.subtabs button:hover { background: var(--bg-3); }
+.subtabs button[aria-current="page"] { background: var(--sel); color: var(--fg); font-weight: 600; }
+.subtabs #whatif-open { border: 1px solid var(--border); }
 
 main { position: relative; overflow: hidden; display: flex; min-height: 0; }
 .view { flex: 1; overflow: auto; padding: 0 16px 16px; min-width: 0; }
@@ -235,7 +256,7 @@ dialog menu { padding: 0; margin: 12px 0 0; display: flex; justify-content: flex
 .recorder input[type="range"] { flex: 1; min-width: 120px; accent-color: var(--accent); }
 .recorder select, .recorder button { font: inherit; }
 .recorder #rec-time { min-width: 150px; }
-.event-rail { padding: 8px 16px 12px; border-bottom: 1px solid var(--line); max-height: 220px; overflow: auto; }
+.event-rail { padding: 6px 16px 8px; border-bottom: 1px solid var(--line); max-height: 132px; overflow: auto; }
 .event-rail[hidden] { display: none; }
 .rail-head { display: flex; gap: 10px; align-items: baseline; margin-bottom: 6px; }
 .rail-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
@@ -284,3 +305,99 @@ table.mini th, table.mini td { text-align: left; padding: 3px 5px; border-bottom
 dialog.note { max-width: 620px; width: min(620px, 94vw); }
 dialog.note input, dialog.note textarea { width: 100%; margin: 6px 0; }
 dialog.note .actions { display: flex; gap: 10px; align-items: center; }
+
+/* The map's key, out of the way until asked for. */
+.map-help { font-size: var(--text-xs); color: var(--fg-2); padding: var(--sp-1) var(--sp-4); border-top: 1px solid var(--border); }
+.map-help summary { cursor: pointer; }
+.map-help .legend { padding: var(--sp-1) 0; }
+
+/* Cards and the things in them. */
+.card h2 { margin: 0; font-size: var(--text-lg); font-weight: 600; }
+.card h3 { margin: var(--sp-3) 0 var(--sp-1); font-size: var(--text-xs); font-weight: 600; color: var(--fg-2); text-transform: uppercase; letter-spacing: .04em; }
+.card { border-radius: var(--radius); padding: var(--sp-4); }
+.card-head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--sp-2); margin-bottom: var(--sp-2); }
+.muted { color: var(--fg-2); }
+.row-link { all: unset; display: block; box-sizing: border-box; width: 100%; padding: 3px var(--sp-1); border-radius: 5px; cursor: pointer; }
+.row-link:hover { background: var(--bg-3); }
+.row-link:focus-visible { outline: 2px solid var(--accent); }
+.spinner.inline { display: inline-block; vertical-align: -1px; margin-right: var(--sp-1); }
+
+/* Home. */
+.home { max-width: 1280px; margin: 0 auto; padding-top: var(--sp-3); }
+.home-status { display: flex; flex-wrap: wrap; gap: var(--sp-2); align-items: baseline; padding: var(--sp-2) var(--sp-3); border-radius: var(--radius); border: 1px solid var(--border); margin-bottom: var(--sp-3); }
+.home-status span:last-child { color: var(--fg-2); }
+.home-status.ok .status-icon { color: var(--ok); }
+.home-status.warn { border-color: var(--warn); }
+.home-status.warn .status-icon { color: var(--warn); }
+.home-status.info .status-icon { color: var(--accent); }
+.home-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: var(--sp-3); align-items: start; }
+.home-grid .since { grid-row: span 2; }
+.home-grid .wide { grid-column: 1 / -1; }
+.stats { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--sp-2); }
+.stats div { display: flex; flex-direction: column; }
+.stats b { font-size: var(--text-xl); font-weight: 600; font-variant-numeric: tabular-nums; }
+.stats span { color: var(--fg-2); font-size: var(--text-xs); }
+.new-devices, .finds, .talkers { list-style: none; margin: 0; padding: 0; }
+.finds li { padding: 3px 0; }
+.finds + button { margin-top: var(--sp-2); }
+.chips { display: flex; flex-wrap: wrap; gap: var(--sp-1); }
+.device-chip { display: flex; flex-direction: column; align-items: flex-start; max-width: 15rem; padding: var(--sp-1) var(--sp-2); line-height: 1.25; background: var(--bg); }
+.device-chip b { font-weight: 600; font-size: var(--text-sm); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.device-chip span { color: var(--fg-2); font-size: var(--text-xs); max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.talkers .row-link { display: grid; grid-template-columns: 1fr auto; gap: 2px var(--sp-2); }
+.talker-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.talker-value { font-variant-numeric: tabular-nums; color: var(--fg-2); }
+.talker-bar { grid-column: 1 / -1; display: block; height: 6px; }
+.talker-bar span { display: block; height: 100%; min-width: 2px; background: var(--accent); border-radius: 0 4px 4px 0; }
+.tchart { display: flex; align-items: stretch; height: 96px; border-bottom: 1px solid var(--border); }
+.tbar { all: unset; flex: 1 1 0; min-width: 0; display: flex; align-items: flex-end; padding: 0 1px; cursor: pointer; box-sizing: border-box; }
+.tbar:hover, .tbar:focus-visible { background: var(--bg-3); }
+.tbar span { display: block; width: 100%; background: var(--accent); border-radius: 4px 4px 0 0; }
+.taxis { display: flex; justify-content: space-between; gap: var(--sp-2); color: var(--fg-2); font-size: var(--text-xs); padding-top: var(--sp-1); }
+
+/* First run, and adding a sensor. */
+.first-run { max-width: 760px; margin: 0 auto; padding-top: var(--sp-5); }
+.first-run h2 { font-size: var(--text-xl); margin: 0 0 var(--sp-2); }
+.waiting { font-weight: 600; }
+.steps { margin: 0; padding-left: 20px; }
+.steps li { margin-bottom: var(--sp-3); }
+.steps li:last-child { margin-bottom: 0; }
+code { font-family: var(--mono); font-size: var(--text-xs); background: var(--bg-3); padding: 1px 4px; border-radius: 4px; }
+.code { display: flex; gap: var(--sp-2); align-items: flex-start; margin-top: var(--sp-1); padding: var(--sp-2); background: var(--bg-3); border-radius: 6px; }
+.code pre { flex: 1; min-width: 0; margin: 0; font-family: var(--mono); font-size: var(--text-xs); white-space: pre-wrap; overflow-wrap: anywhere; }
+.code button { flex: none; padding: 1px 8px; font-size: var(--text-xs); }
+
+/* Settings. */
+.settings { max-width: 860px; margin: 0 auto; padding-top: var(--sp-3); display: flex; flex-direction: column; gap: var(--sp-3); }
+.settings .card h2 { margin-bottom: var(--sp-2); }
+.settings .actions { display: flex; gap: var(--sp-2); flex-wrap: wrap; }
+.segmented { display: inline-flex; }
+.segmented button { border-radius: 0; margin-left: -1px; }
+.segmented button:first-child { border-radius: 6px 0 0 6px; margin-left: 0; }
+.segmented button:last-child { border-radius: 0 6px 6px 0; }
+.segmented button[aria-pressed="true"] { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
+.facts-list { display: grid; grid-template-columns: max-content 1fr; gap: 2px var(--sp-3); margin: 0 0 var(--sp-2); }
+.facts-list dt { color: var(--fg-2); }
+.facts-list dd { margin: 0; }
+
+#g-more { display: none; }
+/* Phones: the window is presets only, everything is one column, and what isn't
+   the map folds away on the map. */
+@media (max-width: 760px) {
+  .timeline { display: none; }
+  .filters { padding: var(--sp-1) var(--sp-4); }
+  .summary span { display: none; }
+  #g-more { display: inline-block; }
+  .graph-tools { gap: var(--sp-2); padding: var(--sp-1) var(--sp-4); }
+  .graph-tools:not(.open) > label, .graph-tools:not(.open) > #g-png, .graph-tools:not(.open) > #g-svg, .graph-tools:not(.open) > #g-d2, .graph-tools:not(.open) > #g-arrange { display: none; }
+  #view-graph .note { padding: 0 var(--sp-4); }
+  .window input[type="datetime-local"], .window .arrow, #zoomout { display: none; }
+  .right { margin-left: 0; width: 100%; }
+  .search { flex: 1; }
+  .search input { width: 100%; }
+  .search ul { left: 0; right: auto; min-width: 0; width: 100%; }
+  .home-grid { grid-template-columns: 1fr; }
+  .home-grid .since { grid-row: auto; }
+  .stats b { font-size: var(--text-lg); }
+  .tabs button { padding: 8px 10px; }
+}

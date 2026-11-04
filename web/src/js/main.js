@@ -2,33 +2,12 @@
 // drawn here, on a canvas (map/map.js).
 import { LivingMap } from "./map/map.js";
 import { reelFrame, reelDiff } from "./reel.js";
+import { esc, units, parseSpan, fmtSpan, bytes, pad2, clock, stamp, ago } from "./util.js";
+import { homeHTML, installBlock } from "./home.js";
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
 
-// Everything shown here can come off the network — hostnames, user agents,
-// UPnP strings — so every value goes through esc() or textContent.
-const esc = (v) => String(v ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
-
-const units = { s: 1e3, m: 6e4, h: 36e5, d: 864e5, w: 6048e5 };
-const parseSpan = (s) => { const m = /^(\d+(?:\.\d+)?)([smhdw])$/.exec(s); return m ? Number(m[1]) * units[m[2]] : null; };
-const fmtSpan = (ms) => {
-  for (const [u, v] of [["w", units.w], ["d", units.d], ["h", units.h], ["m", units.m], ["s", units.s]]) {
-    if (ms >= v && ms % v === 0) return `${ms / v}${u}`;
-  }
-  return `${Math.round(ms / 1000)}s`;
-};
-const bytes = (n) => {
-  n = Number(n || 0);
-  if (n < 1000) return `${n}B`;
-  const u = ["kB", "MB", "GB", "TB", "PB"];
-  let i = -1;
-  do { n /= 1000; i++; } while (n >= 1000 && i < u.length - 1);
-  return `${n >= 100 ? n.toFixed(0) : n.toFixed(1)}${u[i]}`;
-};
-const pad2 = (n) => String(n).padStart(2, "0");
-const clock = (ms) => { const d = new Date(ms); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`; };
-const stamp = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${clock(ms)}`; };
 // when is a time in a row or a list: the time of day when the window makes the
 // date obvious, else with it. A carried connection opened yesterday, or any
 // row of a window several days long, would otherwise read as today.
@@ -48,7 +27,7 @@ const state = {
   span: units.h,
   live: false,
   filter: "",
-  tab: "graph",
+  tab: "home",
   gopts: { collapse: true, dns: true, sites: true, anomalies: true, networks: true, identity: false, top: 15 },
   graph: null,
   data: {},
@@ -63,8 +42,25 @@ const state = {
   rec: { on: false, at: Date.now(), lookback: 5 * 60_000, follow: "", playing: false, diffA: 0, view: null, loop: null, diff: null },
 };
 
+// The areas of the app, and the views inside each. A view's name is what links
+// carry, so links from before the areas existed keep working.
+const areas = {
+  home: { tabs: [["home", "Home"]] },
+  map: { tabs: [["graph", "Map"]] },
+  devices: { tabs: [["devices", "Devices"]] },
+  activity: { tabs: [["flows", "Connections"], ["destinations", "Destinations"], ["dns", "DNS"], ["facts", "Facts"]] },
+  findings: { tabs: [["anomalies", "Anomalies"], ["incidents", "Incidents"], ["insights", "Insights"]], tools: `<button id="whatif-open" type="button" title="Test a proposed policy against observed traffic">What-if</button>` },
+  wifi: { tabs: [["wifi", "Wi-Fi"]] },
+  settings: { tabs: [["settings", "General"], ["sensors", "Sensors"]] },
+};
+const areaOf = (t) => Object.keys(areas).find((a) => areas[a].tabs.some(([id]) => id === t));
+// Views that answer about now rather than about the window: the time controls,
+// the Recorder and the filter have nothing to say to them.
+const plainTabs = new Set(["home", "settings", "sensors", "incidents"]);
+
 function loadHash() {
-  const p = new URLSearchParams(location.hash.slice(1));
+  const raw = location.hash.slice(1);
+  const p = new URLSearchParams(raw);
   const num = (k) => { const v = Number(p.get(k)); return Number.isFinite(v) ? v : null; };
   const to = num("to");
   if (to && to > 0) state.to = to;
@@ -73,7 +69,10 @@ function loadHash() {
   if (p.get("from") && to) state.span = Math.max(10_000, state.to - Number(p.get("from")));
   state.live = p.get("live") === "1" || !p.has("to");
   state.filter = p.get("q") || "";
-  if (p.get("tab") && tables[p.get("tab")]) state.tab = p.get("tab");
+  // A bare address lands on Home. A link with a window and no view is from
+  // when the map was the only landing page, and from saveHash, which leaves the
+  // map out.
+  state.tab = areaOf(p.get("tab")) ? p.get("tab") : raw ? "graph" : "home";
   for (const k of ["collapse", "dns", "sites", "anomalies", "networks", "identity"]) if (p.has(k)) state.gopts[k] = p.get(k) === "1";
   const top = num("top");
   if (top === -1 || (top && top >= 1)) state.gopts.top = Math.min(top, 1000);
@@ -156,11 +155,14 @@ const store = {
 
 let token = store.get("netgraph.token") || "";
 
+// api reads JSON. Its query is the window and filter on screen plus extra, or
+// exactly extra when that is already a URLSearchParams.
 async function api(path, extra = {}, raw = false) {
   let retried = false;
+  const query = extra instanceof URLSearchParams ? extra : params(extra);
   for (;;) {
     const headers = token ? { Authorization: `Bearer ${token}` } : {};
-    const resp = await fetch(`/api/v1/${path}?${params(extra)}`, { headers });
+    const resp = await fetch(`/api/v1/${path}?${query}`, { headers });
     if (resp.status === 401) {
       if (retried) {
         token = "";
@@ -308,7 +310,13 @@ async function refresh() {
   if (state.live) state.to = Date.now();
   saveHash();
   renderWindow();
+  document.body.classList.toggle("rec-on", state.rec.on);
   const seq = ++refreshSeq;
+  if (plainTabs.has(state.tab)) {
+    await loadRange();
+    if (seq === refreshSeq) await renderTab(seq);
+    return;
+  }
   const cols = Math.max(Math.floor($("#spark").clientWidth / 3), 30);
   const step = Math.max(Math.floor(state.span / cols / 1000), 1) + "s";
   renderRecorder();
@@ -359,14 +367,6 @@ function loadRange() {
   return dataRangeReq;
 }
 
-const ago = (ms) => {
-  if (ms < units.m) return "moments ago";
-  for (const [n, v] of [["day", units.d], ["hour", units.h], ["minute", units.m]]) {
-    if (ms >= v) { const c = Math.floor(ms / v); return `${c} ${n}${c === 1 ? "" : "s"} ago`; }
-  }
-  return "moments ago";
-};
-
 // emptyAction is what an empty window offers instead of a dead end: the way
 // to data the server holds elsewhere, or the filter hiding it. All of it is
 // our own text and numbers.
@@ -390,12 +390,144 @@ function jumpToLatest() {
   else setWindow(end, state.span);
 }
 
+// --- Home -------------------------------------------------------------------------
+
+// A visit is a session: the page counts as seen while someone keeps coming back
+// within half an hour, and a longer gap starts a new "since you were last here"
+// from where the last session ended.
+const visitGap = 30 * units.m;
+function visitSince() {
+  const now = Date.now();
+  let v = null;
+  try { v = JSON.parse(store.get("netgraph.visit") || "null"); } catch { /* start over */ }
+  if (!v || typeof v.beat !== "number") v = { since: 0, beat: now };
+  else if (now - v.beat > visitGap) v = { since: v.beat, beat: now };
+  else v.beat = now;
+  store.set("netgraph.visit", JSON.stringify(v));
+  return v.since;
+}
+
+let homeState = { at: 0, report: null, findings: null, firstVisit: false };
+const homePoll = () => (homeState.report?.state === "no_data" ? 3000 : 30_000);
+
+function drawHome() {
+  const el = $("#home-body");
+  if (!homeState.report) return;
+  el.innerHTML = homeHTML(homeState.report, homeState.findings, { firstVisit: homeState.firstVisit, origin: location.origin });
+}
+
+// renderHome draws what it has, then the findings when their checks finish: they
+// can take far longer, and the page must not wait for them. An ingest asks for
+// this every couple of seconds, which the landing page does not need.
+async function renderHome(seq, { force = false } = {}) {
+  if (!force && homeState.report && Date.now() - homeState.at < homePoll()) { drawHome(); return; }
+  homeState.at = Date.now();
+  const since = visitSince();
+  homeState.firstVisit = !since;
+  const report = await track(api("home", new URLSearchParams(since ? { since } : {})));
+  if (seq !== refreshSeq) return;
+  const sameSince = homeState.report?.since === report.since;
+  homeState.report = report;
+  if (!sameSince) homeState.findings = null;
+  drawHome();
+  if (report.state === "no_data") return;
+  // At most a day of checks: they read every connection in what they cover.
+  const to = report.as_of + 1;
+  const from = Math.max(report.since, to - units.d);
+  const findings = await track(api("anomalies", new URLSearchParams({ from, to }))).catch(() => null);
+  if (seq !== refreshSeq || !findings) return;
+  findings.from = from;
+  findings.to = to;
+  homeState.findings = findings;
+  drawHome();
+}
+
+function homeClick(e) {
+  const seen = e.target.closest("[data-home-seen]");
+  if (seen) {
+    const now = Date.now();
+    store.set("netgraph.visit", JSON.stringify({ since: now, beat: now }));
+    homeState.findings = null;
+    renderHome(refreshSeq, { force: true }).catch(() => {});
+    return;
+  }
+  const jump = e.target.closest("[data-jump]");
+  if (jump) {
+    const ts = Number(jump.dataset.jump), step = Number(jump.dataset.step);
+    if (state.live) setLive(false);
+    state.to = ts + step;
+    state.span = Math.max(step, units.h);
+    selectTab("graph");
+    return;
+  }
+  if (e.target.closest("[data-home-findings]") && homeState.findings) {
+    if (state.live) setLive(false);
+    state.to = homeState.findings.to;
+    state.span = Math.max(homeState.findings.to - homeState.findings.from, 10_000);
+    selectTab("anomalies");
+    return;
+  }
+  const open = e.target.closest("[data-open]");
+  if (open) { openEntity(open.dataset.open); return; }
+  const tab = e.target.closest("[data-tab]");
+  if (tab) selectTab(tab.dataset.tab);
+}
+
+// --- settings -----------------------------------------------------------------------
+
+function renderSettings() {
+  const r = dataRange;
+  const t = store.get("netgraph.theme") || "";
+  $("#settings-body").innerHTML = `<div class="settings">
+    <section class="card"><h2>Appearance</h2>
+      <div class="segmented" role="group" aria-label="Theme">
+        ${[["", "Match the system"], ["light", "Light"], ["dark", "Dark"]].map(([v, l]) => `<button type="button" data-theme-set="${v}" aria-pressed="${t === v}">${l}</button>`).join("")}
+      </div></section>
+    <section class="card"><h2>Add a sensor</h2>${installBlock(location.origin)}</section>
+    <section class="card"><h2>This browser</h2>
+      <p class="muted">The read token and “since you were last here” are kept in this browser only.</p>
+      <div class="actions"><button type="button" data-forget-token${token ? "" : " disabled"}>Forget the token</button>
+      <button type="button" data-forget-visit>Forget my last visit</button></div></section>
+    <section class="card"><h2>What the server holds</h2>
+      ${r?.last_ms ? `<dl class="facts-list"><dt>Oldest data</dt><dd>${esc(stamp(r.first_ms))}</dd><dt>Newest data</dt><dd>${esc(stamp(r.last_ms))}, ${esc(ago(Date.now() - r.last_ms))}</dd>
+        <dt>Raw records since</dt><dd>${esc(stamp(r.raw_from_ms))}</dd><dt>Hourly totals since</dt><dd>${esc(stamp(r.rollup_from_ms))}</dd></dl>` : `<p class="muted">Nothing yet.</p>`}
+      <p class="muted" id="settings-version"></p></section>
+  </div>`;
+  $("#settings-version").textContent = $("#version").textContent;
+}
+
+function setTheme(t) {
+  if (t) { document.documentElement.dataset.theme = t; store.set("netgraph.theme", t); }
+  else { delete document.documentElement.dataset.theme; store.remove("netgraph.theme"); }
+  diagram.setTheme(theme());
+}
+
+function settingsClick(e) {
+  const th = e.target.closest("[data-theme-set]");
+  if (th) { setTheme(th.dataset.themeSet); renderSettings(); return; }
+  if (e.target.closest("[data-forget-token]")) { token = ""; store.remove("netgraph.token"); renderSettings(); setStatus("Token forgotten"); return; }
+  if (e.target.closest("[data-forget-visit]")) { store.remove("netgraph.visit"); homeState = { at: 0, report: null, findings: null, firstVisit: false }; setStatus("Last visit forgotten"); }
+}
+
+// copyClick copies a command block, saying so on the button.
+async function copyClick(e) {
+  const b = e.target.closest("[data-copy]");
+  if (!b) return;
+  try {
+    await navigator.clipboard.writeText(b.dataset.copy);
+    b.textContent = "Copied";
+  } catch { b.textContent = "Select it to copy"; }
+  setTimeout(() => { b.textContent = "Copy"; }, 2000);
+}
+
 const tablePath = { devices: "devices", flows: "flows", destinations: "destinations", dns: "dns", facts: "facts", wifi: "wifi", sensors: "sensors", anomalies: "anomalies", incidents: "incidents" };
 
 async function renderTab(seq) {
   const t = state.tab;
   try {
     if (t === "graph") return await renderGraph(seq);
+    if (t === "home") return await renderHome(seq);
+    if (t === "settings") return renderSettings();
     if (t === "insights") return await renderInsights(seq);
     const path = tablePath[t];
     const extra = state.limits[t] ? { limit: state.limits[t] } : {};
@@ -2116,12 +2248,27 @@ async function renderDiffBox() {
 
 // --- wiring ---------------------------------------------------------------------------
 
+// Which view of each area was last open, so coming back returns to it.
+const lastInArea = {};
+
 function selectTab(t) {
   state.tab = t;
-  for (const b of $$(".tabs button")) b.setAttribute("aria-selected", String(b.dataset.tab === t));
+  const area = areaOf(t);
+  lastInArea[area] = t;
+  for (const b of $$(".tabs button")) {
+    b.setAttribute("aria-selected", String(b.dataset.area === area));
+    b.tabIndex = b.dataset.area === area ? 0 : -1;
+  }
   for (const v of $$(".view")) v.hidden = v.id !== `view-${t}`;
+  const sub = $("#subtabs"), spec = areas[area];
+  sub.hidden = spec.tabs.length < 2;
+  sub.innerHTML = sub.hidden ? "" : spec.tabs.map(([id, label]) => `<button type="button" data-tab="${id}" aria-current="${id === t ? "page" : "false"}">${label}</button>`).join("") +
+    (spec.tools ? `<span class="spacer"></span>${spec.tools}` : "");
+  document.body.toggleAttribute("data-plain", plainTabs.has(t));
   return refresh();
 }
+
+const selectArea = (area) => selectTab(lastInArea[area] || areas[area].tabs[0][0]);
 
 // closePanel hides the details, and forgets them for links.
 function closePanel() {
@@ -2254,16 +2401,30 @@ function init() {
   $("#filter").oninput = () => { clearTimeout(typing); typing = setTimeout(() => { state.filter = $("#filter").value; refresh(); }, 400); };
   const tabButtons = $$(".tabs button");
   for (const [i, b] of tabButtons.entries()) {
-    b.onclick = () => selectTab(b.dataset.tab);
+    b.onclick = () => selectArea(b.dataset.area);
     b.onkeydown = (e) => {
       if (e.key !== "ArrowRight" && e.key !== "ArrowLeft" && e.key !== "Home" && e.key !== "End") return;
       e.preventDefault();
       const n = e.key === "Home" ? 0 : e.key === "End" ? tabButtons.length - 1
         : (i + (e.key === "ArrowRight" ? 1 : -1) + tabButtons.length) % tabButtons.length;
       tabButtons[n].focus();
-      selectTab(tabButtons[n].dataset.tab);
+      selectArea(tabButtons[n].dataset.area);
     };
   }
+  $("#subtabs").onclick = (e) => {
+    if (e.target.closest("#whatif-open")) { openWhatIf(); return; }
+    const b = e.target.closest("[data-tab]");
+    if (b) selectTab(b.dataset.tab);
+  };
+  $("#home-body").onclick = homeClick;
+  $("#settings-body").onclick = settingsClick;
+  document.addEventListener("click", copyClick);
+  // Home keeps itself current on any window, Live or not; without data it also
+  // watches for the first packets.
+  setInterval(() => {
+    if (state.tab !== "home" || document.hidden || Date.now() - homeState.at < homePoll()) return;
+    renderHome(refreshSeq).catch(() => {});
+  }, 3000);
   $("#summary").onclick = (e) => { const a = e.target.closest("[data-tab]"); if (a) selectTab(a.dataset.tab); };
   for (const [id, k] of [["#g-collapse", "collapse"], ["#g-dns", "dns"], ["#g-sites", "sites"], ["#g-anomalies", "anomalies"], ["#g-networks", "networks"], ["#g-identity", "identity"]]) {
     $(id).onchange = () => { state.gopts[k] = $(id).checked; refresh(); };
@@ -2276,6 +2437,11 @@ function init() {
   if (dg) dg.onchange = () => refresh();
   const inc = $("#incident-status");
   if (inc) inc.onchange = () => refresh();
+  // Only a phone shows this: its screen is for the map, not for the options.
+  $("#g-more").onclick = () => {
+    const open = $(".graph-tools").classList.toggle("open");
+    $("#g-more").setAttribute("aria-expanded", String(open));
+  };
   $("#g-fit").onclick = () => diagram.fit();
   $("#g-arrange").onclick = () => diagram.rearrange();
   $("#g-unhide").onclick = () => { diagram.showHidden(); refresh(); };
@@ -2294,7 +2460,6 @@ function init() {
   document.addEventListener("pointerdown", (e) => { if (!e.target.closest("#map-menu")) closeMapMenu(); });
   matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { diagram.setTheme(theme()); });
   $("#ask-open").onclick = openAsk;
-  $("#whatif-open").onclick = () => openWhatIf();
   $("#whatif-run").onclick = runWhatIf;
   $("#ask-form").onsubmit = async (e) => {
     e.preventDefault();
@@ -2309,26 +2474,24 @@ function init() {
     }
   };
   $("#panel-close").onclick = closePanel;
-  $("#theme").onclick = () => {
-    const next = theme() === "dark" ? "light" : "dark";
-    document.documentElement.dataset.theme = next;
-    store.set("netgraph.theme", next);
-    diagram.setTheme(next);
-    refresh();
-  };
+  $("#theme").onclick = () => { setTheme(theme() === "dark" ? "light" : "dark"); refresh(); };
   document.addEventListener("keydown", (e) => {
     if (e.target.matches("input, select, textarea")) return;
     const k = e.key;
     if (k === "Escape") closePanel();
-    else if (k === "[") $("#back").click();
-    else if (k === "]") $("#fwd").click();
-    else if (k === "l") $("#live").click();
-    else if (k === "t") { e.preventDefault(); $("#recorder").click(); }
+    else if (k === "[") { if (!plainTabs.has(state.tab)) $("#back").click(); }
+    else if (k === "]") { if (!plainTabs.has(state.tab)) $("#fwd").click(); }
+    else if (k === "l") { if (!plainTabs.has(state.tab)) $("#live").click(); }
+    else if (k === "t") {
+      e.preventDefault();
+      if (plainTabs.has(state.tab)) selectTab("graph");
+      $("#recorder").click();
+    }
     else if (k === " ") { if (state.rec.on && !e.target.matches("button, a, input, select, textarea")) { e.preventDefault(); togglePlay(); } }
-    else if (k === "/") { e.preventDefault(); $("#filter").focus(); }
+    else if (k === "/") { if (!plainTabs.has(state.tab)) { e.preventDefault(); $("#filter").focus(); } }
     else if (k === "?") { e.preventDefault(); openAsk(); }
     else if (k === "f") { e.preventDefault(); $("#search").focus(); }
-    else if (k >= "1" && Number(k) <= $$(".tabs button").length) selectTab($$(".tabs button")[Number(k) - 1].dataset.tab);
+    else if (k >= "1" && Number(k) <= $$(".tabs button").length) selectArea($$(".tabs button")[Number(k) - 1].dataset.area);
   });
   brush();
   addEventListener("resize", () => renderSpark(series));
@@ -2350,6 +2513,8 @@ function init() {
     else $("#panel").hidden = true;
   });
   search();
+  // Installable, and survives the server restarting. Needs HTTPS or localhost.
+  if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
   selectTab(state.tab);
   if (state.live) setLive(true);
   // A link with open= starts with those details.

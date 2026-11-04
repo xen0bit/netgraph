@@ -202,19 +202,33 @@ alice-iphone  (Apple · 192.168.1.23)
 ## The web UI
 
 `netgraph serve` serves it at `/`. If the server has a read token, the
-page asks for it once and keeps it in the browser.
+page asks for it once and keeps it in the browser. Over HTTPS or on localhost it
+can be installed as an app; only the app's own files are stored, never data from
+the API.
 
+It has seven areas, on keys `1` to `7`: **Home**, **Map**, **Devices**,
+**Activity** (Connections, Destinations, DNS, Facts), **Findings** (Anomalies,
+Incidents, Insights, What-if), **Wi-Fi** and **Settings** (General, Sensors).
+
+- **Home:** where a bare address lands. Whether sensors are reporting, what's new
+  since you were last here (a gap of over half an hour starts a new visit, and
+  it looks back at most 7 days, 24 hours for findings), who is here, who was busiest in the last hour,
+  and the last day's traffic; click a bar to open the map at that moment. "Now"
+  means the newest data held, and the page says so when that is not now. With no
+  data yet, it shows how to connect a sensor and watches for the first packets.
+- **Settings:** theme, the commands to add a sensor to this server, what this
+  browser remembers, and what the server holds.
 - **Window:** pick presets, type times, shift with ◀ ▶ or `[` `]`, or drag
   across the traffic timeline to zoom into a slice. **Live** follows now
   and refreshes as sensors deliver.
 - **Filter:** the same syntax as the TUI.
 - **Find** (`f`): devices by MAC, name or label, addresses, DNS names and
   networks, as you type; Enter or a click opens the details.
-- **Graph:** devices, the names they looked up and reached, where those
+- **Map:** devices, the names they looked up and reached, where those
   pointed, and the clients that connected in to them (see [the
   graph](concepts.md#the-graph) for how it stays readable). Every
   connection points from client to server, labelled with the server's port;
-  a legend under the map says how to read it. Width is volume, and dots flow
+  "How to read the map" under it has the legend. Width is volume, and dots flow
   along an edge to show direction and rate.
 
   The map keeps its places. The router sits in the middle with the devices
@@ -265,9 +279,9 @@ page asks for it once and keeps it in the browser.
   returns, with times in ISO 8601; text that a spreadsheet would run as a
   formula (including after leading whitespace) is prefixed with `'`. The Wi-Fi table lists only networks reported by a
   monitor-mode sensor; it stays empty on an Ethernet-only deployment.
-- **Links:** the address bar holds the window, filter, tab, graph options,
+- **Links:** the address bar holds the window, filter, view, graph options,
   a table's sort and the details that are open, so a copied link shows the
-  same view.
+  same view. A link with a window and no view opens the map, as it always did.
 - **Details:** an entity's relationships in the window, its connections,
   and a timeline merging DHCP, mDNS, ARP/NDP, lookups and connections
   opening and closing. A device's panel has a **Rename** box: your name
