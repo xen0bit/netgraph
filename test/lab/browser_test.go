@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
 )
@@ -227,6 +228,7 @@ func checkWebUI(t *testing.T, devtools, ui, token, shotDir string, expect []stri
 		err = chromedp.Run(ctx,
 			chromedp.Navigate(ui+"/healthz"),
 			chromedp.Evaluate(`localStorage.removeItem("netgraph.token")`, nil),
+			network.ClearBrowserCookies(),
 			chromedp.Navigate(fmt.Sprintf("%s/#from=%d&to=%d", ui, now-2*3600*1000, now+60*1000)),
 			chromedp.WaitVisible(`#token-dialog[open]`, chromedp.ByQuery),
 			chromedp.SendKeys(`#token-input`, token, chromedp.ByQuery),

@@ -481,6 +481,12 @@ form.profile output { grid-column: 1 / -1; }
 .ask-warn { margin: var(--sp-1) 0 0; padding: var(--sp-1) var(--sp-2); border-left: 3px solid var(--warn); }
 .ask-map { height: 240px; min-height: 0; flex: none; margin-top: var(--sp-2); border: 1px solid var(--border); border-radius: var(--radius); }
 
+/* A viewer can't change things: don't offer them. The server refuses regardless. */
+body[data-role="viewer"] form.rename, body[data-role="viewer"] form.profile, body[data-role="viewer"] .finding-actions,
+body[data-role="viewer"] .finding-note, body[data-role="viewer"] #rec-note, body[data-role="viewer"] #rec-bookmark,
+body[data-role="viewer"] #view-links .actions, body[data-role="viewer"] [data-findings-seen],
+body[data-role="viewer"] #ask-model { display: none; }
+
 /* Phones: the window is presets only, everything is one column, and what isn't
    the map folds away on the map. */
 @media (max-width: 760px) {

@@ -264,11 +264,35 @@ function askToken() {
   return tokenPrompt;
 }
 
+// saveToken trades a token that worked for a session cookie scripts can't read, and
+// then stops holding it. If that can't happen, it stays in this browser, as it used to.
+let exchanging = null;
 function saveToken() {
-  if (!token) return;
-  store.set("netgraph.token", token)
   $("#connect").hidden = true;
+  if (!token || exchanging) return;
+  const used = token;
+  exchanging = fetch("/api/v1/session", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ token: used }) })
+    .then((r) => {
+      if (!r.ok) throw new Error(String(r.status));
+      store.remove("netgraph.token");
+      if (token === used) token = "";
+      loadMe();
+    })
+    .catch(() => store.set("netgraph.token", used))
+    .finally(() => { exchanging = null; });
 }
+
+// Who this page is talking as.
+let me = null;
+function loadMe() {
+  return api("me", new URLSearchParams()).then((m) => {
+    me = m;
+    document.body.dataset.role = m.role;
+    if (state.tab === "settings") renderSettings();
+    return m;
+  }).catch(() => null);
+}
+const can = (role) => { const order = { viewer: 1, operator: 2, admin: 3 }; return !me || order[me.role] >= order[role]; };
 
 function needAuth() {
   setStatus("Read token required", true);
@@ -625,13 +649,14 @@ function renderSettings() {
       <div class="segmented" role="group" aria-label="Theme">
         ${[["", "Match the system"], ["light", "Light"], ["dark", "Dark"]].map(([v, l]) => `<button type="button" data-theme-set="${v}" aria-pressed="${t === v}">${l}</button>`).join("")}
       </div></section>
+    ${can("admin") && me ? `<section class="card"><h2>What's been changed</h2><div id="settings-audit" class="muted">Reading…</div></section>` : ""}
     <section class="card"><h2>Notifications</h2><div id="settings-notify" class="muted">Reading…</div></section>
     <section class="card"><h2>Saved views</h2>
       ${savedViews().length ? `<ul class="saved-list">${savedViews().map((v, i) => `<li><span><b>${esc(v.name)}</b> <span class="muted">${esc(v.tab)}${v.filter ? ` · ${esc(v.filter)}` : ""}</span></span> <button type="button" data-view-delete="${i}">Delete</button></li>`).join("")}</ul>` : `<p class="muted">None yet. “Save view” above any table or the map keeps its filter and window length, in this browser.</p>`}</section>
     <section class="card"><h2>Add a sensor</h2>${installBlock(location.origin)}</section>
-    <section class="card"><h2>This browser</h2>
-      <p class="muted">The read token and “since you were last here” are kept in this browser only.</p>
-      <div class="actions"><button type="button" data-forget-token${token ? "" : " disabled"}>Forget the token</button>
+    <section class="card"><h2>You</h2>
+      <p>${me ? `${me.user ? `<b>${esc(me.user)}</b>, a` : "A"} ${esc(me.role)}${{ proxy: ", as your login proxy says", token: ", with a token", session: ", signed in with a token", open: ": this server needs no sign-in" }[me.via] || ""}.` : "Reading…"}</p>
+      <div class="actions"><button type="button" data-sign-out${me?.via === "session" || me?.via === "token" ? "" : " disabled"}>Sign out of this browser</button>
       <button type="button" data-forget-visit>Forget my last visit</button></div></section>
     <section class="card"><h2>What the server holds</h2>
       ${r?.last_ms ? `<dl class="facts-list"><dt>Oldest data</dt><dd>${esc(stamp(r.first_ms))}</dd><dt>Newest data</dt><dd>${esc(stamp(r.last_ms))}, ${esc(ago(Date.now() - r.last_ms))}</dd>
@@ -639,6 +664,15 @@ function renderSettings() {
       <p class="muted" id="settings-version"></p></section>
   </div>`;
   $("#settings-version").textContent = $("#version").textContent;
+  if ($("#settings-audit")) {
+    api("audit", new URLSearchParams({ limit: 50 })).then((rows) => {
+      const el = $("#settings-audit");
+      if (!el) return;
+      el.innerHTML = rows.length
+        ? `<table class="mini"><thead><tr><th>When</th><th>Who</th><th>What</th><th>On</th></tr></thead><tbody>${rows.map((a) => `<tr><td>${esc(stamp(a.ts))}</td><td>${esc(a.actor)}</td><td>${esc(a.action.replace("/api/v1/", ""))}</td><td class="mono">${esc(a.target)}</td></tr>`).join("")}</tbody></table>`
+        : "Nothing yet.";
+    }).catch(() => { const el = $("#settings-audit"); if (el) el.textContent = "Can't read it."; });
+  }
   api("notify", new URLSearchParams()).then((n) => {
     const el = $("#settings-notify");
     if (!el) return;
@@ -666,7 +700,12 @@ function settingsClick(e) {
   }
   const th = e.target.closest("[data-theme-set]");
   if (th) { setTheme(th.dataset.themeSet); renderSettings(); return; }
-  if (e.target.closest("[data-forget-token]")) { token = ""; store.remove("netgraph.token"); renderSettings(); setStatus("Token forgotten"); return; }
+  if (e.target.closest("[data-sign-out]")) {
+    token = "";
+    store.remove("netgraph.token");
+    fetch("/api/v1/session", { method: "DELETE", headers: { "Content-Type": "application/json" } }).finally(() => location.reload());
+    return;
+  }
   const del = e.target.closest("[data-view-delete]");
   if (del) { const v = savedViews(); v.splice(Number(del.dataset.viewDelete), 1); saveViews(v); renderSettings(); return; }
   if (e.target.closest("[data-forget-visit]")) { store.remove("netgraph.visit"); homeState = { at: 0, report: null, findings: null, firstVisit: false, links: 0 }; setStatus("Last visit forgotten"); }
@@ -3214,6 +3253,7 @@ function init() {
     else $("#panel").hidden = true;
   });
   search();
+  loadMe();
   // Installable, and survives the server restarting. Needs HTTPS or localhost.
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
   selectTab(state.tab);

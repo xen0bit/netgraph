@@ -228,33 +228,7 @@ func TestShellInstallsAndCachesNoData(t *testing.T) {
 // The first run: a server with nothing shows how to connect a sensor to it, and
 // notices the first packets by itself.
 func TestFirstRunWaitsForPackets(t *testing.T) {
-	dir := t.TempDir()
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	addr := l.Addr().String()
-	l.Close()
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	srv := exec.CommandContext(ctx, server, "serve", "-db", filepath.Join(dir, "ng.db"), "-listen", addr, "-no-auth", "-web-dir", webDir)
-	srv.Stderr = os.Stderr
-	if err := srv.Start(); err != nil {
-		t.Fatal(err)
-	}
-	defer func() { cancel(); _ = srv.Wait() }()
-	url := "http://" + addr
-	for i := 0; ; i++ {
-		resp, err := http.Get(url + "/healthz")
-		if err == nil {
-			resp.Body.Close()
-			break
-		}
-		if i > 100 {
-			t.Fatal(err)
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+	url := startServer(t)
 	s := openAt(t, url, "", "")
 	s.waitFor("the welcome", `!!document.querySelector("#home-body .first-run .waiting")`)
 	var text string
@@ -280,5 +254,38 @@ func TestHiddenMeansHidden(t *testing.T) {
 		if len(shown) != 0 {
 			t.Errorf("%q: hidden but displayed: %v", hash, shown)
 		}
+	}
+}
+
+// startServer runs a server of the test's own, empty unless given a -db.
+func startServer(t *testing.T, args ...string) string {
+	t.Helper()
+	dir := t.TempDir()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := l.Addr().String()
+	l.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	all := append([]string{"serve", "-db", filepath.Join(dir, "ng.db"), "-listen", addr, "-no-auth", "-web-dir", webDir}, args...)
+	srv := exec.CommandContext(ctx, server, all...)
+	srv.Stderr = os.Stderr
+	if err := srv.Start(); err != nil {
+		cancel()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cancel(); _ = srv.Wait() })
+	url := "http://" + addr
+	for i := 0; ; i++ {
+		resp, err := http.Get(url + "/healthz")
+		if err == nil {
+			resp.Body.Close()
+			return url
+		}
+		if i > 100 {
+			t.Fatal(err)
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }

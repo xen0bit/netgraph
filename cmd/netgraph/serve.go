@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/netip"
 	"net/url"
 	"os"
 	"os/signal"
@@ -35,6 +36,11 @@ func runServe(args []string) error {
 	listen := fs.String("listen", envOr("NETGRAPH_LISTEN", ":8443"), "listen address; $NETGRAPH_LISTEN")
 	tokenFile := fs.String("token-file", "", "file holding the sensors' ingest token (default $NETGRAPH_TOKEN)")
 	readTokenFile := fs.String("read-token-file", etcCredential("read.token"), "file holding the token for queries and the web UI (default $NETGRAPH_READ_TOKEN; under the systemd unit, /etc/netgraph/read.token; none: open)")
+	operatorTokenFile := fs.String("operator-token-file", "", "file holding the token for changing things: labels, notes, findings. With this set, the read token only reads; default $NETGRAPH_OPERATOR_TOKEN")
+	adminTokenFile := fs.String("admin-token-file", "", "file holding the token for the audit log and test notifications; default $NETGRAPH_ADMIN_TOKEN")
+	trustedProxy := fs.String("trusted-proxy", "", "comma-separated addresses or CIDRs of a reverse proxy to trust to say who someone is")
+	proxyHeader := fs.String("proxy-user-header", "Remote-User", "the header a -trusted-proxy names the user in")
+	proxyRoles := fs.String("proxy-roles-file", "", `with -trusted-proxy, lines of "user role" (viewer, operator or admin); "* role" sets the default, otherwise viewer`)
 	noAuth := fs.Bool("no-auth", false, "accept ingest without a token (trusted networks only)")
 	cert := fs.String("tls-cert", etcCredential("tls.crt"), "TLS certificate (PEM); under the systemd unit, /etc/netgraph/tls.crt")
 	key := fs.String("tls-key", etcCredential("tls.key"), "TLS key (PEM); under the systemd unit, /etc/netgraph/tls.key")
@@ -72,6 +78,18 @@ func runServe(args []string) error {
 		return err
 	}
 	readTok, err := readSecret(*readTokenFile, "NETGRAPH_READ_TOKEN")
+	if err != nil {
+		return err
+	}
+	operatorTok, err := readSecret(*operatorTokenFile, "NETGRAPH_OPERATOR_TOKEN")
+	if err != nil {
+		return err
+	}
+	adminTok, err := readSecret(*adminTokenFile, "NETGRAPH_ADMIN_TOKEN")
+	if err != nil {
+		return err
+	}
+	proxy, err := readProxyAuth(*trustedProxy, *proxyHeader, *proxyRoles)
 	if err != nil {
 		return err
 	}
@@ -199,7 +217,7 @@ func runServe(args []string) error {
 	}
 	defer st.Close()
 
-	cfg := api.Config{Store: st, IngestToken: ingestTok, ReadToken: readTok, WiFi: wifiKeys, Web: web.FS, Logger: log}
+	cfg := api.Config{Store: st, IngestToken: ingestTok, ReadToken: readTok, OperatorToken: operatorTok, AdminToken: adminTok, Proxy: proxy, WiFi: wifiKeys, Web: web.FS, Logger: log}
 	if notifier != nil { // not a nil pointer in an interface
 		cfg.Notify = notifier
 	}
@@ -227,7 +245,7 @@ func runServe(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	go reloadTokens(ctx, apiSrv, *tokenFile, *readTokenFile, *noAuth, log)
+	go reloadTokens(ctx, apiSrv, *tokenFile, *readTokenFile, *operatorTokenFile, *adminTokenFile, *noAuth, log)
 	go st.RunRetention(ctx, time.Hour)
 	var anomalyAlerts *alert.Notifier
 	if notifier != nil && *alertAnomalies != "" {
@@ -484,6 +502,59 @@ func readBridge(file string, log *slog.Logger) (*hass.Config, error) {
 	return &c, nil
 }
 
+// readProxyAuth reads who to trust to say who someone is. Nil if nobody.
+func readProxyAuth(trusted, header, rolesFile string) (*api.ProxyAuth, error) {
+	if strings.TrimSpace(trusted) == "" {
+		if rolesFile != "" {
+			return nil, errors.New("-proxy-roles-file needs -trusted-proxy")
+		}
+		return nil, nil
+	}
+	p := &api.ProxyAuth{Header: header, Roles: map[string]api.Role{}, Default: api.RoleViewer}
+	for _, t := range strings.Split(trusted, ",") {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
+		pre, err := netip.ParsePrefix(t)
+		if err != nil {
+			a, aerr := netip.ParseAddr(t)
+			if aerr != nil {
+				return nil, fmt.Errorf("-trusted-proxy: %q is not an address or CIDR", t)
+			}
+			pre = netip.PrefixFrom(a, a.BitLen())
+		}
+		p.Trusted = append(p.Trusted, pre.Masked())
+	}
+	if rolesFile == "" {
+		return p, nil
+	}
+	b, err := os.ReadFile(rolesFile)
+	if err != nil {
+		return nil, fmt.Errorf("-proxy-roles-file: %w", err)
+	}
+	for i, line := range strings.Split(string(b), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		f := strings.Fields(line)
+		if len(f) != 2 {
+			return nil, fmt.Errorf("-proxy-roles-file, line %d: want \"user role\"", i+1)
+		}
+		role, ok := api.ParseRole(f[1])
+		if !ok {
+			return nil, fmt.Errorf("-proxy-roles-file, line %d: a role is viewer, operator or admin", i+1)
+		}
+		if f[0] == "*" {
+			p.Default = role
+		} else {
+			p.Roles[f[0]] = role
+		}
+	}
+	return p, nil
+}
+
 // readLLM reads the language model's URL from a file or the environment; it can hold
 // a key. Nil means there's none, which is the default.
 func readLLM(file string, log *slog.Logger) (*llm.Config, error) {
@@ -514,7 +585,7 @@ func readLLM(file string, log *slog.Logger) (*llm.Config, error) {
 // reloadTokens re-reads the token files on SIGHUP. A failed read keeps the
 // previous credentials; a flag with no file and no environment variable is
 // left alone rather than silently becoming open.
-func reloadTokens(ctx context.Context, srv *api.Server, ingestFile, readFile string, noAuth bool, log *slog.Logger) {
+func reloadTokens(ctx context.Context, srv *api.Server, ingestFile, readFile, operatorFile, adminFile string, noAuth bool, log *slog.Logger) {
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
 	defer signal.Stop(hup)
@@ -541,6 +612,17 @@ func reloadTokens(ctx context.Context, srv *api.Server, ingestFile, readFile str
 				}
 			}
 			srv.SetTokens(ingest, read)
+			operator, err := readSecret(operatorFile, "NETGRAPH_OPERATOR_TOKEN")
+			if err != nil {
+				log.Error("reload operator token; keeping the role tokens", "err", err)
+				continue
+			}
+			admin, err := readSecret(adminFile, "NETGRAPH_ADMIN_TOKEN")
+			if err != nil {
+				log.Error("reload admin token; keeping the role tokens", "err", err)
+				continue
+			}
+			srv.SetRoleTokens(operator, admin)
 			log.Info("reloaded tokens")
 		}
 	}

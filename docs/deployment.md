@@ -59,6 +59,11 @@ netgraph serve -db /var/lib/netgraph/netgraph.db -listen :8443
 | `-fact-gap` | `1h` | silence after which a relationship starts a new period |
 | `-asn-file` | `$NETGRAPH_ASN_FILE`; release builds: built in | an ASN table: the network and country of remote addresses ([networks](#networks-and-countries)); `none` for no table |
 | `-notify-file` | `$NETGRAPH_NOTIFY` | notification channels, one URL a line: see [Notifications](#notifications) |
+| `-operator-token-file` | `$NETGRAPH_OPERATOR_TOKEN` | the token for changing things. With this or an admin token set, the read token only reads: see [Who can do what](#who-can-do-what) |
+| `-admin-token-file` | `$NETGRAPH_ADMIN_TOKEN` | the token for the audit log and test notifications |
+| `-trusted-proxy` | | addresses or CIDRs of a reverse proxy to trust to say who someone is |
+| `-proxy-user-header` | `Remote-User` | the header it says so in |
+| `-proxy-roles-file` | | lines of `user role`; `* role` sets the default, otherwise `viewer` |
 | `-llm-file` | `$NETGRAPH_LLM` | let Ask use a language model: an OpenAI-compatible URL such as `http://localhost:11434/v1?model=llama3.2`, or `https://api.example.com/v1?model=name&key=KEY`. Off by default: a model on another network receives your network's data, and the page warns before sending any |
 | `-mqtt-file` | `$NETGRAPH_MQTT` | publish to Home Assistant: see [Home Assistant](#home-assistant) |
 | `-alert-webhook` | `$NETGRAPH_ALERT_WEBHOOK` | POST a JSON alert when a new device joins, and optionally for anomalies and scheduled reports ([alerts](#new-device-alerts)) |
@@ -158,6 +163,44 @@ are looked up when it loads; `netgraph db enrich` does the same for a
 database offline, with the built-in table or `-asn-file`. The networks'
 names are kept in the database, so `netgraph query` reading the file shows
 them without the table.
+
+### Who can do what
+
+| Role | Can |
+|---|---|
+| `viewer` | read everything, ask questions, try what-if |
+| `operator` | also rename devices and set their type and owner, write notes, act on findings and incidents, pin the map, and ask a language model |
+| `admin` | also read the audit log and send test notifications |
+
+**Nothing changes until you set one of these.** With only `-read-token-file`, the read
+token does everything, as it always has. Add `-operator-token-file` and it only reads.
+Without `-admin-token-file` the operator token is the highest there is, so it's admin too.
+
+The page trades whichever token you give it for a session cookie that scripts can't
+read, lasting 30 days, and stops keeping the token. Changing a token ends every session
+it started. "Sign out" only makes this browser forget: anyone who copied the cookie
+keeps it until then. `SIGHUP` reloads the tokens.
+
+**Behind a login proxy** such as Authelia, say which addresses to trust, and who's who:
+
+```sh
+netgraph serve -trusted-proxy 172.18.0.0/16 -proxy-roles-file roles
+```
+```
+alice admin
+bob operator
+* viewer
+```
+
+The header counts only from those addresses, so make sure nothing else can reach this
+server: anyone who can connect from a trusted address can claim to be anyone. Notes and
+incident updates are then signed with the name. Requests that rely on a cookie must come
+from this site, so a proxy that rewrites `Host` will have its writes refused.
+
+Every change made through the API is logged, with who made it; admins see it in
+Settings, and at `GET /api/v1/audit`. `db forget` and `db purge` erase entries about what
+they remove, and it follows the rollups' retention. Changes made directly to the database
+file, such as `netgraph label` without `-server`, aren't logged.
 
 ### Notifications
 

@@ -64,6 +64,11 @@ that are easy to break.
   neither MCP nor the LLM mode can change anything; keep it that way. A model's
   statement with no real tool call behind it is dropped (`llm.finish`). LLM use is off
   unless configured, and asked for per question, and a model off the network warns first.
+- **Every route but ingest goes through `Server.require`** with the least role it
+  needs: reads are `RoleViewer`, changes `RoleOperator`. Until an operator or admin token
+  exists, the read token does everything, so upgrading never changes who can do what. A
+  proxy's user header counts only from `-trusted-proxy` addresses, and cookie-borne
+  changes must pass `sameOrigin`.
 - **d2 keys are always quoted** (`graph.quote`): an unquoted
   `example.com` or address is parsed as nested containers.
 - **A device's type is a judgement.** `internal/classify` is a pure function over

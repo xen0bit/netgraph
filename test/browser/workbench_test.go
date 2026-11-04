@@ -4,7 +4,9 @@ package browser
 
 import (
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -453,5 +455,68 @@ func TestAModelElsewhereAsksFirst(t *testing.T) {
 	s.eval(`document.querySelector("#ask-dialog").open`, &open)
 	if !open {
 		t.Error("a tool citation closed the dialog")
+	}
+}
+
+// The page trades a stored token for a cookie scripts can't read, and stops holding it.
+func TestTokenBecomesASession(t *testing.T) {
+	s := open(t, window()+"&tab=devices", "")
+	s.settle()
+	s.waitFor("the token gone", `localStorage.getItem("netgraph.token") === null`)
+	var cookies string
+	s.eval(`document.cookie`, &cookies)
+	if strings.Contains(cookies, "netgraph_session") {
+		t.Errorf("scripts can read the session: %q", cookies)
+	}
+	s.run(chromedp.Reload())
+	s.waitFor("rows with no token", `document.querySelectorAll("#t-devices tbody tr[data-i]").length > 0`)
+	var dialog bool
+	s.eval(`document.querySelector("#token-dialog").open`, &dialog)
+	if dialog {
+		t.Error("it asked for the token again")
+	}
+	for _, u := range s.seen("/api/v1/") {
+		if strings.Contains(u, journeyTokenInURL) {
+			t.Errorf("a token in a URL: %s", u)
+		}
+	}
+	s.eval(`document.querySelector('.tabs [data-area="settings"]').click()`, nil)
+	s.waitFor("who it is", `document.querySelector("#settings-body").textContent.includes("signed in with a token")`)
+	s.run(chromedp.Click(`[data-sign-out]`, chromedp.ByQuery))
+	s.waitFor("the question again", `document.querySelector("#token-dialog").open`)
+}
+
+const journeyTokenInURL = "token="
+
+// A viewer sees no controls it can't use, and the server refuses it regardless.
+func TestViewerGetsAReadOnlyPage(t *testing.T) {
+	dir := t.TempDir()
+	read, op := filepath.Join(dir, "read"), filepath.Join(dir, "op")
+	if err := os.WriteFile(read, []byte(readToken), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(op, []byte("the-operator-token"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	url := startServer(t, "-read-token-file", read, "-operator-token-file", op)
+	if out, err := exec.Command(sensor, "run", "-pcap", replay, "-server", url, "-name", "viewer").CombinedOutput(); err != nil {
+		t.Fatalf("sensor: %v\n%s", err, out)
+	}
+	s := openAt(t, url, window()+"&tab=devices", "")
+	s.waitFor("a device", `document.querySelectorAll("#t-devices tbody tr[data-i]").length > 0`)
+	s.waitFor("its role", `document.body.dataset.role === "viewer"`)
+	s.run(chromedp.Click(`#t-devices tbody tr[data-i]`, chromedp.ByQuery))
+	s.waitFor("details", `!!document.querySelector("#panel form.profile")`)
+	var shown bool
+	s.eval(`document.querySelector("#panel form.rename").offsetParent !== null || document.querySelector("#panel form.profile").offsetParent !== null`, &shown)
+	if shown {
+		t.Error("a viewer is offered renaming")
+	}
+	var status int
+	if err := chromedp.Run(s.ctx, chromedp.Evaluate(`fetch("/api/v1/annotations", {method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify({ts: 1000, kind: "note", text: "x"})}).then((r) => r.status)`, &status, awaitPromise)); err != nil {
+		t.Fatal(err)
+	}
+	if status != 403 {
+		t.Errorf("a viewer's write: %d", status)
 	}
 }
