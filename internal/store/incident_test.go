@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -47,6 +48,10 @@ func TestIncidentLifecycleAndAutopsy(t *testing.T) {
 	}
 	if err := st.PinEvidence(ctx, inc.ID, "timeline:1"); err != nil {
 		t.Fatal(err)
+	}
+	bundle, err := st.ExportIncident(ctx, inc.ID)
+	if err != nil || !strings.Contains(string(bundle), "netgraph.incident.v1") {
+		t.Fatalf("bundle = %.120s %v", bundle, err)
 	}
 	if err := st.DeleteIncident(ctx, inc.ID); err != nil {
 		t.Fatal(err)

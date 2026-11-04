@@ -52,6 +52,7 @@ func (s *Store) EmergencyTrim(ctx context.Context, target int64, allowRollups bo
 			{&r.DNS, `DELETE FROM dns WHERE rowid IN (SELECT rowid FROM dns ORDER BY ts LIMIT 5000)`},
 			{&r.Answers, `DELETE FROM dns_answers WHERE rowid IN (SELECT rowid FROM dns_answers ORDER BY expires LIMIT 5000)`},
 			{&r.Observations, `DELETE FROM observations WHERE rowid IN (SELECT rowid FROM observations ORDER BY ts LIMIT 5000)`},
+			{&r.Timeline, `DELETE FROM timeline_events WHERE rowid IN (SELECT rowid FROM timeline_events WHERE ` + timelineDerived + ` ORDER BY ts LIMIT 5000)`},
 		}
 		if allowRollups {
 			// Facts are kept as long as rollups (RollupRetention), so

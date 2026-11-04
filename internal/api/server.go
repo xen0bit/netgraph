@@ -145,6 +145,7 @@ func New(cfg Config) *Server {
 	read("/api/v1/coverage", s.coverage)
 	read("/api/v1/airspace", s.airspace)
 	read("/api/v1/weather", s.weather)
+	read("/api/v1/capsule", s.capsule)
 	read("/api/v1/annotations", s.annotations)
 	read("/api/v1/bookmarks", s.bookmarks)
 	read("/api/v1/autopsy", s.autopsyPreview)
@@ -840,19 +841,9 @@ func (s *Server) frame(w http.ResponseWriter, r *http.Request) {
 		f.From = f.To.Add(-lb)
 	}
 	scope := q.Get("scope")
-	if scope != "" {
-		kind, key, _ := strings.Cut(scope, ":")
-		switch kind {
-		case "device":
-			f.Device = key
-		case "domain":
-			f.DomainExact = key
-		case "ip":
-			f.IP = key
-		default:
-			httpError(w, http.StatusBadRequest, fmt.Errorf("unknown scope %q", scope))
-			return
-		}
+	if err := f.ApplyScope(scope); err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
 	}
 	if q.Get("limit") == "" {
 		f.Limit = 1000
@@ -1093,6 +1084,12 @@ func (s *Server) autopsyPreview(w http.ResponseWriter, r *http.Request) {
 		Device: q.Get("device"), DeviceName: q.Get("device_name"),
 		Entity: q.Get("entity"), Summary: q.Get("summary"),
 	}
+	if raw := q.Get("evidence"); raw != "" {
+		if err := json.Unmarshal([]byte(raw), &a.Evidence); err != nil {
+			httpError(w, http.StatusBadRequest, fmt.Errorf("evidence: %w", err))
+			return
+		}
+	}
 	if a.Kind == "" {
 		httpError(w, http.StatusBadRequest, errors.New("kind is required"))
 		return
@@ -1160,10 +1157,6 @@ func (s *Server) createIncident(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in); err != nil {
 		httpError(w, http.StatusBadRequest, err)
-		return
-	}
-	if in.Anomaly.Kind == "" {
-		httpError(w, http.StatusBadRequest, errors.New("anomaly.kind is required"))
 		return
 	}
 	from, to := time.Time{}, time.Time{}
@@ -1258,21 +1251,7 @@ func (s *Server) exportIncident(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, err)
 		return
 	}
-	d, err := s.cfg.Store.IncidentDetail(r.Context(), id)
-	if err != nil {
-		s.fail(w, err)
-		return
-	}
-	a, err := s.cfg.Store.IncidentAutopsy(r.Context(), id)
-	if err != nil {
-		s.fail(w, err)
-		return
-	}
-	bundle := map[string]any{
-		"schema": "netgraph.incident.v1", "incident": d, "autopsy": a,
-		"generated": time.Now().UTC().Format(time.RFC3339),
-	}
-	b, err := json.MarshalIndent(bundle, "", "  ")
+	b, err := s.cfg.Store.ExportIncident(r.Context(), id)
 	if err != nil {
 		s.fail(w, err)
 		return

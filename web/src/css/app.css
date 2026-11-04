@@ -223,7 +223,10 @@ dialog menu { padding: 0; margin: 12px 0 0; display: flex; justify-content: flex
 
 /* Autopsy reel. */
 dialog.autopsy { max-width: 860px; width: min(860px, 94vw); max-height: 88vh; }
-dialog.autopsy .close { position: sticky; float: right; top: 0; }
+dialog > form > .close { position: sticky; float: right; top: 0; }
+.incident-tools { border-bottom: 1px solid var(--line); padding-bottom: 10px; }
+.incident-tools .actions { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.incident-tools .actions input { flex: 1 1 180px; width: auto; }
 dialog.autopsy .scene { border-top: 1px solid var(--line); padding: 10px 0; }
 dialog.autopsy .scene h3 { margin: 0 0 4px; text-transform: capitalize; }
 dialog.autopsy .evidence { margin: 6px 0 8px 18px; padding: 0; }

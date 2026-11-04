@@ -268,10 +268,15 @@ func checkWebUI(t *testing.T, devtools, ui, token, shotDir string, expect []stri
 		chromedp.SendKeys(`#note-text`, "lab recorder note", chromedp.ByQuery),
 		chromedp.Click(`#note-save`, chromedp.ByQuery),
 		chromedp.Poll(`document.querySelector("#event-rail").textContent.includes("lab recorder note")`, nil, chromedp.WithPollingTimeout(20*time.Second)),
+		// Stepping must move the moment and redraw: the page handler below
+		// reports a throw, and the clock must change.
+		chromedp.Evaluate(`window.__recBefore = document.querySelector("#rec-time").textContent`, nil),
+		chromedp.Click(`#rec-back`, chromedp.ByQuery),
+		chromedp.Poll(`document.querySelector("#rec-time").textContent !== window.__recBefore`, nil, chromedp.WithPollingTimeout(10*time.Second)),
 		chromedp.Click(`#ask-open`, chromedp.ByQuery),
 		chromedp.WaitVisible(`#ask-q`, chromedp.ByQuery),
 		chromedp.SendKeys(`#ask-q`, "what did lab-laptop do?", chromedp.ByQuery),
-		chromedp.Click(`#ask-form button`, chromedp.ByQuery),
+		chromedp.Click(`#ask-form button[type=submit]`, chromedp.ByQuery),
 		chromedp.WaitVisible(`#ask-answer b`, chromedp.ByQuery),
 		chromedp.Text(`#ask-answer`, &answer, chromedp.ByQuery),
 		chromedp.Evaluate(`document.querySelector("#ask-dialog").close()`, nil),

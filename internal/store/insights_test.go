@@ -2,8 +2,13 @@ package store
 
 import (
 	"context"
+	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/xen0bit/netgraph/internal/model"
+	"github.com/xen0bit/netgraph/internal/testutil"
+	"github.com/xen0bit/netgraph/internal/wire"
 )
 
 func TestInsights(t *testing.T) {
@@ -36,5 +41,110 @@ func TestInsights(t *testing.T) {
 	}
 	if len(w.Points) == 0 || w.StepMS == 0 {
 		t.Fatalf("weather = %+v", w)
+	}
+}
+
+// wifiInsights holds one protected network with an open twin, one new access
+// point on it, a WEP network, a WPA network, and a radio known only through
+// its clients.
+func wifiInsights(t *testing.T) (*Store, model.Filter) {
+	t.Helper()
+	ctx := context.Background()
+	at := testutil.Base.Add(30 * 24 * time.Hour)
+	st, err := Open(filepath.Join(t.TempDir(), "ng.db"), Config{Now: func() time.Time { return at.Add(time.Hour) }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	beacon := func(seq uint64, ts time.Time, bssid, ssid, sec string) wire.Event {
+		return wire.Event{Seq: seq, Type: wire.TypeWiFi, TS: ts, WiFi: &wire.WiFi{Kind: "beacon", BSSID: bssid, SSID: ssid, Channel: 6, Security: sec}}
+	}
+	if _, err := st.Ingest(ctx, "mon", "boot", []wire.Event{
+		beacon(1, at, "aa:bb:cc:00:00:01", "home", "wpa2"),
+		beacon(2, at.Add(time.Minute), "aa:bb:cc:00:00:02", "home", "open"),
+		beacon(3, at, "aa:bb:cc:00:00:03", "old", "wep"),
+		beacon(4, at, "aa:bb:cc:00:00:04", "older", "wpa"),
+		beacon(5, at, "aa:bb:cc:00:00:05", "modern", "wpa3"),
+		{Seq: 6, Type: wire.TypeWiFi, TS: at, WiFi: &wire.WiFi{Kind: "association_request", BSSID: "aa:bb:cc:00:00:06", Client: "3c:22:fb:01:02:03"}},
+		{Seq: 7, Type: wire.TypeWiFi, TS: at, WiFi: &wire.WiFi{Kind: "association_request", BSSID: "aa:bb:cc:00:00:01", Client: "3c:22:fb:01:02:03", SSID: "home"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	return st, model.Filter{From: at.Add(-time.Hour), To: at.Add(time.Hour)}
+}
+
+func TestExposureWeakWiFi(t *testing.T) {
+	st, f := wifiInsights(t)
+	rep, err := st.Exposure(context.Background(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[string]string{}
+	for _, x := range rep.Findings {
+		if x.Kind == "wifi_weak_security" {
+			got[x.Label] = x.Severity
+		}
+	}
+	want := map[string]string{"home": model.SeverityHigh, "old": model.SeverityHigh, "older": model.SeverityMedium}
+	if len(got) != len(want) {
+		t.Fatalf("weak networks = %v", got)
+	}
+	for k, v := range want {
+		if got[k] != v {
+			t.Errorf("%s = %q, want %q (all: %v)", k, got[k], v, got)
+		}
+	}
+}
+
+func TestAirspaceRogueIsTheRightRadio(t *testing.T) {
+	st, f := wifiInsights(t)
+	rep, err := st.Airspace(context.Background(), f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Networks) < 5 {
+		t.Fatalf("networks = %+v", rep.Networks)
+	}
+	for _, n := range rep.Networks {
+		// Only the open twin. The real AP shares its name, and a radio with
+		// no name "contains" in every summary.
+		if want := n.BSSID == "aa:bb:cc:00:00:02"; n.Rogue != want {
+			t.Errorf("%s (%q %s) rogue = %v", n.BSSID, n.SSID, n.Security, n.Rogue)
+		}
+		if n.BSSID == "aa:bb:cc:00:00:01" && len(n.Clients) != 1 {
+			t.Errorf("clients = %v", n.Clients)
+		}
+	}
+}
+
+func TestWeatherUsesTheStepItGot(t *testing.T) {
+	st, _, _ := homeStore(t)
+	ctx := context.Background()
+	// Old enough to be answered from hourly rollups, whatever was asked for.
+	st.cfg.Now = func() time.Time { return testutil.Base.Add(30 * 24 * time.Hour) }
+	if _, err := st.Retain(ctx); err != nil {
+		t.Fatal(err)
+	}
+	w, err := st.Weather(ctx, win(-12*time.Hour, 12*time.Hour))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.StepMS < time.Hour.Milliseconds() {
+		t.Errorf("step = %d on hourly data", w.StepMS)
+	}
+	var forecast []model.WeatherPoint
+	for i, p := range w.Points {
+		if p.Forecast {
+			forecast = append(forecast, p)
+			if i > 0 && p.TS != w.Points[i-1].TS+w.StepMS {
+				t.Errorf("point %d is not one step on: %+v", i, p)
+			}
+		}
+	}
+	if len(forecast) != 6 {
+		t.Fatalf("forecast = %+v", forecast)
+	}
+	if forecast[0].Upper == 0 || forecast[0].Lower > forecast[0].Upper {
+		t.Errorf("band = %+v", forecast[0])
 	}
 }

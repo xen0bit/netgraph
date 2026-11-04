@@ -357,3 +357,50 @@ func (c *Client) CreateBookmark(ctx context.Context, b model.Bookmark) (*model.B
 	var v model.Bookmark
 	return &v, json.Unmarshal(bdy, &v)
 }
+
+func (c *Client) Incidents(ctx context.Context, status string, limit int) ([]model.Incident, error) {
+	q := url.Values{}
+	if status != "" {
+		q.Set("status", status)
+	}
+	if limit > 0 {
+		q.Set("limit", strconv.Itoa(limit))
+	}
+	var v []model.Incident
+	err := c.getJSON(ctx, "/api/v1/incidents", q, &v)
+	return v, err
+}
+
+func (c *Client) IncidentDetail(ctx context.Context, id int64) (*model.IncidentDetail, error) {
+	var v model.IncidentDetail
+	err := c.getJSON(ctx, "/api/v1/incidents/"+strconv.FormatInt(id, 10), nil, &v)
+	return &v, err
+}
+
+func (c *Client) IncidentAutopsy(ctx context.Context, id int64) (*model.Autopsy, error) {
+	var v model.Autopsy
+	err := c.getJSON(ctx, "/api/v1/incidents/"+strconv.FormatInt(id, 10)+"/autopsy", nil, &v)
+	return &v, err
+}
+
+func (c *Client) UpdateIncident(ctx context.Context, id int64, status, title, summary, note, author string) (*model.Incident, error) {
+	body, err := json.Marshal(map[string]string{"status": status, "title": title, "summary": summary, "note": note, "author": author})
+	if err != nil {
+		return nil, err
+	}
+	b, err := c.do(ctx, http.MethodPatch, "/api/v1/incidents/"+strconv.FormatInt(id, 10), nil, body)
+	if err != nil {
+		return nil, err
+	}
+	var v model.Incident
+	return &v, json.Unmarshal(b, &v)
+}
+
+func (c *Client) DeleteIncident(ctx context.Context, id int64) error {
+	_, err := c.do(ctx, http.MethodDelete, "/api/v1/incidents/"+strconv.FormatInt(id, 10), nil, nil)
+	return err
+}
+
+func (c *Client) ExportIncident(ctx context.Context, id int64) ([]byte, error) {
+	return c.Get(ctx, "/api/v1/incidents/"+strconv.FormatInt(id, 10)+"/export", nil)
+}

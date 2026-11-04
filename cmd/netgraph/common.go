@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -51,6 +52,46 @@ func (b *backendFlags) open() (model.Backend, func(), error) {
 		return nil, nil, err
 	}
 	return st, func() { st.Close() }, nil
+}
+
+// openWritable is open for the commands that change something: through the
+// API, or the database file itself, as `label` does (stop the server first,
+// or it may not see the change).
+func (b *backendFlags) openWritable() (model.Backend, func(), error) {
+	if b.server != "" {
+		return b.open()
+	}
+	if _, err := os.Stat(b.db); err != nil {
+		return nil, nil, fmt.Errorf("no -server given and database %q: %w", b.db, err)
+	}
+	st, err := store.Open(b.db, store.Config{Logger: quietLogger()})
+	if err != nil {
+		return nil, nil, err
+	}
+	return st, func() { st.Close() }, nil
+}
+
+// parseInterspersed parses flags wherever they appear among the arguments,
+// so `note "text" -at TIME` means what it looks like. The flag package alone
+// stops at the first argument that is not a flag. After "--", everything is
+// an argument.
+func parseInterspersed(fs *flag.FlagSet, args []string) error {
+	var rest []string
+	if i := slices.Index(args, "--"); i >= 0 {
+		args, rest = args[:i], args[i+1:]
+	}
+	var pos []string
+	for {
+		if err := fs.Parse(args); err != nil {
+			return err
+		}
+		if fs.NArg() == 0 {
+			break
+		}
+		pos = append(pos, fs.Arg(0))
+		args = fs.Args()[1:]
+	}
+	return fs.Parse(append(append([]string{"--"}, pos...), rest...))
 }
 
 // filterFlags are the window and narrowing flags every query shares.

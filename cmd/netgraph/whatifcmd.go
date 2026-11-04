@@ -26,7 +26,7 @@ func runWhatIf(args []string) error {
 	policyPath := fs.String("policy", "", "policy JSON file")
 	scope := fs.String("scope", "", "device:MAC, domain:name or ip:addr")
 	out := fs.String("o", "table", "output: table, json")
-	if err := fs.Parse(args); err != nil {
+	if err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
 	if *policyPath == "" {

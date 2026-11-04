@@ -44,15 +44,25 @@ func (s *Store) frame(ctx context.Context, f model.Filter, full bool) (*model.Fr
 	if out.WiFi, err = s.WiFi(ctx, f); err != nil {
 		return nil, err
 	}
-	if out.Sensors, err = s.Sensors(ctx); err != nil {
+	sensors, err := s.Sensors(ctx)
+	if err != nil {
 		return nil, err
 	}
-	if full {
-		if rep, err := s.Anomalies(ctx, f); err == nil {
-			out.Anomalies = rep.Anomalies
+	// A sensor that had not reported yet was not part of that moment. The
+	// rest of its row is its current state: the table keeps no history.
+	for _, sn := range sensors {
+		if sn.FirstSeen < to {
+			out.Sensors = append(out.Sensors, sn)
 		}
-		if g, err := s.Graph(ctx, f, model.DefaultGraphOptions); err == nil {
-			out.Graph = g
+	}
+	rep, err := s.Anomalies(ctx, f)
+	if err != nil {
+		return nil, err
+	}
+	out.Anomalies = rep.Anomalies
+	if full {
+		if out.Graph, err = s.Graph(ctx, f, model.DefaultGraphOptions); err != nil {
+			return nil, err
 		}
 	}
 	// Tell the UI when a layer was cut rather than silently returning a
@@ -84,13 +94,10 @@ func (s *Store) Story(ctx context.Context, id string, f model.Filter) (*model.St
 	}
 	from, to := s.window(f)
 	out := &model.Story{Entity: id, Label: d.Label, FromMS: from, ToMS: to}
-	evidence := map[string]model.EvidenceRef{}
 	addEvidence := func(e model.EvidenceRef) {
-		if e.ID == "" {
-			return
+		if e.ID != "" {
+			out.Evidence = append(out.Evidence, e)
 		}
-		evidence[e.Kind+":"+e.ID] = e
-		out.Evidence = append(out.Evidence, e)
 	}
 	if d.Device != nil {
 		start, end := max(d.FirstSeen, from), min(d.LastSeen, to)
@@ -154,6 +161,13 @@ func (s *Store) Story(ctx context.Context, id string, f model.Filter) (*model.St
 	return out, nil
 }
 
+// timelineDerived selects the rail events that are derived from raw data and
+// so age with it; notes and bookmarks are kept until deleted.
+const timelineDerived = `kind NOT IN ('annotation', 'bookmark')`
+
+// maxTimelineKinds bounds a timeline query's kinds: far more than exist.
+const maxTimelineKinds = 32
+
 // Timeline returns a stable page of rail events.
 func (s *Store) Timeline(ctx context.Context, f model.Filter, q model.TimelineQuery) (*model.TimelinePage, error) {
 	from, to := s.window(f)
@@ -163,6 +177,9 @@ func (s *Store) Timeline(ctx context.Context, f model.Filter, q model.TimelineQu
 	}
 	if limit > 5000 {
 		limit = 5000
+	}
+	if len(q.Kinds) > maxTimelineKinds {
+		return nil, fmt.Errorf("%w: at most %d timeline kinds", ErrInvalid, maxTimelineKinds)
 	}
 	var where []string
 	args := []any{from, to}
@@ -231,6 +248,12 @@ func (s *Store) Timeline(ctx context.Context, f model.Filter, q model.TimelineQu
 
 // Diff compares the network at two recorded moments.
 func (s *Store) Diff(ctx context.Context, a, b model.Filter, scope string) (*model.Diff, error) {
+	if err := a.ApplyScope(scope); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalid, err)
+	}
+	if err := b.ApplyScope(scope); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalid, err)
+	}
 	fa, err := s.frame(ctx, a, false)
 	if err != nil {
 		return nil, err
@@ -240,8 +263,8 @@ func (s *Store) Diff(ctx context.Context, a, b model.Filter, scope string) (*mod
 		return nil, err
 	}
 	out := &model.Diff{FromMS: fa.AtMS, ToMS: fb.AtMS}
-	if scope != "" {
-		out.Gaps = append(out.Gaps, "scope "+scope+" is applied by the caller filter")
+	if len(fa.Truncated)+len(fb.Truncated) > 0 {
+		out.Gaps = append(out.Gaps, "a layer hit the row limit, so some additions and removals may be false")
 	}
 	if fa.Precision != model.PrecisionExact || fb.Precision != model.PrecisionExact {
 		out.Gaps = append(out.Gaps, "one or both moments are hourly rollups")
@@ -261,10 +284,12 @@ func (s *Store) Diff(ctx context.Context, a, b model.Filter, scope string) (*mod
 		}
 		return m
 	}
+	// Destinations are compared by presence: byte counts differ between any
+	// two moments, so comparing them would mark every destination changed.
 	dests := func(f *model.Frame) map[string]keyed {
 		m := map[string]keyed{}
 		for _, d := range f.Destinations {
-			m[d.Key] = keyed{label: d.Label, value: fmt.Sprintf("%d/%d", d.BytesOut, d.BytesIn), ev: ev(f, "destination "+d.Label)}
+			m[d.Key] = keyed{label: d.Label, ev: ev(f, "destination "+d.Label)}
 		}
 		return m
 	}

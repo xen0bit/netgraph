@@ -23,7 +23,7 @@ func runAsk(args []string) error {
 	b.register(fs)
 	f.register(fs)
 	out := fs.String("o", "table", "output: table or json")
-	if err := fs.Parse(args); err != nil {
+	if err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
 	q := strings.TrimSpace(strings.Join(fs.Args(), " "))

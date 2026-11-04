@@ -78,6 +78,9 @@ func (s *Store) Ingest(ctx context.Context, sensor, boot string, events []wire.E
 // ingester holds the caches that make ingest cheap: entity IDs, the open
 // period of each fact, recent DNS answers by address, and MAC/IP bindings.
 // Everything in it can be rebuilt from the database (warm).
+// maxDeviceKeys bounds deviceKeys: source MACs come from the network.
+const maxDeviceKeys = 1 << 16
+
 type ingester struct {
 	s *Store
 
@@ -89,6 +92,9 @@ type ingester struct {
 	bindings map[string]binding     // local address -> device
 	sensors  map[string]int64
 	flowName map[string]string // flow_key -> correlated qname, for the flow's later records
+	// device entity ID -> "device:MAC", for the rail. newIngester resets it
+	// whenever an erasure may have reused an ID.
+	deviceKeys map[int64]string
 
 	traffic map[trafficKey]*trafficAgg
 	dnsAgg  map[dnsKey]int
@@ -179,15 +185,16 @@ type dnsKey struct {
 
 func newIngester(s *Store) *ingester {
 	return &ingester{
-		s:        s,
-		entities: map[entKey]*entRow{},
-		facts:    map[factKey]*openFact{},
-		answers:  map[string][]answerRef{},
-		bindings: map[string]binding{},
-		sensors:  map[string]int64{},
-		flowName: map[string]string{},
-		traffic:  map[trafficKey]*trafficAgg{},
-		dnsAgg:   map[dnsKey]int{},
+		s:          s,
+		entities:   map[entKey]*entRow{},
+		facts:      map[factKey]*openFact{},
+		answers:    map[string][]answerRef{},
+		bindings:   map[string]binding{},
+		sensors:    map[string]int64{},
+		flowName:   map[string]string{},
+		deviceKeys: map[int64]string{},
+		traffic:    map[trafficKey]*trafficAgg{},
+		dnsAgg:     map[dnsKey]int{},
 	}
 }
 
@@ -406,8 +413,6 @@ func (g *ingester) event(ctx context.Context, sid int64, sensor, boot string, ev
 
 // --- entities and facts ---------------------------------------------------
 
-// entity returns the ID of (kind, key), creating it, and records it as seen
-// at ts.
 // timeline appends one Flight Recorder rail event. The index is derived
 // data: callers pass the authoritative table/key so the UI can open the
 // record. INSERT OR IGNORE makes a retried batch harmless.
@@ -420,6 +425,8 @@ func (g *ingester) timeline(ctx context.Context, ts int64, kind string, entityID
 	return err
 }
 
+// entity returns the ID of (kind, key), creating it, and records it as seen
+// at ts.
 func (g *ingester) entity(ctx context.Context, kind, key string, ts int64, init func(*entRow)) (int64, error) {
 	k := entKey{kind, key}
 	if e, ok := g.entities[k]; ok {
@@ -780,12 +787,11 @@ func (g *ingester) observation(ctx context.Context, sid, ts int64, typ string, d
 	if err != nil {
 		return err
 	}
-	key, related := "", ""
-	if device != 0 {
-		if mac, merr := g.macOf(ctx, device); merr == nil {
-			key = model.EntityID(model.KindDevice, mac)
-		}
+	key, err := g.deviceKey(ctx, device)
+	if err != nil {
+		return err
 	}
+	related := ""
 	if ip.IsValid() {
 		related = model.EntityID(model.KindIP, ip.String())
 	}
@@ -950,7 +956,10 @@ func (g *ingester) flowRecord(ctx context.Context, sid int64, sensor, boot strin
 		f.BytesOut, f.BytesIn, f.PktsOut, f.PktsIn, rasn, rcc); err != nil {
 		return err
 	}
-	devKey := model.EntityID(model.KindDevice, devMAC)
+	devKey, err := g.deviceKey(ctx, dev)
+	if err != nil {
+		return err
+	}
 	flowTitle := firstNonEmpty(name, remote.String())
 	if !seen {
 		if err := g.timeline(ctx, first, "flow_open", dev, devKey, remoteID, model.EntityID(model.KindIP, remote.String()), "", "opened "+flowTitle, "connections", key, map[string]string{"direction": dir}); err != nil {
@@ -1176,11 +1185,9 @@ func (g *ingester) dns(ctx context.Context, sid, ts int64, d *wire.DNS) error {
 	if err != nil {
 		return err
 	}
-	devKey := ""
-	if dev != 0 {
-		if mac, merr := g.macOf(ctx, dev); merr == nil {
-			devKey = model.EntityID(model.KindDevice, mac)
-		}
+	devKey, err := g.deviceKey(ctx, dev)
+	if err != nil {
+		return err
 	}
 	if err := g.timeline(ctx, ts, "dns", dev, devKey, qdom, model.EntityID(model.KindDomain, d.QName), "", d.QName, "dns", strconv.FormatInt(id, 10), map[string]string{"qtype": d.QType, "rcode": d.RCode}); err != nil {
 		return err
@@ -1422,6 +1429,28 @@ func (g *ingester) mdns(ctx context.Context, sid, ts int64, m *wire.MDNS) error 
 }
 
 // macOf returns a device entity's MAC.
+// deviceKey is a device's entity ID for the rail, "" for no device (traffic
+// passing through has none). Every lookup and observation asks, so unlike
+// macOf it must not walk the entity cache.
+func (g *ingester) deviceKey(ctx context.Context, dev int64) (string, error) {
+	if dev == 0 {
+		return "", nil
+	}
+	if k, ok := g.deviceKeys[dev]; ok {
+		return k, nil
+	}
+	mac, err := g.macOf(ctx, dev)
+	if err != nil {
+		return "", err
+	}
+	if len(g.deviceKeys) >= maxDeviceKeys {
+		clear(g.deviceKeys)
+	}
+	k := model.EntityID(model.KindDevice, mac)
+	g.deviceKeys[dev] = k
+	return k, nil
+}
+
 func (g *ingester) macOf(ctx context.Context, dev int64) (string, error) {
 	for k, e := range g.entities {
 		if e.id == dev && k.kind == model.KindDevice {

@@ -19,7 +19,7 @@ const (
 // RetentionResult counts what one retention pass deleted.
 type RetentionResult struct {
 	Flows, DNS, Answers, Observations, Facts, Rollups, Entities, Handshakes, Mutes int64
-	Timeline, Frames                                                               int64
+	Timeline                                                                       int64
 }
 
 // Retain deletes data past its retention: raw tables after RawRetention,
@@ -46,8 +46,8 @@ func (s *Store) Retain(ctx context.Context) (RetentionResult, error) {
 		{&r.DNS, `DELETE FROM dns WHERE rowid IN (SELECT rowid FROM dns WHERE ts < ? LIMIT ` + retainChunkSQL + `)`, raw, false},
 		{&r.Answers, `DELETE FROM dns_answers WHERE rowid IN (SELECT rowid FROM dns_answers WHERE expires < ? LIMIT ` + retainChunkSQL + `)`, raw, false},
 		{&r.Observations, `DELETE FROM observations WHERE rowid IN (SELECT rowid FROM observations WHERE ts < ? LIMIT ` + retainChunkSQL + `)`, raw, false},
-		{&r.Timeline, `DELETE FROM timeline_events WHERE rowid IN (SELECT rowid FROM timeline_events WHERE ts < ? LIMIT ` + retainChunkSQL + `)`, raw, false},
-		{&r.Frames, `DELETE FROM frame_cache WHERE computed < ?`, raw, false},
+		// Notes and bookmarks are kept until deleted, so their rail events are too.
+		{&r.Timeline, `DELETE FROM timeline_events WHERE rowid IN (SELECT rowid FROM timeline_events WHERE ts < ? AND ` + timelineDerived + ` LIMIT ` + retainChunkSQL + `)`, raw, false},
 		{&r.Facts, `DELETE FROM facts WHERE rowid IN (SELECT rowid FROM facts WHERE last_seen < ? LIMIT ` + retainChunkSQL + `)`, roll, false},
 		// The rollups are WITHOUT ROWID. Delete a few hours at a time:
 		// one unbounded DELETE can hold the ingest lock for a long time

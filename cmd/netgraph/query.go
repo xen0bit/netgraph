@@ -154,15 +154,8 @@ func runQuery(args []string) error {
 			}
 			filter.To, filter.From = t, t.Add(-lb)
 		}
-		switch {
-		case strings.HasPrefix(*scope, "device:"):
-			filter.Device = strings.TrimPrefix(*scope, "device:")
-		case strings.HasPrefix(*scope, "domain:"):
-			filter.DomainExact = strings.TrimPrefix(*scope, "domain:")
-		case strings.HasPrefix(*scope, "ip:"):
-			filter.IP = strings.TrimPrefix(*scope, "ip:")
-		case *scope != "":
-			return fmt.Errorf("-scope: unknown %q", *scope)
+		if err := filter.ApplyScope(*scope); err != nil {
+			return fmt.Errorf("-scope: %w", err)
 		}
 		fr, err := be.Frame(ctx(), filter)
 		if err != nil {

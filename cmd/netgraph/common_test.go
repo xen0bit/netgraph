@@ -1,8 +1,10 @@
 package main
 
 import (
+	"flag"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 )
 
@@ -22,5 +24,28 @@ func TestEtcCredential(t *testing.T) {
 	t.Setenv("CREDENTIALS_DIRECTORY", "")
 	if got := etcCredential("wifi.keys"); got != "" {
 		t.Errorf("outside systemd = %q, want empty", got)
+	}
+}
+
+func TestParseInterspersed(t *testing.T) {
+	for _, c := range []struct {
+		args []string
+		at   string
+		pos  []string
+	}{
+		{[]string{"-at", "x", "note"}, "x", []string{"note"}},
+		{[]string{"note", "-at", "x"}, "x", []string{"note"}},
+		{[]string{"a", "-at", "x", "b"}, "x", []string{"a", "b"}},
+		{[]string{"a", "--", "-at", "x"}, "", []string{"a", "-at", "x"}},
+		{[]string{"a"}, "", []string{"a"}},
+	} {
+		fs := flag.NewFlagSet("t", flag.ContinueOnError)
+		at := fs.String("at", "", "")
+		if err := parseInterspersed(fs, c.args); err != nil {
+			t.Fatalf("%v: %v", c.args, err)
+		}
+		if *at != c.at || !slices.Equal(fs.Args(), c.pos) {
+			t.Errorf("%v: at=%q args=%q", c.args, *at, fs.Args())
+		}
 	}
 }

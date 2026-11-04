@@ -16,6 +16,9 @@ import (
 // window. It is read-only and deliberately conservative: unclassified
 // traffic is reported as unknown, never silently blocked.
 func (s *Store) WhatIf(ctx context.Context, p *policy.Policy, f model.Filter, scope string) (*model.WhatIfResult, error) {
+	if err := f.ApplyScope(scope); err != nil {
+		return nil, fmt.Errorf("%w: %v", ErrInvalid, err)
+	}
 	from, to := s.window(f)
 	out := &model.WhatIfResult{FromMS: from, ToMS: to, PolicyHash: p.Hash()}
 	ff := f
@@ -29,7 +32,10 @@ func (s *Store) WhatIf(ctx context.Context, p *policy.Policy, f model.Filter, sc
 	if len(flows) >= ff.Limit {
 		out.Gaps = append(out.Gaps, fmt.Sprintf("flow list was capped at %d; the blast radius may be larger", ff.Limit))
 	}
-	devices, _ := s.Devices(ctx, f)
+	devices, err := s.Devices(ctx, ff)
+	if err != nil {
+		return nil, err
+	}
 	type info struct{ label, role string }
 	byID := map[string]info{}
 	routers := map[string]bool{}
@@ -58,7 +64,11 @@ func (s *Store) WhatIf(ctx context.Context, p *policy.Policy, f model.Filter, sc
 		g.BytesIn += imp.BytesIn
 	}
 	add := func(imp model.Impact, essential bool) {
-		out.Summary.Blocked++
+		if imp.Kind == "dns" {
+			out.Summary.Lookups++
+		} else {
+			out.Summary.Blocked++
+		}
 		if essential {
 			out.Summary.Essential++
 			out.Essential = append(out.Essential, imp)
@@ -77,7 +87,12 @@ func (s *Store) WhatIf(ctx context.Context, p *policy.Policy, f model.Filter, sc
 		}
 		addGroup(ruleGroups, ruleKey, ruleKey, &imp)
 	}
-	for _, fl := range flows {
+	for i, fl := range flows {
+		if i%1024 == 0 {
+			if err := ctx.Err(); err != nil {
+				return nil, err
+			}
+		}
 		if fl.Direction == model.DirExternal {
 			out.Summary.OutOfScope++
 			continue
@@ -96,7 +111,15 @@ func (s *Store) WhatIf(ctx context.Context, p *policy.Policy, f model.Filter, sc
 			out.Summary.Unknown++
 			continue
 		}
-		rule, allow, _ := p.Decide(zone, fl.Direction, dst, fl.RemoteIP, strconv.Itoa(servicePort(fl)), fl.Proto, fl.ASN, fl.Country)
+		peerZone := ""
+		if fl.PeerDevice != "" {
+			peer := byID[fl.PeerDevice]
+			peerZone = p.ZoneFor(fl.PeerDevice, firstNonEmpty(fl.PeerName, peer.label, fl.PeerDevice), peer.role)
+		}
+		rule, allow, _ := p.Decide(policy.Conn{
+			Zone: zone, PeerZone: peerZone, Direction: fl.Direction, Name: dst, IP: fl.RemoteIP,
+			Port: strconv.Itoa(servicePort(fl)), Proto: fl.Proto, ASN: fl.ASN, Country: fl.Country,
+		})
 		if allow {
 			out.Summary.Unchanged++
 			continue
@@ -116,18 +139,24 @@ func (s *Store) WhatIf(ctx context.Context, p *policy.Policy, f model.Filter, sc
 	}
 	// DNS is a dependency of its own: a lookup can be blocked even when a
 	// cached address still works, or allowed while the address rule fails.
-	if dns, err := s.DNS(ctx, f); err == nil {
-		for _, q := range dns {
-			if !p.DNSBlocked(q.QName) {
-				continue
-			}
-			imp := model.Impact{
-				Kind: "dns", Device: q.Device, DeviceName: q.DeviceName, Destination: q.QName,
-				Reason: "DNS blocklist", Critical: true,
-				Evidence: []model.EvidenceRef{{Kind: "dns", ID: fmt.Sprintf("%d:%s:%s", q.TS, q.QName, q.ClientIP), TS: q.TS, Text: q.QName}},
-			}
-			add(imp, true)
+	// Blocking a name is usually the point of the rule, so it is not
+	// essential by itself; losing port 53 outright is, and is a connection.
+	dns, err := s.DNS(ctx, ff)
+	if err != nil {
+		return nil, err
+	}
+	if len(dns) >= ff.Limit {
+		out.Gaps = append(out.Gaps, fmt.Sprintf("lookup list was capped at %d; more names may be blocked", ff.Limit))
+	}
+	for _, q := range dns {
+		if !p.DNSBlocked(q.QName) {
+			continue
 		}
+		add(model.Impact{
+			Kind: "dns", Device: q.Device, DeviceName: q.DeviceName, Destination: q.QName,
+			Reason:   "DNS blocklist",
+			Evidence: []model.EvidenceRef{{Kind: "dns", ID: fmt.Sprintf("%d:%s:%s", q.TS, q.QName, q.ClientIP), TS: q.TS, Text: q.QName}},
+		}, false)
 	}
 	sortImpacts := func(xs []model.Impact) {
 		slices.SortFunc(xs, func(a, b model.Impact) int {
@@ -162,9 +191,6 @@ func (s *Store) WhatIf(ctx context.Context, p *policy.Policy, f model.Filter, sc
 	)
 	if s.precision(from, to) != model.PrecisionExact {
 		out.Gaps = append(out.Gaps, "the window is answered from hourly rollups")
-	}
-	if scope != "" {
-		out.Gaps = append(out.Gaps, "scope "+scope+" is applied by the caller filter")
 	}
 	return out, nil
 }

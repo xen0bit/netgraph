@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -38,8 +39,8 @@ func TestAnnotationsAndBookmarks(t *testing.T) {
 	if err := st.DeleteAnnotation(ctx, a.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := st.AnnotationAt(ctx, a.ID); err == nil {
-		t.Fatal("deleted annotation still exists")
+	if err := st.DeleteAnnotation(ctx, a.ID); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("second delete = %v", err)
 	}
 	if err := st.DeleteBookmark(ctx, b.ID); err != nil {
 		t.Fatal(err)
