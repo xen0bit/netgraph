@@ -4,6 +4,10 @@ import { LivingMap } from "./map/map.js";
 import { reelFrame, reelDiff } from "./reel.js";
 import { esc, units, parseSpan, fmtSpan, bytes, pad2, clock, stamp, ago } from "./util.js";
 import { homeHTML, installBlock } from "./home.js";
+import { parseWhen, fuzzy } from "./palette.js";
+import { tokens, lastToken, localSuggestions, searched } from "./filters.js";
+import { passportHTML } from "./passport.js";
+import { Pulse } from "./pulse.js";
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
@@ -37,6 +41,8 @@ const state = {
   limits: {},
   // The entity whose details are open, so a link can reopen them.
   open: "",
+  // The device the Passport view shows.
+  passport: "",
   // Flight Recorder: when on, the window ends at this moment and the event
   // rail shows what happened just before it.
   rec: { on: false, at: Date.now(), lookback: 5 * 60_000, follow: "", playing: false, diffA: 0, view: null, loop: null, diff: null },
@@ -47,8 +53,8 @@ const state = {
 const areas = {
   home: { tabs: [["home", "Home"]] },
   map: { tabs: [["graph", "Map"]] },
-  devices: { tabs: [["devices", "Devices"]] },
-  activity: { tabs: [["flows", "Connections"], ["destinations", "Destinations"], ["dns", "DNS"], ["facts", "Facts"]] },
+  devices: { tabs: [["devices", "Devices"], ["passport", "Passport"]] },
+  activity: { tabs: [["flows", "Connections"], ["destinations", "Destinations"], ["dns", "DNS"], ["facts", "Facts"], ["pulse", "Pulse"]] },
   findings: { tabs: [["anomalies", "Anomalies"], ["incidents", "Incidents"], ["insights", "Insights"]], tools: `<button id="whatif-open" type="button" title="Test a proposed policy against observed traffic">What-if</button>` },
   wifi: { tabs: [["wifi", "Wi-Fi"]] },
   settings: { tabs: [["settings", "General"], ["sensors", "Sensors"]] },
@@ -56,7 +62,7 @@ const areas = {
 const areaOf = (t) => Object.keys(areas).find((a) => areas[a].tabs.some(([id]) => id === t));
 // Views that answer about now rather than about the window: the time controls,
 // the Recorder and the filter have nothing to say to them.
-const plainTabs = new Set(["home", "settings", "sensors", "incidents"]);
+const plainTabs = new Set(["home", "settings", "sensors", "incidents", "pulse", "passport"]);
 
 function loadHash() {
   const raw = location.hash.slice(1);
@@ -81,6 +87,7 @@ function loadHash() {
   const [st, col, dir] = (p.get("sort") || "").split(".");
   if (tables[st] && tables[st].keys[Number(col)] && (dir === "asc" || dir === "desc")) state.sort[st] = { col: Number(col), dir };
   state.open = p.get("open") || "";
+  state.passport = p.get("device") || "";
   state.rec.on = p.get("rec") === "1";
   const recAt = num("rec_at");
   if (recAt && recAt > 0) state.rec.at = recAt;
@@ -102,6 +109,7 @@ function saveHash() {
   const so = state.sort[state.tab];
   if (so) p.set("sort", `${state.tab}.${so.col}.${so.dir}`);
   if (state.open) p.set("open", state.open);
+  if (state.tab === "passport" && state.passport) p.set("device", state.passport);
   if (state.rec.on) {
     p.set("rec", "1");
     p.set("rec_at", state.rec.at);
@@ -236,7 +244,8 @@ function askToken() {
       if (!cancel && v) {
         token = v;
         // Saved only after the server accepts it in a real request.
-        if (state.live) openLive();
+        closeLive();
+        syncFeed();
       } else {
         needAuth();
       }
@@ -311,6 +320,7 @@ async function refresh() {
   saveHash();
   renderWindow();
   document.body.classList.toggle("rec-on", state.rec.on);
+  renderChips();
   const seq = ++refreshSeq;
   if (plainTabs.has(state.tab)) {
     await loadRange();
@@ -473,6 +483,52 @@ function homeClick(e) {
   if (tab) selectTab(tab.dataset.tab);
 }
 
+// --- passport -----------------------------------------------------------------------
+
+function openPassport(id) {
+  state.passport = id;
+  closePanel();
+  selectTab("passport");
+}
+
+async function renderPassport(seq) {
+  const el = $("#passport-body");
+  if (!state.passport) {
+    el.innerHTML = `<div class="first-run"><h2>Passport</h2><p class="muted">A device's profile: who it is, when it's busy, and how this week compares. Pick one from Devices, the map or Find, then choose “Open its passport”.</p><button type="button" data-tab="devices">Devices →</button></div>`;
+    return;
+  }
+  const p = await track(api("passport", new URLSearchParams({ id: state.passport, tz: -new Date().getTimezoneOffset() }))).catch((e) => {
+    if (seq === refreshSeq) el.innerHTML = `<p class="muted empty">${esc(e.message)}</p>`;
+    return null;
+  });
+  if (!p || seq !== refreshSeq) return;
+  el.innerHTML = passportHTML(p);
+}
+
+function passportClick(e) {
+  const tab = e.target.closest("[data-tab]");
+  if (tab) { selectTab(tab.dataset.tab); return; }
+  const id = state.passport;
+  if (e.target.closest("[data-pp-details]")) { openEntity(id); return; }
+  if (e.target.closest("[data-pp-map]")) { state.filter = `device:${id.slice("device:".length)}`; $("#filter").value = state.filter; selectTab("graph"); return; }
+  if (e.target.closest("[data-pp-follow]")) { selectTab("graph"); follow(id); return; }
+  const day = e.target.closest("[data-day]");
+  if (day) {
+    if (state.live) setLive(false);
+    state.to = Number(day.dataset.day) + units.d;
+    state.span = units.d;
+    state.filter = `device:${id.slice("device:".length)}`;
+    $("#filter").value = state.filter;
+    selectTab("graph");
+    return;
+  }
+  const copy = e.target.closest("[data-pp-copy]");
+  if (copy) {
+    navigator.clipboard.writeText(location.href).then(() => { copy.textContent = "Copied"; }, () => { copy.textContent = "Copy from the address bar"; });
+    setTimeout(() => { copy.textContent = "Copy link"; }, 2000);
+  }
+}
+
 // --- settings -----------------------------------------------------------------------
 
 function renderSettings() {
@@ -483,6 +539,8 @@ function renderSettings() {
       <div class="segmented" role="group" aria-label="Theme">
         ${[["", "Match the system"], ["light", "Light"], ["dark", "Dark"]].map(([v, l]) => `<button type="button" data-theme-set="${v}" aria-pressed="${t === v}">${l}</button>`).join("")}
       </div></section>
+    <section class="card"><h2>Saved views</h2>
+      ${savedViews().length ? `<ul class="saved-list">${savedViews().map((v, i) => `<li><span><b>${esc(v.name)}</b> <span class="muted">${esc(v.tab)}${v.filter ? ` · ${esc(v.filter)}` : ""}</span></span> <button type="button" data-view-delete="${i}">Delete</button></li>`).join("")}</ul>` : `<p class="muted">None yet. “Save view” above any table or the map keeps its filter and window length, in this browser.</p>`}</section>
     <section class="card"><h2>Add a sensor</h2>${installBlock(location.origin)}</section>
     <section class="card"><h2>This browser</h2>
       <p class="muted">The read token and “since you were last here” are kept in this browser only.</p>
@@ -506,6 +564,8 @@ function settingsClick(e) {
   const th = e.target.closest("[data-theme-set]");
   if (th) { setTheme(th.dataset.themeSet); renderSettings(); return; }
   if (e.target.closest("[data-forget-token]")) { token = ""; store.remove("netgraph.token"); renderSettings(); setStatus("Token forgotten"); return; }
+  const del = e.target.closest("[data-view-delete]");
+  if (del) { const v = savedViews(); v.splice(Number(del.dataset.viewDelete), 1); saveViews(v); renderSettings(); return; }
   if (e.target.closest("[data-forget-visit]")) { store.remove("netgraph.visit"); homeState = { at: 0, report: null, findings: null, firstVisit: false }; setStatus("Last visit forgotten"); }
 }
 
@@ -528,11 +588,14 @@ async function renderTab(seq) {
     if (t === "graph") return await renderGraph(seq);
     if (t === "home") return await renderHome(seq);
     if (t === "settings") return renderSettings();
+    if (t === "passport") return await renderPassport(seq);
+    if (t === "pulse") return;
     if (t === "insights") return await renderInsights(seq);
     const path = tablePath[t];
     const extra = state.limits[t] ? { limit: state.limits[t] } : {};
     if (t === "destinations" && $("#dest-group")?.value) extra.group = $("#dest-group").value;
     if (t === "incidents" && $("#incident-status")?.value) extra.status = $("#incident-status").value;
+    Object.assign(extra, serverSort(t));
     let rows = await track(api(path, extra));
     if (seq !== refreshSeq) return;
     if (t === "anomalies") {
@@ -550,9 +613,11 @@ async function renderTab(seq) {
   } catch { /* status shows it */ }
 }
 
+let lastPrecision = "";
 function renderSummary(s, rep) {
   const el = $("#summary");
   if (!s) { el.textContent = ""; return; }
+  lastPrecision = s.precision;
   const as = rep?.anomalies || [];
   const top = ["high", "medium", "low"].find((sev) => as.some((a) => a.severity === sev));
   el.innerHTML = [
@@ -694,6 +759,8 @@ const tables = {
   },
   flows: {
     cols: ["Opened", "Dir", "Client", "", "Server", "Name", "App", "State", "Sent", "Received", "Last"],
+    // The columns the server can sort before its limit.
+    server: { 0: "first_seen", 8: "bytes_out", 9: "bytes_in", 10: "last_seen" },
     titles: {
       1: "out: a device here connected out · in: opened from outside · lan: both ends here",
       2: "The end that opened the connection", 4: "The end that accepted it, with its port",
@@ -827,7 +894,20 @@ function sortBy(t, col) {
   else if (cur.dir === first) state.sort[t] = { col, dir: first === "asc" ? "desc" : "asc" };
   else delete state.sort[t];
   saveHash();
+  // A capped table holds only the top of the old order: ask for the new one.
+  const [def] = limits[t] || [];
+  if (spec.server && def && (state.data[t]?.length || 0) >= (state.limits[t] || def)) {
+    const was = state.sort[t];
+    if (!was || spec.server[was.col] || spec.server[cur?.col]) { delete state.limits[t]; refresh(); return; }
+  }
   renderTable(t);
+}
+
+// serverSort is the query asking the server for a table's sort, if it can. The
+// server only reads it for exact answers; hourly ones are sorted here.
+function serverSort(t) {
+  const so = state.sort[t], col = so && tables[t]?.server?.[so.col];
+  return col ? { sort: (so.dir === "desc" ? "-" : "") + col } : {};
 }
 
 // --- CSV ------------------------------------------------------------------------
@@ -886,7 +966,7 @@ async function loadMore(t) {
   const offset = (state.data[t] || []).length;
   const seq = refreshSeq;
   try {
-    const add = await track(api(tablePath[t], { limit: next - asked, offset }));
+    const add = await track(api(tablePath[t], { limit: next - asked, offset, ...serverSort(t) }));
     if (seq !== refreshSeq) return;
     if (!Array.isArray(add) || add.length === 0) return;
     state.limits[t] = next;
@@ -915,7 +995,11 @@ function renderTable(t) {
   if (so) rows.sort((a, b) => compare(spec.keys[so.col](a), spec.keys[so.col](b), so.dir));
   const el = $(`#t-${t}`);
   const tools = tableTools(t, el);
+  const hiddenCols = hiddenColumns(t);
+  renderColumnPicker(t, tools, hiddenCols);
+  const shown = (i) => !hiddenCols.has(i);
   const head = `<thead><tr>${spec.cols.map((c, i) => {
+    if (!shown(i)) return "";
     const sorted = so?.col === i ? (so.dir === "asc" ? "ascending" : "descending") : "";
     const label = esc(c) + (sorted ? (so.dir === "asc" ? " ▲" : " ▼") : "");
     const cls = spec.num?.includes(i) ? "num" : "";
@@ -929,8 +1013,9 @@ function renderTable(t) {
   const [def, max] = limits[t] || [];
   const asked = state.limits[t] || def;
   const capped = def && all.length >= asked;
+  const sortedThere = serverSort(t).sort && lastPrecision !== "hour";
   tools.querySelector(".count").textContent = `${all.length} ${all.length === 1 ? "row" : "rows"}` +
-    (capped ? ` · the first ${asked}${so ? "; sorting covers these only" : ""}` : "");
+    (capped ? ` · the first ${asked}${so && !sortedThere ? "; sorting covers these only" : ""}` : "");
   const more = tools.querySelector("[data-more]");
   const grouped = t === "destinations" && $("#dest-group")?.value;
   more.hidden = !capped || asked >= max || Boolean(grouped);
@@ -948,22 +1033,85 @@ function renderTable(t) {
   exportBtn.onclick = () => exportAll(t);
   el.onclick = (e) => {
     const b = e.target.closest("thead button.sort");
-    if (b) sortBy(t, Number(b.dataset.col));
-  };
-  if (!rows.length) {
-    el.innerHTML = head + `<tbody><tr><td class="empty" colspan="${spec.cols.length}">Nothing in this window.${windowed(t) ? emptyAction() : ""}</td></tr></tbody>`;
-    return;
-  }
-  el.innerHTML = head + "<tbody>" + rows.map((r, i) =>
-    `<tr data-i="${i}">${spec.row(r).map((c, j) => `<td class="${spec.num?.includes(j) ? "num" : ""}">${c}</td>`).join("")}</tr>`).join("") + "</tbody>";
-  el.querySelector("tbody").onclick = (e) => {
-    const tr = e.target.closest("tr[data-i]");
+    if (b) { sortBy(t, Number(b.dataset.col)); return; }
+    const tr = e.target.closest("tbody tr[data-i]");
     if (!tr) return;
     const r = rows[Number(tr.dataset.i)];
     const id = spec.id(r);
     if (!id) return;
     if (spec.open) spec.open(r);
     else openEntity(id);
+  };
+  tableScroll[t]?.disconnect();
+  delete tableScroll[t];
+  el.style.tableLayout = "";
+  const span = spec.cols.filter((_, i) => shown(i)).length;
+  if (!rows.length) {
+    el.innerHTML = head + `<tbody><tr><td class="empty" colspan="${span}">Nothing in this window.${windowed(t) ? emptyAction() : ""}</td></tr></tbody>`;
+    return;
+  }
+  const rowHTML = (r, i) => `<tr data-i="${i}">${spec.row(r).map((c, j) => (shown(j) ? `<td class="${spec.num?.includes(j) ? "num" : ""}">${c}</td>` : "")).join("")}</tr>`;
+  if (rows.length <= chunkedFrom) {
+    el.innerHTML = head + "<tbody>" + rows.map(rowHTML).join("") + "</tbody>";
+    return;
+  }
+  renderChunks(t, el, head, rows, rowHTML, span);
+}
+
+// A long table draws only what is near the screen. Rows differ in height, so it
+// goes by chunks: one that scrolls away keeps its measured height as an empty
+// row, and a chunk not yet seen is given the first chunk's height. The columns
+// are fixed from the first chunk so they don't shift as chunks come and go.
+const chunkSize = 200;
+const chunkedFrom = 400;
+const tableScroll = {};
+function renderChunks(t, el, head, rows, rowHTML, span) {
+  const count = Math.ceil(rows.length / chunkSize);
+  const fill = (k) => rows.slice(k * chunkSize, (k + 1) * chunkSize).map((r, i) => rowHTML(r, k * chunkSize + i)).join("");
+  const blank = (px) => `<tr class="chunk-blank" style="height:${px}px"><td colspan="${span}"></td></tr>`;
+  el.innerHTML = `${head}<tbody data-chunk="0">${fill(0)}</tbody>`;
+  const first = el.querySelector("tbody");
+  const each = first.getBoundingClientRect().height / first.rows.length || 30;
+  // Fix the widths the first chunk asked for; a hidden view measures nothing.
+  const ths = [...el.querySelectorAll("thead th")];
+  const widths = ths.map((th) => th.getBoundingClientRect().width);
+  if (widths.every((w) => w > 0)) {
+    ths.forEach((th, i) => { th.style.width = `${widths[i]}px`; });
+    el.style.tableLayout = "fixed";
+  }
+  let html = "";
+  for (let k = 1; k < count; k++) {
+    const n = Math.min(chunkSize, rows.length - k * chunkSize);
+    html += `<tbody data-chunk="${k}">${blank(Math.round(n * each))}</tbody>`;
+  }
+  first.insertAdjacentHTML("afterend", html);
+  const seen = new IntersectionObserver((entries) => {
+    for (const e of entries) {
+      const body = e.target, k = Number(body.dataset.chunk);
+      const empty = body.rows[0]?.classList.contains("chunk-blank");
+      if (e.isIntersecting && empty) body.innerHTML = fill(k);
+      else if (!e.isIntersecting && !empty) body.innerHTML = blank(Math.round(body.getBoundingClientRect().height));
+    }
+  }, { root: el.closest(".view"), rootMargin: "1200px 0px" });
+  for (const body of el.querySelectorAll("tbody")) seen.observe(body);
+  tableScroll[t] = seen;
+}
+
+// Which columns are turned off, per table, in this browser.
+function hiddenColumns(t) {
+  try { return new Set(JSON.parse(store.get(`netgraph.cols.${t}`) || "[]")); } catch { return new Set(); }
+}
+
+function renderColumnPicker(t, tools, hidden) {
+  const box = tools.querySelector(".columns ul");
+  box.innerHTML = tables[t].cols.map((c, i) => (c
+    ? `<li><label><input type="checkbox" data-col="${i}"${hidden.has(i) ? "" : " checked"}> ${esc(c)}</label></li>` : "")).join("");
+  box.onchange = (e) => {
+    const i = Number(e.target.dataset.col);
+    const now = hiddenColumns(t);
+    if (e.target.checked) now.delete(i); else now.add(i);
+    store.set(`netgraph.cols.${t}`, JSON.stringify([...now]));
+    renderTable(t);
   };
 }
 
@@ -975,6 +1123,7 @@ function tableTools(t, table) {
     tools.id = `tt-${t}`;
     tools.className = "table-tools";
     tools.innerHTML = `<span class="count"></span><button data-more hidden>Load more</button><span class="spacer"></span>
+      <details class="columns"><summary>Columns</summary><ul></ul></details>
       <button data-copy-json title="Copy these rows as JSON">Copy JSON</button>
       <button data-export title="Download every row in this window, every field, as CSV">All CSV</button>
       <button data-csv title="Download these rows, every field, as CSV">CSV</button>`;
@@ -984,6 +1133,18 @@ function tableTools(t, table) {
 }
 
 // --- graph ----------------------------------------------------------------------
+
+const pulse = new Pulse($("#pulse-list"), {
+  onOpen: (id) => openEntity(id),
+  onCount: (p) => {
+    $("#pulse-empty").hidden = p.lines > 0;
+    $("#pulse-count").textContent = [
+      `${p.lines} ${p.lines === 1 ? "line" : "lines"}`,
+      p.held.length ? `${p.held.length} waiting` : "",
+      p.dropped ? `${p.dropped} too many to show` : "",
+    ].filter(Boolean).join(" · ");
+  },
+});
 
 const diagram = new LivingMap($("#diagram"), {
   onSelect: (id) => openEntity(id),
@@ -1169,7 +1330,7 @@ function filterTerm(id) {
   return "";
 }
 
-const applyFilter = (f) => { state.filter = f; $("#filter").value = f; refresh(); };
+const applyFilter = (f) => { applyFilterText(f); };
 
 function openEdge(e) {
   const panel = $("#panel");
@@ -1444,7 +1605,7 @@ async function openEntity(id, { anomaly } = {}) {
   const anomalyBox = flagged ? `<div class="anomaly-box"><b>${anomaly ? `${esc(anomaly.severity)} ${esc(anomaly.kind.replaceAll("_", " "))}` : "Anomalies"}</b><ul>${flagged.map((l) => `<li>${esc(l)}</li>`).join("")}</ul>${anomaly ? `<button type="button" id="autopsy-anomaly">Autopsy</button> <button type="button" id="save-incident">Save incident</button> <button type="button" id="mute-anomaly">Mute this for 1 hour</button>` : ""}</div>` : "";
   $("#panel-body").innerHTML = `${anomalyBox}
     <h2>${esc(d.label || d.key)}</h2>
-    <div class="muted mono">${esc(d.id)}</div>${rename}
+    <div class="muted mono">${esc(d.id)}</div>${d.kind === "device" ? `<p><a data-passport="${esc(d.id)}">Open its passport →</a></p>` : ""}${rename}
     <dl><dt>first seen</dt><dd>${stamp(d.first_seen)}</dd><dt>last seen</dt><dd>${stamp(d.last_seen)}</dd>${devInfo}${attrs}</dl>
     ${facts ? `<h3>Relationships in this window</h3><ul>${facts}</ul>` : ""}
     ${flows ? `<h3>Connections</h3><ul>${flows}</ul>` : ""}
@@ -1562,6 +1723,19 @@ function onIngest() {
   if (!pending) pending = setTimeout(() => { pending = null; refresh(); }, 2000);
 }
 
+// syncFeed keeps the event stream open while Live or the Pulse needs it.
+function syncFeed() {
+  const want = state.live || state.tab === "pulse";
+  if (want && !liveFeed) openLive();
+  else if (!want) closeLive();
+}
+
+function feedPulse(frame) {
+  const data = /^data: (.*)$/m.exec(frame);
+  if (!data) return;
+  try { pulse.add(JSON.parse(data[1])); } catch { /* a frame it can't read costs that frame */ }
+}
+
 function closeLive() {
   liveFeed?.abort();
   liveFeed = null;
@@ -1593,7 +1767,11 @@ async function followLive(signal) {
         if (done) break;
         buf += value;
         for (let i = buf.indexOf("\n\n"); i >= 0; i = buf.indexOf("\n\n")) {
-          if (/^event: ingest$/m.test(buf.slice(0, i))) onIngest();
+          const frame = buf.slice(0, i);
+          if (/^event: ingest$/m.test(frame)) {
+            if (state.live) onIngest();
+            if (state.tab === "pulse") feedPulse(frame);
+          }
           buf = buf.slice(i + 2);
         }
         // Only ever a partial frame: a server sending no frame end is not one.
@@ -1619,13 +1797,13 @@ function setLive(on) {
   clearInterval(liveTimer);
   clearTimeout(pending);
   pending = null;
+  syncFeed();
   if (!on) {
     // The window stays where Live left it: nothing to fetch again.
     saveHash();
     renderWindow();
     return;
   }
-  openLive();
   liveTimer = setInterval(refresh, 30_000);
   refresh();
 }
@@ -2246,6 +2424,311 @@ async function renderDiffBox() {
   renderRecorder();
 }
 
+// --- saved views ----------------------------------------------------------------------
+
+function savedViews() {
+  try {
+    const v = JSON.parse(store.get("netgraph.views") || "[]");
+    return Array.isArray(v) ? v : [];
+  } catch { return []; }
+}
+
+function saveViews(list) {
+  store.set("netgraph.views", JSON.stringify(list));
+  renderViewSelect();
+}
+
+function renderViewSelect() {
+  $("#view-select").innerHTML = `<option value="">Saved views</option>` + savedViews().map((v, i) => `<option value="${i}">${esc(v.name)}</option>`).join("");
+}
+
+async function saveCurrentView() {
+  const name = await inputDialog({ title: "Save this view", text: "Keeps the view, filter, map options and window length, in this browser. Opening it shows that length up to now.", input: true, placeholder: "Name", ok: "Save" });
+  if (!name) return;
+  const list = savedViews().filter((v) => v.name !== name);
+  list.push({ name, tab: state.tab, filter: state.filter, span: state.span, gopts: { ...state.gopts } });
+  saveViews(list);
+  setStatus(`Saved “${name}”`);
+}
+
+function openView(v) {
+  if (!v || !areaOf(v.tab)) return;
+  state.filter = String(v.filter || "");
+  $("#filter").value = state.filter;
+  renderChips();
+  state.span = Number(v.span) >= 10_000 ? Number(v.span) : state.span;
+  if (v.gopts && typeof v.gopts === "object") Object.assign(state.gopts, v.gopts);
+  syncGraphInputs();
+  state.to = Date.now();
+  selectTab(v.tab);
+  if (!state.live) setLive(true);
+}
+
+function syncGraphInputs() {
+  for (const [id, k] of [["#g-collapse", "collapse"], ["#g-dns", "dns"], ["#g-sites", "sites"], ["#g-anomalies", "anomalies"], ["#g-networks", "networks"], ["#g-identity", "identity"]]) {
+    $(id).checked = state.gopts[k];
+  }
+  $("#g-top").value = state.gopts.top;
+}
+
+// --- filter chips and suggestions -------------------------------------------------------
+
+// What a device's MAC in a filter is called, as far as this page has seen.
+const chipLabels = new Map();
+
+function renderChips() {
+  const box = $("#filter-chips");
+  const list = tokens(state.filter);
+  box.hidden = !list.length;
+  box.replaceChildren();
+  list.forEach((tok, i) => {
+    const chip = document.createElement("span");
+    chip.className = "chip";
+    const text = document.createElement("span");
+    text.textContent = chipLabels.get(tok) || tok;
+    text.title = tok;
+    const x = document.createElement("button");
+    x.type = "button";
+    x.textContent = "×";
+    x.setAttribute("aria-label", `Remove ${tok}`);
+    x.onclick = () => {
+      const rest = tokens(state.filter);
+      rest.splice(i, 1);
+      applyFilterText(rest.join(" "));
+    };
+    chip.append(text, x);
+    box.append(chip);
+  });
+  if (list.length > 1) {
+    const clear = document.createElement("button");
+    clear.type = "button";
+    clear.className = "chip-clear";
+    clear.textContent = "Clear all";
+    clear.onclick = () => applyFilterText("");
+    box.append(clear);
+  }
+}
+
+function applyFilterText(text) {
+  state.filter = text;
+  $("#filter").value = text;
+  renderChips();
+  return refresh();
+}
+
+function filterSuggest() {
+  const input = $("#filter"), list = $("#filter-suggest");
+  let items = [], active = -1, seq = 0, timer;
+  const close = () => { list.hidden = true; input.setAttribute("aria-expanded", "false"); input.removeAttribute("aria-activedescendant"); items = []; active = -1; };
+  const show = () => {
+    if (!items.length) { close(); return; }
+    list.replaceChildren(...items.map((it, i) => {
+      const li = document.createElement("li");
+      li.id = `fs-${i}`;
+      li.setAttribute("role", "option");
+      li.dataset.i = i;
+      li.className = i === active ? "active" : "";
+      const b = document.createElement("b");
+      b.textContent = it.label || it.text;
+      li.append(b);
+      if (it.hint) { const s = document.createElement("span"); s.className = "muted"; s.textContent = ` ${it.hint}`; li.append(s); }
+      return li;
+    }));
+    list.hidden = false;
+    input.setAttribute("aria-expanded", "true");
+    if (active >= 0) input.setAttribute("aria-activedescendant", `fs-${active}`);
+    else input.removeAttribute("aria-activedescendant");
+  };
+  const accept = (it) => {
+    const { head } = lastToken(input.value);
+    if (it.label) chipLabels.set(it.text, it.label);
+    if (it.partial) {
+      input.value = head + it.text;
+      suggest();
+      input.focus();
+      return;
+    }
+    close();
+    applyFilterText(head + it.text);
+    input.value = state.filter + " ";
+    input.focus();
+  };
+  const suggest = () => {
+    clearTimeout(timer);
+    const { word } = lastToken(input.value);
+    const n = ++seq;
+    if (!word) { close(); return; }
+    items = localSuggestions(word);
+    active = -1;
+    show();
+    const i = word.indexOf(":");
+    const kind = i > 0 ? searched[word.slice(0, i)] : "";
+    const q = i > 0 ? word.slice(i + 1) : "";
+    if (!kind || q.length < 2) return;
+    timer = setTimeout(async () => {
+      let rs;
+      try { rs = await api("search", new URLSearchParams({ q, limit: 12 })); } catch { return; }
+      if (n !== seq) return;
+      items = (rs || []).filter((r) => r.kind === kind).slice(0, 8).map((r) => ({ text: `${word.slice(0, i)}:${r.key}`, label: r.label !== r.key ? r.label : "", hint: r.label !== r.key ? r.key : "" }));
+      active = -1;
+      show();
+    }, 200);
+  };
+  let typing;
+  input.oninput = () => {
+    suggest();
+    clearTimeout(typing);
+    typing = setTimeout(() => { state.filter = input.value.trim(); renderChips(); refresh(); }, 400);
+  };
+  input.onkeydown = (e) => {
+    if ((e.key === "ArrowDown" || e.key === "ArrowUp") && items.length) {
+      e.preventDefault();
+      active = e.key === "ArrowDown" ? (active + 1) % items.length : (active <= 0 ? items.length : active) - 1;
+      show();
+    } else if ((e.key === "Enter" || e.key === "Tab") && active >= 0) {
+      e.preventDefault();
+      accept(items[active]);
+    } else if (e.key === "Enter") {
+      close();
+      clearTimeout(typing);
+      state.filter = input.value.trim();
+      renderChips();
+      refresh();
+    } else if (e.key === "Escape") {
+      if (!list.hidden) close();
+      else input.blur();
+    }
+  };
+  list.onmousedown = (e) => { const li = e.target.closest("li[data-i]"); if (li) { e.preventDefault(); accept(items[Number(li.dataset.i)]); } };
+  input.onblur = () => setTimeout(close, 100);
+}
+
+// --- command palette ----------------------------------------------------------------------
+
+function commands() {
+  const go = [["Home", "home", "1"], ["Map", "map", "2"], ["Devices", "devices", "3"], ["Activity", "activity", "4"], ["Findings", "findings", "5"], ["Wi-Fi", "wifi", "6"], ["Settings", "settings", "7"]]
+    .map(([label, area, key]) => ({ label: `Go to ${label}`, key, run: () => selectArea(area) }));
+  const views = [["Connections", "flows"], ["Destinations", "destinations"], ["DNS", "dns"], ["Facts", "facts"], ["Pulse", "pulse"], ["Anomalies", "anomalies"], ["Incidents", "incidents"], ["Insights", "insights"], ["Sensors", "sensors"]]
+    .map(([label, t]) => ({ label: `Go to ${label}`, run: () => selectTab(t) }));
+  const onMap = (f) => () => { if (state.tab !== "graph") selectTab("graph"); f(); };
+  return [
+    ...go, ...views,
+    { label: state.live ? "Stop following Live" : "Follow Live", key: "l", run: () => setLive(!state.live) },
+    { label: state.rec.on ? "Leave the Recorder" : "Open the Recorder", key: "t", run: onMap(() => toggleRecorder()) },
+    { label: "Ask netgraph", key: "?", run: openAsk },
+    { label: "Find a device or address", key: "f", run: () => $("#search").focus() },
+    { label: "Filter this view", key: "/", run: () => $("#filter").focus() },
+    { label: "Add a note", run: () => openNote() },
+    { label: "Bookmark this moment", run: saveBookmark },
+    { label: "What-if: test a policy", run: () => openWhatIf() },
+    { label: "Fit the map to the screen", key: "0", run: onMap(() => diagram.fit()) },
+    { label: "Re-arrange the map", run: onMap(() => diagram.rearrange()) },
+    { label: "Toggle dark mode", run: () => setTheme(theme() === "dark" ? "light" : "dark") },
+    { label: "Save this view", run: saveCurrentView },
+    { label: "Add a sensor", run: () => selectTab("settings") },
+    ...savedViews().map((v) => ({ label: `Open view: ${v.name}`, run: () => openView(v) })),
+  ];
+}
+
+function palette() {
+  const dlg = $("#palette"), input = $("#palette-q"), list = $("#palette-list");
+  let items = [], active = 0, seq = 0, timer, found = [];
+  const draw = () => {
+    list.replaceChildren(...items.map((it, i) => {
+      if (it.head) {
+        const li = document.createElement("li");
+        li.className = "palette-head";
+        li.setAttribute("role", "presentation");
+        li.textContent = it.head;
+        return li;
+      }
+      const li = document.createElement("li");
+      li.id = `pl-${i}`;
+      li.setAttribute("role", "option");
+      li.dataset.i = i;
+      li.setAttribute("aria-selected", String(i === active));
+      const name = document.createElement("span");
+      name.textContent = it.label;
+      li.append(name);
+      if (it.sub) { const s = document.createElement("span"); s.className = "muted mono"; s.textContent = it.sub; li.append(s); }
+      if (it.key) { const k = document.createElement("kbd"); k.textContent = it.key; li.append(k); }
+      return li;
+    }));
+    input.setAttribute("aria-activedescendant", `pl-${active}`);
+    list.querySelector(`[data-i="${active}"]`)?.scrollIntoView({ block: "nearest" });
+  };
+  const build = () => {
+    const q = input.value.trim();
+    const out = [];
+    const when = parseWhen(q);
+    if (when) {
+      out.push({ head: "Go to a time" }, {
+        label: when.label,
+        sub: when.live ? "up to now" : "",
+        run: () => {
+          if (state.live !== Boolean(when.live)) setLive(Boolean(when.live));
+          state.to = when.live ? Date.now() : when.to;
+          state.span = when.span;
+          if (state.rec.on) state.rec.at = state.to;
+          selectTab(plainTabs.has(state.tab) ? "graph" : state.tab);
+        },
+      });
+    }
+    const matched = commands().map((c) => ({ ...c, score: fuzzy(q, c.label) })).filter((c) => c.score > 0);
+    if (q) matched.sort((a, b) => b.score - a.score);
+    if (matched.length) out.push({ head: "Commands" }, ...matched.slice(0, q ? 8 : 40));
+    if (found.length) {
+      out.push({ head: "On your network" }, ...found.map((r) => ({ label: r.label, sub: r.label !== r.key ? `${r.kind} ${r.key}` : r.kind, run: () => (r.kind === "device" ? openPassport(r.id) : openEntity(r.id)) })));
+    }
+    items = out;
+    active = items.findIndex((x) => !x.head);
+    draw();
+  };
+  const pick = (i) => {
+    const it = items[i];
+    if (!it?.run) return;
+    dlg.close();
+    it.run();
+  };
+  const move = (dir) => {
+    if (!items.length) return;
+    let i = active;
+    do { i = (i + dir + items.length) % items.length; } while (items[i].head);
+    active = i;
+    draw();
+  };
+  input.oninput = () => {
+    clearTimeout(timer);
+    found = [];
+    build();
+    const q = input.value.trim();
+    const n = ++seq;
+    if (q.length < 2) return;
+    timer = setTimeout(async () => {
+      let rs;
+      try { rs = await api("search", new URLSearchParams({ q, limit: 8 })); } catch { return; }
+      if (n !== seq) return;
+      found = rs || [];
+      build();
+    }, 180);
+  };
+  input.onkeydown = (e) => {
+    if (e.key === "ArrowDown") { e.preventDefault(); move(1); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); move(-1); }
+    else if (e.key === "Enter") { e.preventDefault(); pick(active); }
+  };
+  list.onclick = (e) => { const li = e.target.closest("li[data-i]"); if (li) pick(Number(li.dataset.i)); };
+  dlg.onclick = (e) => { if (e.target === dlg) dlg.close(); };
+  return () => {
+    if (dlg.open) { dlg.close(); return; }
+    input.value = "";
+    found = [];
+    build();
+    dlg.showModal();
+    input.focus();
+  };
+}
+
 // --- wiring ---------------------------------------------------------------------------
 
 // Which view of each area was last open, so coming back returns to it.
@@ -2265,6 +2748,7 @@ function selectTab(t) {
   sub.innerHTML = sub.hidden ? "" : spec.tabs.map(([id, label]) => `<button type="button" data-tab="${id}" aria-current="${id === t ? "page" : "false"}">${label}</button>`).join("") +
     (spec.tools ? `<span class="spacer"></span>${spec.tools}` : "");
   document.body.toggleAttribute("data-plain", plainTabs.has(t));
+  syncFeed();
   return refresh();
 }
 
@@ -2341,10 +2825,8 @@ function init() {
   document.addEventListener("click", (e) => {
     if (e.target.closest("[data-jump-latest]")) jumpToLatest();
     else if (e.target.closest("[data-clear-filter]")) {
-      state.filter = "";
-      $("#filter").value = "";
       state.rec.follow = "";
-      refresh();
+      applyFilterText("");
     }
   });
   const saved = store.get("netgraph.theme");
@@ -2397,8 +2879,30 @@ function init() {
   };
   $("#from").onchange = fromTo;
   $("#to").onchange = fromTo;
-  let typing;
-  $("#filter").oninput = () => { clearTimeout(typing); typing = setTimeout(() => { state.filter = $("#filter").value; refresh(); }, 400); };
+  filterSuggest();
+  renderChips();
+  renderViewSelect();
+  $("#view-save").onclick = saveCurrentView;
+  $("#view-select").onchange = () => {
+    const v = savedViews()[Number($("#view-select").value)];
+    $("#view-select").value = "";
+    openView(v);
+  };
+  const togglePalette = palette();
+  $("#palette-open").onclick = togglePalette;
+  $("#palette-open").textContent = /mac/i.test(navigator.platform) ? "⌘K" : "Ctrl K";
+  document.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") { e.preventDefault(); togglePalette(); }
+  });
+  $("#passport-body").onclick = passportClick;
+  $("#pulse-pause").onclick = () => {
+    pulse.setPaused(!pulse.paused);
+    $("#pulse-pause").setAttribute("aria-pressed", String(pulse.paused));
+    $("#pulse-pause").textContent = pulse.paused ? "Resume" : "Pause";
+  };
+  $("#pulse-clear").onclick = () => pulse.clear();
+  $("#pulse-q").oninput = () => { pulse.query = $("#pulse-q").value.trim().toLowerCase(); };
+  $("#pulse-type").onchange = () => { pulse.type = $("#pulse-type").value; };
   const tabButtons = $$(".tabs button");
   for (const [i, b] of tabButtons.entries()) {
     b.onclick = () => selectArea(b.dataset.area);
@@ -2474,6 +2978,10 @@ function init() {
     }
   };
   $("#panel-close").onclick = closePanel;
+  $("#panel").addEventListener("click", (e) => {
+    const a = e.target.closest("a[data-passport]");
+    if (a) openPassport(a.dataset.passport);
+  });
   $("#theme").onclick = () => { setTheme(theme() === "dark" ? "light" : "dark"); refresh(); };
   document.addEventListener("keydown", (e) => {
     if (e.target.matches("input, select, textarea")) return;
@@ -2501,11 +3009,9 @@ function init() {
     const wasLive = state.live;
     loadHash();
     $("#filter").value = state.filter;
+    renderChips();
     renderWindow();
-    for (const [id, k] of [["#g-collapse", "collapse"], ["#g-dns", "dns"], ["#g-sites", "sites"], ["#g-anomalies", "anomalies"], ["#g-networks", "networks"], ["#g-identity", "identity"]]) {
-      $(id).checked = state.gopts[k];
-    }
-    $("#g-top").value = state.gopts.top;
+    syncGraphInputs();
     const changed = state.live !== wasLive;
     if (changed) setLive(state.live);
     if (!changed || !state.live) selectTab(state.tab);

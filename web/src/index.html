@@ -31,6 +31,7 @@
                aria-expanded="false" aria-autocomplete="list" autocomplete="off" spellcheck="false" placeholder="Find (f)">
         <ul id="search-results" role="listbox" hidden></ul>
       </div>
+      <button id="palette-open" type="button" title="Commands, places and times (Ctrl+K)" aria-label="Open the command palette">Ctrl K</button>
       <button id="ask-open" title="Ask netgraph (?)">Ask</button>
       <button class="icon" id="theme" title="Toggle dark mode" aria-label="Toggle dark mode">◐</button>
     </div>
@@ -67,9 +68,17 @@
   <section class="event-rail" id="event-rail" hidden aria-label="Events around this moment"></section>
 
   <section class="filters">
-    <input id="filter" type="search" spellcheck="false" autocomplete="off"
-           placeholder="Filter: device:alice-*  domain:*.example.com  ip:10.0.0.0/8  port:443  dir:in  asn:13335  cc:DE  app:quic">
+    <div class="filter-box">
+      <input id="filter" type="search" spellcheck="false" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="filter-suggest" aria-autocomplete="list" aria-label="Filter"
+             placeholder="Filter (/): device:alice-*  domain:*.example.com  ip:10.0.0.0/8  port:443  dir:in  asn:13335  cc:DE  app:quic">
+      <ul id="filter-suggest" role="listbox" aria-label="Filter suggestions" hidden></ul>
+    </div>
+    <div class="view-tools">
+      <select id="view-select" aria-label="Saved views"><option value="">Saved views</option></select>
+      <button id="view-save" type="button" title="Save this view, filter and window length">Save view</button>
+    </div>
     <div id="summary" class="summary" aria-live="polite"></div>
+    <div id="filter-chips" class="filter-chips" hidden></div>
   </section>
 
   <nav class="tabs" role="tablist" aria-label="Areas">
@@ -127,6 +136,18 @@
       </div>
       </details>
     </section>
+    <section id="view-passport" class="view" hidden><div id="passport-body"></div></section>
+    <section id="view-pulse" class="view" hidden>
+      <div class="table-tools">
+        <button id="pulse-pause" type="button" aria-pressed="false">Pause</button>
+        <input id="pulse-q" type="search" aria-label="Filter the Pulse" placeholder="Filter these lines" autocomplete="off" spellcheck="false">
+        <select id="pulse-type" aria-label="Kind of event"><option value="">Everything</option><option value="flow">Connections</option><option value="dhcp">DHCP</option></select>
+        <button id="pulse-clear" type="button">Clear</button>
+        <span class="spacer"></span><span id="pulse-count" class="muted" role="status"></span>
+      </div>
+      <p id="pulse-empty" class="muted empty">Listening. New connections and DHCP appear here as sensors deliver them.</p>
+      <ol id="pulse-list" class="pulse"></ol>
+    </section>
     <section id="view-devices" class="view" hidden><table id="t-devices"></table></section>
     <section id="view-flows" class="view" hidden><table id="t-flows"></table></section>
     <section id="view-destinations" class="view" hidden><div class="table-tools"><label class="muted">Group <select id="dest-group" aria-label="Group destinations"><option value="">by name</option><option value="site">by site</option></select></label></div><table id="t-destinations"></table></section>
@@ -144,6 +165,11 @@
   </main>
 
   <footer class="status"><span id="status" role="status" aria-live="polite"></span><button id="connect" type="button" hidden>Connect</button><span id="version"></span></footer>
+
+  <dialog id="palette" class="palette" aria-label="Command palette">
+    <input id="palette-q" type="text" role="combobox" aria-expanded="true" aria-controls="palette-list" aria-autocomplete="list" autocomplete="off" spellcheck="false" aria-label="Command, place or time" placeholder="Go somewhere, find a device, or type a time: yesterday 3pm">
+    <ul id="palette-list" role="listbox" aria-label="Results"></ul>
+  </dialog>
 
   <dialog id="note-dialog" class="note">
     <form method="dialog"><button class="icon close" title="Close" aria-label="Close">✕</button></form>

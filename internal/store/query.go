@@ -400,6 +400,20 @@ func (s *Store) Flows(ctx context.Context, f model.Filter) ([]model.Flow, error)
 	return s.flowsWhere(ctx, f, "", nil)
 }
 
+// flowOrder is the ORDER BY for a validated Filter.Sort. Each is the column
+// from a fixed list, never the caller's text; flow_key keeps paging stable.
+func flowOrder(sort string) string {
+	col := map[string]string{"first_seen": "first_seen", "last_seen": "last_seen", "bytes": "bo + bi", "bytes_out": "bo", "bytes_in": "bi"}[strings.TrimPrefix(sort, "-")]
+	if col == "" {
+		return "bo + bi DESC, first_seen, flow_key"
+	}
+	dir := " ASC"
+	if strings.HasPrefix(sort, "-") {
+		dir = " DESC"
+	}
+	return col + dir + ", first_seen, flow_key"
+}
+
 // flowsWhere is Flows with an extra SQL condition over connections c.
 func (s *Store) flowsWhere(ctx context.Context, f model.Filter, extra string, extraArgs []any) ([]model.Flow, error) {
 	from, to := s.window(f)
@@ -420,7 +434,7 @@ func (s *Store) flowsWhere(ctx context.Context, f model.Filter, extra string, ex
 		` + connBytes("bytes_out", from, to) + ` AS bo, ` + connBytes("bytes_in", from, to) + ` AS bi,
 		` + connBytes("pkts_out", from, to) + `, ` + connBytes("pkts_in", from, to) + `
 		FROM connections c WHERE ` + w.sql() + `
-		ORDER BY bo + bi DESC, first_seen, flow_key LIMIT ? OFFSET ?`
+		ORDER BY ` + flowOrder(f.Sort) + ` LIMIT ? OFFSET ?`
 	rows, err := s.r.QueryContext(ctx, q, append(w.args, limit(f, 1000, 100000), offset(f))...)
 	if err != nil {
 		return nil, err

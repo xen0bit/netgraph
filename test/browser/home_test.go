@@ -15,8 +15,11 @@ import (
 	"time"
 
 	"github.com/chromedp/cdproto/emulation"
+	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/chromedp"
 )
+
+const ctrlModifier = input.ModifierCtrl
 
 const homeDrawn = `!!document.querySelector("#home-body .home-status")`
 
@@ -58,8 +61,8 @@ func TestAreasRememberTheirView(t *testing.T) {
 	s.waitFor("Connections", `!document.querySelector("#view-flows").hidden && !document.querySelector("#subtabs").hidden`)
 	s.run(chromedp.Click(`#subtabs [data-tab="dns"]`, chromedp.ByQuery))
 	s.waitFor("DNS", `!document.querySelector("#view-dns").hidden && location.hash.includes("tab=dns")`)
-	s.run(chromedp.Click(`.tabs [data-area="devices"]`, chromedp.ByQuery))
-	s.waitFor("Devices with no sub-views", `!document.querySelector("#view-devices").hidden && document.querySelector("#subtabs").hidden`)
+	s.run(chromedp.Click(`.tabs [data-area="wifi"]`, chromedp.ByQuery))
+	s.waitFor("Wi-Fi with no sub-views", `!document.querySelector("#view-wifi").hidden && document.querySelector("#subtabs").hidden`)
 	s.run(chromedp.Click(`.tabs [data-area="activity"]`, chromedp.ByQuery))
 	s.waitFor("DNS again", `!document.querySelector("#view-dns").hidden`)
 	s.run(chromedp.Click(`.tabs [data-area="findings"]`, chromedp.ByQuery))

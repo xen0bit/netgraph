@@ -125,6 +125,7 @@ func New(cfg Config) *Server {
 	read := func(p string, h http.HandlerFunc) { s.mux.Handle("GET "+p, s.requireRead(h)) }
 	read("/api/v1/range", s.dataRange)
 	read("/api/v1/home", s.home)
+	read("/api/v1/passport", s.passport)
 	read("/api/v1/reel", s.reel)
 	read("/api/v1/reel/markers", s.reelMarkers)
 	read("/api/v1/summary", s.summary)
@@ -652,6 +653,26 @@ func (s *Server) home(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, h)
+}
+
+// passport answers one device's profile. tz is the reader's offset from UTC in
+// minutes, east positive, for the hours of the day.
+func (s *Server) passport(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	var tz int
+	if v := q.Get("tz"); v != "" {
+		var err error
+		if tz, err = strconv.Atoi(v); err != nil || tz < -14*60 || tz > 14*60 {
+			httpError(w, http.StatusBadRequest, errors.New("tz must be minutes from UTC"))
+			return
+		}
+	}
+	p, err := s.cfg.Store.Passport(r.Context(), q.Get("id"), time.Duration(tz)*time.Minute)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, p)
 }
 
 func (s *Server) anomalies(w http.ResponseWriter, r *http.Request) {
