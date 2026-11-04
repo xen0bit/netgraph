@@ -56,6 +56,10 @@ that are easy to break.
 - **Every table has an erasure decision** in `tableErasure`
   (`internal/store/erasure_tables_test.go`): a new one fails that test until
   it's added to `db forget`, `db purge` and the disk guard as it needs.
+- **Secrets stay out of what's logged.** Channel and broker URLs hold tokens: `Name()`
+  and errors never repeat one (an http client's error quotes its URL), and they're
+  read from files or the environment, not flags. Text off the network stays inert in
+  a chat message or an email header.
 - **d2 keys are always quoted** (`graph.quote`): an unquoted
   `example.com` or address is parsed as nested containers.
 - **A device's type is a judgement.** `internal/classify` is a pure function over

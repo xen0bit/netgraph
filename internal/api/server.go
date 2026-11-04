@@ -44,6 +44,8 @@ type Config struct {
 	// An empty token disables that check.
 	IngestToken string
 	ReadToken   string
+	// Notify is where alerts go, for Settings. Nil when there are none.
+	Notify Notify
 	// Web is the web UI's files (index.html, web.wasm[.gz], ...); nil
 	// serves a page saying the UI was not built in.
 	Web    fs.FS
@@ -127,6 +129,8 @@ func New(cfg Config) *Server {
 	read("/api/v1/home", s.home)
 	read("/api/v1/passport", s.passport)
 	read("/api/v1/presence", s.presence)
+	read("/api/v1/notify", s.notifyChannels)
+	s.mux.Handle("POST /api/v1/notify/test", s.requireRead(http.HandlerFunc(s.notifyTest)))
 	read("/api/v1/findings", s.findings)
 	read("/api/v1/findings/{id}", s.finding)
 	read("/api/v1/devices/links", s.deviceLinks)
@@ -957,6 +961,53 @@ func (s *Server) findingsSeen(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// Notify is where alerts go, for Settings. Nil when there are none.
+type Notify interface {
+	Channels() []alert.ChannelInfo
+	Test(ctx context.Context, name string) error
+}
+
+func (s *Server) notifyChannels(w http.ResponseWriter, _ *http.Request) {
+	out := struct {
+		Channels []alert.ChannelInfo `json:"channels"`
+	}{Channels: []alert.ChannelInfo{}}
+	if s.cfg.Notify != nil {
+		out.Channels = s.cfg.Notify.Channels()
+	}
+	writeJSON(w, out)
+}
+
+// notifyTest sends a test message and says what happened. The answer to a failure
+// is the channel's own error, with no secrets in it, so 200 with ok false: the
+// request itself worked.
+func (s *Server) notifyTest(w http.ResponseWriter, r *http.Request) {
+	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		httpError(w, http.StatusUnsupportedMediaType, errors.New("expected application/json"))
+		return
+	}
+	var body struct {
+		Name string `json:"name"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil || body.Name == "" {
+		httpError(w, http.StatusBadRequest, errors.New(`expected {"name": "..."}`))
+		return
+	}
+	if s.cfg.Notify == nil {
+		httpError(w, http.StatusNotFound, alert.ErrNoChannel)
+		return
+	}
+	err := s.cfg.Notify.Test(r.Context(), body.Name)
+	if errors.Is(err, alert.ErrNoChannel) {
+		httpError(w, http.StatusNotFound, err)
+		return
+	}
+	out := map[string]any{"ok": err == nil}
+	if err != nil {
+		out["error"] = err.Error()
+	}
+	writeJSON(w, out)
 }
 
 func (s *Server) presence(w http.ResponseWriter, r *http.Request) {

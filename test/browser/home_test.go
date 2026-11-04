@@ -191,6 +191,7 @@ func TestSettings(t *testing.T) {
 	if !strings.Contains(text, "-server "+baseURL) {
 		t.Errorf("no command for this server in %q", text)
 	}
+	s.waitFor("the channels", `document.querySelector("#settings-notify").textContent.includes("None set up")`)
 	s.run(chromedp.Click(`[data-theme-set="dark"]`, chromedp.ByQuery))
 	s.waitFor("dark", `document.documentElement.dataset.theme === "dark" && localStorage.getItem("netgraph.theme") === "dark"`)
 	s.run(chromedp.Click(`[data-theme-set=""]`, chromedp.ByQuery))

@@ -625,6 +625,7 @@ function renderSettings() {
       <div class="segmented" role="group" aria-label="Theme">
         ${[["", "Match the system"], ["light", "Light"], ["dark", "Dark"]].map(([v, l]) => `<button type="button" data-theme-set="${v}" aria-pressed="${t === v}">${l}</button>`).join("")}
       </div></section>
+    <section class="card"><h2>Notifications</h2><div id="settings-notify" class="muted">Reading…</div></section>
     <section class="card"><h2>Saved views</h2>
       ${savedViews().length ? `<ul class="saved-list">${savedViews().map((v, i) => `<li><span><b>${esc(v.name)}</b> <span class="muted">${esc(v.tab)}${v.filter ? ` · ${esc(v.filter)}` : ""}</span></span> <button type="button" data-view-delete="${i}">Delete</button></li>`).join("")}</ul>` : `<p class="muted">None yet. “Save view” above any table or the map keeps its filter and window length, in this browser.</p>`}</section>
     <section class="card"><h2>Add a sensor</h2>${installBlock(location.origin)}</section>
@@ -638,6 +639,13 @@ function renderSettings() {
       <p class="muted" id="settings-version"></p></section>
   </div>`;
   $("#settings-version").textContent = $("#version").textContent;
+  api("notify", new URLSearchParams()).then((n) => {
+    const el = $("#settings-notify");
+    if (!el) return;
+    el.innerHTML = n.channels.length
+      ? `<ul class="saved-list">${n.channels.map((c) => `<li><span><b>${esc(c.name)}</b> <span class="muted">${esc([c.min && `${c.min} and up`, c.kinds?.join(", "), c.quiet && `quiet ${c.quiet}`].filter(Boolean).join(" · "))}</span></span> <span><output class="muted"></output> <button type="button" data-notify-test="${esc(c.name)}">Send a test</button></span></li>`).join("")}</ul>`
+      : `<p>None set up. Start the server with <code>-notify-file</code>, a file of channel URLs: <code>ntfy://</code>, <code>gotify://</code>, <code>telegram://</code>, <code>smtp://</code> or <code>https://</code>.</p>`;
+  }).catch(() => { const el = $("#settings-notify"); if (el) el.textContent = "Can't read them."; });
 }
 
 function setTheme(t) {
@@ -647,6 +655,15 @@ function setTheme(t) {
 }
 
 function settingsClick(e) {
+  const test = e.target.closest("[data-notify-test]");
+  if (test) {
+    const out = test.parentElement.querySelector("output");
+    out.textContent = "Sending…";
+    send("POST", "notify/test", { name: test.dataset.notifyTest })
+      .then((r) => { out.textContent = r.ok ? "Sent" : r.error; })
+      .catch((err) => { out.textContent = err.message; });
+    return;
+  }
   const th = e.target.closest("[data-theme-set]");
   if (th) { setTheme(th.dataset.themeSet); renderSettings(); return; }
   if (e.target.closest("[data-forget-token]")) { token = ""; store.remove("netgraph.token"); renderSettings(); setStatus("Token forgotten"); return; }
