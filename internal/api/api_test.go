@@ -224,7 +224,7 @@ func TestExport(t *testing.T) {
 
 func TestLiveAndWeb(t *testing.T) {
 	web := fstest.MapFS{
-		"index.html":  {Data: []byte("<html>netgraph ui</html>")},
+		"index.html": {Data: []byte("<html>netgraph ui</html>")},
 	}
 	srv, st := serve(t, web)
 
