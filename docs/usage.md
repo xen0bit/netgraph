@@ -199,6 +199,22 @@ alice-iphone  (Apple · 192.168.1.23)
 | Graph: arrows | pan the diagram |
 | `?` | help |
 
+## AI assistants (MCP)
+
+`netgraph mcp` serves netgraph's tools to an assistant over the Model Context
+Protocol, on stdin and stdout. They only read. Point it at a database or a server:
+
+```json
+{"mcpServers": {"netgraph": {"command": "netgraph", "args": ["mcp", "-db", "/var/lib/netgraph/netgraph.db"]}}}
+```
+
+With `-server`, it holds only the read token (`-token-file` or
+`$NETGRAPH_READ_TOKEN`). What the assistant reads goes wherever that assistant sends
+it, so this is your decision as much as any: device names, addresses, and what they
+connect to. Hostnames and DNS names are chosen by whoever's on the network and could
+try to give the assistant instructions; the tools can't change anything, and they
+tell the assistant to treat them as data.
+
 ## The web UI
 
 `netgraph serve` serves it at `/`. If the server has a read token, the
@@ -254,6 +270,10 @@ Incidents, Insights, What-if), **Wi-Fi** and **Settings** (General, Sensors).
   `alice's devices`), rankings (`biggest uploader`, `top sites`), `who's home`, `new
   devices`, `what changed` and `any anomalies`, and two questions joined by `and`.
   It says what it couldn't read, and shows a small map when the answer is about one device.
+- **Ask with a model** (only if the server has `-llm-file`): a checkbox in Ask, off
+  each time the page loads. For a model off your network it asks first, and shows
+  what's being sent. The model can only read, and a statement that doesn't cite a
+  read it made is removed. That shows where a claim came from, not that it's right.
 - **Settings:** theme, saved views, the commands to add a sensor to this server, what this
   browser remembers, and what the server holds.
 - **Window:** pick presets, type times, shift with ◀ ▶ or `[` `]`, or drag

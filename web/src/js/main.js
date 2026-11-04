@@ -2065,11 +2065,34 @@ async function drawAskMap(a) {
   askMap.fit();
 }
 
+// The model option, if the server has one. Off whenever the page loads, and turning
+// it on for a model elsewhere needs saying yes to what that means.
+let askConfigLoaded = false;
+function loadAskConfig() {
+  if (askConfigLoaded) return;
+  askConfigLoaded = true;
+  api("ask/config", new URLSearchParams()).then((c) => {
+    if (!c.llm) return;
+    $("#ask-model").hidden = false;
+    $("#ask-llm-name").textContent = `Use ${c.llm.model} on ${c.llm.host}`;
+    const warn = $("#ask-llm-warn");
+    warn.textContent = `Questions asked this way send data about your network, such as device names and what they connect to, to ${c.llm.host}.`;
+    if (c.llm.local) return;
+    const box = $("#ask-llm");
+    box.onchange = async () => {
+      warn.hidden = !box.checked;
+      if (!box.checked) return;
+      const ok = await inputDialog({ title: `Send network data to ${c.llm.host}?`, text: `${c.llm.host} isn't on your network. Answering with ${c.llm.model} sends it device names, addresses and what they connect to. Nothing is sent until you ask a question.`, ok: "Send it", danger: true });
+      if (!ok) { box.checked = false; warn.hidden = true; }
+    };
+  }).catch(() => { askConfigLoaded = false; });
+}
+
 function renderAnswer(a) {
   const box = $("#ask-answer");
   const asked = a.from && a.to ? `<p class="muted">From ${esc(stamp(a.from))} to ${esc(stamp(a.to))}${a.confidence ? ` · ${esc(a.confidence)} confidence` : ""}</p>` : "";
   drawAskMap(a).catch(() => {});
-  box.innerHTML = `<p><b>${esc(a.answer || "No answer.")}</b></p>${asked}
+  box.innerHTML = `<p><b>${esc(a.answer || "No answer.")}</b></p>${a.model ? `<p class="muted">Written by the model ${esc(a.model)}, not by netgraph. Check what matters.</p>` : ""}${asked}
     ${(a.claims || []).map((c) => `<p>${esc(c.text)} ${(c.evidence || []).map((e) => `<button class="cite" data-kind="${esc(e.kind)}" data-id="${esc(e.id)}" data-ts="${e.ts || 0}">${esc(e.kind)}</button>`).join(" ")}</p>`).join("")}
     ${(a.gaps || []).length ? `<p class="muted">Gaps: ${esc(a.gaps.join("; "))}</p>` : ""}
     ${(a.plan || []).length ? `<details><summary>How I answered</summary><ol>${a.plan.map((p) => `<li><span class="badge">${esc(p.tool)}</span> ${esc(Object.entries(p.args || {}).map(([k, v]) => `${k}=${v}`).join(" "))}</li>`).join("")}</ol></details>` : ""}
@@ -2077,6 +2100,8 @@ function renderAnswer(a) {
   box.querySelectorAll(".cite").forEach((b) => {
     b.onclick = () => {
       const kind = b.dataset.kind, id = b.dataset.id, ts = Number(b.dataset.ts);
+      // A model's citation is a read it made; the plan below shows which.
+      if (kind === "tool") return;
       if (kind === "entity") openEntity(id);
       else if (ts) { toggleRecorder(true); setRecAt(ts); }
       $("#ask-dialog").close();
@@ -2088,6 +2113,7 @@ function openAsk() {
   const dlg = $("#ask-dialog");
   $("#ask-q").value = "";
   $("#ask-answer").innerHTML = `<p class="muted">Ask about a device, a name, a moment, an anomaly, or what changed.</p>`;
+  loadAskConfig();
   if (!dlg.open) dlg.showModal();
   setTimeout(() => $("#ask-q").focus(), 0);
 }
@@ -3113,7 +3139,7 @@ function init() {
     if (!q) return;
     $("#ask-answer").innerHTML = `<p class="muted">Investigating…</p>`;
     try {
-      const a = await send("POST", "ask", { q, from: String(state.to - state.span), to: String(state.to), tz: -new Date().getTimezoneOffset() });
+      const a = await send("POST", "ask", { q, from: String(state.to - state.span), to: String(state.to), tz: -new Date().getTimezoneOffset(), llm: $("#ask-llm").checked });
       renderAnswer(a);
     } catch (err) {
       $("#ask-answer").innerHTML = `<p class="muted">${esc(err.message)}</p>`;

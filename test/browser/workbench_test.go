@@ -402,3 +402,56 @@ func TestFindingsAreText(t *testing.T) {
 		t.Error("a finding became markup")
 	}
 }
+
+// With no model configured, Ask offers none.
+func TestAskOffersNoModelByDefault(t *testing.T) {
+	s := open(t, window()+"&tab=devices", "")
+	s.settle()
+	s.run(chromedp.Click(`#ask-open`, chromedp.ByQuery))
+	s.waitFor("the dialog", `document.querySelector("#ask-dialog").open`)
+	time.Sleep(300 * time.Millisecond)
+	var hidden bool
+	s.eval(`document.querySelector("#ask-model").hidden`, &hidden)
+	if !hidden {
+		t.Error("a model is offered with none configured")
+	}
+}
+
+// A model off the network needs a yes before anything can be sent, and refusing
+// leaves it off.
+func TestAModelElsewhereAsksFirst(t *testing.T) {
+	stub := `const real = window.fetch; window.__llm = []; window.fetch = async (u, o) => {
+		if (String(u).includes("/ask/config")) return new Response(JSON.stringify({llm: {model: "big", host: "api.example.com", local: false}}), {headers: {"content-type": "application/json"}});
+		if (String(u).includes("/api/v1/ask")) { window.__llm.push(JSON.parse(o.body).llm); return new Response(JSON.stringify({answer: "<img src=x onerror=window.__pwned=1>", model: "<b>big</b>", claims: [{text: "a claim", evidence: [{kind: "tool", id: "r1", text: "search"}]}]}), {headers: {"content-type": "application/json"}}); }
+		return real(u, o); };`
+	s := open(t, window()+"&tab=devices", stub)
+	s.settle()
+	s.run(chromedp.Click(`#ask-open`, chromedp.ByQuery))
+	s.waitFor("the option", `!document.querySelector("#ask-model").hidden && !document.querySelector("#ask-llm").checked`)
+	// Off by default: a question is answered without it.
+	s.run(chromedp.SendKeys(`#ask-q`, "hello"+kb.Enter, chromedp.ByQuery))
+	s.waitFor("the question", `window.__llm.length === 1 && window.__llm[0] === false`)
+	s.run(chromedp.Click(`#ask-llm`, chromedp.ByQuery))
+	s.waitFor("the warning", `document.querySelector("#input-dialog").open && document.querySelector("#input-dialog-title").textContent.includes("api.example.com")`)
+	s.run(chromedp.Click(`#input-dialog button[value="cancel"]`, chromedp.ByQuery))
+	s.waitFor("it off again", `!document.querySelector("#ask-llm").checked && document.querySelector("#ask-llm-warn").hidden`)
+	s.run(chromedp.Click(`#ask-llm`, chromedp.ByQuery))
+	s.waitFor("the warning", `document.querySelector("#input-dialog").open`)
+	s.run(chromedp.Click(`#input-dialog-ok`, chromedp.ByQuery))
+	s.waitFor("it on, and saying so", `document.querySelector("#ask-llm").checked && !document.querySelector("#ask-llm-warn").hidden`)
+	s.eval(`document.querySelector("#ask-q").value = ""`, nil)
+	s.run(chromedp.SendKeys(`#ask-q`, "again"+kb.Enter, chromedp.ByQuery))
+	s.waitFor("the model used", `window.__llm.length === 2 && window.__llm[1] === true && document.querySelector("#ask-answer").textContent.includes("Written by the model")`)
+	var pwned bool
+	s.eval(`!!window.__pwned || !!document.querySelector("#ask-answer img, #ask-answer b b")`, &pwned)
+	if pwned {
+		t.Error("a model's words became markup")
+	}
+	// A model's citation is not a moment to jump to.
+	s.run(chromedp.Click(`#ask-answer .cite`, chromedp.ByQuery))
+	var open bool
+	s.eval(`document.querySelector("#ask-dialog").open`, &open)
+	if !open {
+		t.Error("a tool citation closed the dialog")
+	}
+}

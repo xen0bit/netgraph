@@ -30,6 +30,7 @@ import (
 	"github.com/xen0bit/netgraph/internal/buildinfo"
 	"github.com/xen0bit/netgraph/internal/graph"
 	"github.com/xen0bit/netgraph/internal/graph/d2render"
+	"github.com/xen0bit/netgraph/internal/llm"
 	"github.com/xen0bit/netgraph/internal/model"
 	"github.com/xen0bit/netgraph/internal/policy"
 	"github.com/xen0bit/netgraph/internal/store"
@@ -46,6 +47,8 @@ type Config struct {
 	ReadToken   string
 	// Notify is where alerts go, for Settings. Nil when there are none.
 	Notify Notify
+	// LLM is a language model Ask may use when asked to. Nil when there's none.
+	LLM *llm.Config
 	// Web is the web UI's files (index.html, web.wasm[.gz], ...); nil
 	// serves a page saying the UI was not built in.
 	Web    fs.FS
@@ -71,6 +74,7 @@ type Server struct {
 	readTok     atomic.Pointer[string]
 	ingestStats ingestMetrics
 	liveSubs    atomic.Int32
+	modelAsks   chan struct{}
 	done        chan struct{}
 	doneOnce    sync.Once
 }
@@ -117,7 +121,7 @@ func New(cfg Config) *Server {
 	if cfg.MaxBatch <= 0 {
 		cfg.MaxBatch = 32 << 20
 	}
-	s := &Server{cfg: cfg, mux: http.NewServeMux(), log: cfg.Logger, done: make(chan struct{})}
+	s := &Server{cfg: cfg, mux: http.NewServeMux(), log: cfg.Logger, done: make(chan struct{}), modelAsks: make(chan struct{}, maxModelAsks)}
 	s.SetTokens(cfg.IngestToken, cfg.ReadToken)
 	s.keys.Store(cfg.WiFi)
 	s.mux.HandleFunc("POST /api/v1/ingest", s.ingest)
@@ -130,6 +134,7 @@ func New(cfg Config) *Server {
 	read("/api/v1/passport", s.passport)
 	read("/api/v1/presence", s.presence)
 	read("/api/v1/notify", s.notifyChannels)
+	read("/api/v1/ask/config", s.askConfig)
 	s.mux.Handle("POST /api/v1/notify/test", s.requireRead(http.HandlerFunc(s.notifyTest)))
 	read("/api/v1/findings", s.findings)
 	read("/api/v1/findings/{id}", s.finding)
@@ -1317,12 +1322,46 @@ func parseIncidentID(r *http.Request) (int64, error) {
 	return id, nil
 }
 
+// A model call is slow and may cost someone money: only a couple at a time.
+const maxModelAsks = 2
+
+// askConfig says whether Ask can use a model, and where it is, so the page can warn
+// before anything leaves.
+func (s *Server) askConfig(w http.ResponseWriter, _ *http.Request) {
+	out := map[string]any{}
+	if c := s.cfg.LLM; c != nil {
+		out["llm"] = map[string]any{"model": c.Model, "host": c.Host(), "local": c.Local()}
+	}
+	writeJSON(w, out)
+}
+
+func (s *Server) askModel(w http.ResponseWriter, r *http.Request, q string, f model.Filter, now time.Time) {
+	if s.cfg.LLM == nil {
+		httpError(w, http.StatusBadRequest, errors.New("this server has no language model configured"))
+		return
+	}
+	select {
+	case s.modelAsks <- struct{}{}:
+		defer func() { <-s.modelAsks }()
+	default:
+		httpError(w, http.StatusTooManyRequests, errors.New("the model is busy; try again in a moment"))
+		return
+	}
+	out, err := s.cfg.LLM.Ask(r.Context(), s.cfg.Store, q, f.From, f.To, now)
+	if err != nil {
+		httpError(w, http.StatusBadGateway, err)
+		return
+	}
+	writeJSON(w, out)
+}
+
 func (s *Server) ask(w http.ResponseWriter, r *http.Request) {
 	var in struct {
 		Q    string `json:"q"`
 		From string `json:"from"`
 		To   string `json:"to"`
-		TZ   *int   `json:"tz"` // the reader's minutes east of UTC, for "yesterday"
+		TZ   *int   `json:"tz"`  // the reader's minutes east of UTC, for "yesterday"
+		LLM  bool   `json:"llm"` // use the language model; never without being asked
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in); err != nil {
 		httpError(w, http.StatusBadRequest, err)
@@ -1354,6 +1393,10 @@ func (s *Server) ask(w http.ResponseWriter, r *http.Request) {
 	}
 	if !f.From.Before(f.To) {
 		httpError(w, http.StatusBadRequest, errors.New("from must be before to"))
+		return
+	}
+	if in.LLM {
+		s.askModel(w, r, in.Q, f, now)
 		return
 	}
 	loc := time.Local

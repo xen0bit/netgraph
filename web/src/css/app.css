@@ -477,6 +477,8 @@ form.profile output { grid-column: 1 / -1; }
 .finding-note { display: flex; gap: var(--sp-1); }
 .finding-note input { flex: 1; min-width: 0; }
 
+.ask-model { margin: var(--sp-2) 0; font-size: var(--text-sm); }
+.ask-warn { margin: var(--sp-1) 0 0; padding: var(--sp-1) var(--sp-2); border-left: 3px solid var(--warn); }
 .ask-map { height: 240px; min-height: 0; flex: none; margin-top: var(--sp-2); border: 1px solid var(--border); border-radius: var(--radius); }
 
 /* Phones: the window is presets only, everything is one column, and what isn't

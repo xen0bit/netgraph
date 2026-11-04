@@ -199,6 +199,10 @@
       <input id="ask-q" type="text" aria-label="Question" placeholder="What did the printer do yesterday? Who's home? Biggest uploader this week?" required>
       <button type="submit">Ask</button>
     </form>
+    <div id="ask-model" class="ask-model" hidden>
+      <label><input type="checkbox" id="ask-llm"> <span id="ask-llm-name"></span></label>
+      <p id="ask-llm-warn" class="ask-warn" hidden></p>
+    </div>
     <div id="ask-answer" aria-live="polite"></div>
     <div id="ask-map" class="ask-map diagram" hidden aria-label="The device this answer is about"></div>
   </dialog>

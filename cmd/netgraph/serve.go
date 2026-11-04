@@ -22,6 +22,7 @@ import (
 	"github.com/xen0bit/netgraph/internal/asn"
 	"github.com/xen0bit/netgraph/internal/buildinfo"
 	"github.com/xen0bit/netgraph/internal/hass"
+	"github.com/xen0bit/netgraph/internal/llm"
 	"github.com/xen0bit/netgraph/internal/model"
 	"github.com/xen0bit/netgraph/internal/store"
 	"github.com/xen0bit/netgraph/internal/wifi"
@@ -42,6 +43,7 @@ func runServe(args []string) error {
 	alertLearn := fs.String("alert-learn", "24h", "after the first sensor connects, learn the network this long before alerting on new devices")
 	notifyFile := fs.String("notify-file", "", "file of notification channels, one URL a line: ntfy://, gotify://, telegram://, smtp://, https://; or $NETGRAPH_NOTIFY")
 	mqttFile := fs.String("mqtt-file", "", "file holding an MQTT broker's URL, to publish to Home Assistant: mqtt://user:pass@host:1883/prefix; or $NETGRAPH_MQTT")
+	llmFile := fs.String("llm-file", "", "file holding an OpenAI-compatible model's URL, to let Ask use it: http://localhost:11434/v1?model=llama3.2; or $NETGRAPH_LLM. Off by default: a model elsewhere receives your network's data")
 	alertAnomalies := fs.String("alert-anomalies", "", "also POST anomalies at or above this severity: low, medium or high (default off)")
 	alertKinds := fs.String("alert-anomaly-kinds", "", "comma-separated anomaly kinds to alert on (default: all kinds at the chosen severity)")
 	reportEvery := fs.String("report-every", envOr("NETGRAPH_REPORT_EVERY", ""), "POST a summary report at this interval, e.g. 24h (needs -alert-webhook); $NETGRAPH_REPORT_EVERY")
@@ -138,6 +140,10 @@ func runServe(args []string) error {
 	if err != nil {
 		return err
 	}
+	askModel, err := readLLM(*llmFile, log)
+	if err != nil {
+		return err
+	}
 	if *trimRollups && *maxDB <= 0 {
 		return errors.New("-trim-rollups needs -max-db-mb")
 	}
@@ -197,6 +203,7 @@ func runServe(args []string) error {
 	if notifier != nil { // not a nil pointer in an interface
 		cfg.Notify = notifier
 	}
+	cfg.LLM = askModel
 	if notifier != nil {
 		cfg.Alerts = notifier.Stats
 	}
@@ -473,6 +480,33 @@ func readBridge(file string, log *slog.Logger) (*hass.Config, error) {
 	c.Logger = log
 	if c.Options.Password != "" && c.Options.TLS == nil {
 		log.Warn("the MQTT password will cross the network in the clear; use mqtts:// unless the broker is on this machine")
+	}
+	return &c, nil
+}
+
+// readLLM reads the language model's URL from a file or the environment; it can hold
+// a key. Nil means there's none, which is the default.
+func readLLM(file string, log *slog.Logger) (*llm.Config, error) {
+	raw := os.Getenv("NETGRAPH_LLM")
+	if file != "" {
+		b, err := os.ReadFile(file)
+		if err != nil {
+			return nil, fmt.Errorf("-llm-file: %w", err)
+		}
+		raw = string(b)
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	c, err := llm.ParseURL(raw)
+	if err != nil {
+		return nil, fmt.Errorf("llm: %w", err)
+	}
+	if c.Local() {
+		log.Info("Ask can use a language model", "model", c.Model, "host", c.Host())
+	} else {
+		log.Warn("Ask can use a language model on another network: questions asked with it send network data there", "model", c.Model, "host", c.Host())
 	}
 	return &c, nil
 }
