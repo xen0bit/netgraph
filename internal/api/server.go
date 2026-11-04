@@ -134,6 +134,7 @@ func New(cfg Config) *Server {
 	s.keys.Store(cfg.WiFi)
 	s.mux.HandleFunc("POST /api/v1/ingest", s.ingest)
 	s.mux.HandleFunc("GET /api/v1/wifi/keys", s.wifiKeys)
+	s.mux.HandleFunc("GET /api/v1/sensor/config", s.sensorOwnConfig)
 	s.mux.HandleFunc("GET /api/v1/version", s.version)
 	s.mux.HandleFunc("GET /healthz", s.version)
 	read := func(p string, h http.HandlerFunc) { s.mux.Handle("GET "+p, s.require(RoleViewer, h)) }
@@ -190,6 +191,8 @@ func New(cfg Config) *Server {
 	read("/api/v1/map/pins", s.mapPins)
 	s.mux.Handle("PUT /api/v1/map/pins", s.require(RoleOperator, s.setMapPins))
 	s.mux.Handle("DELETE /api/v1/map/pins", s.require(RoleOperator, s.deleteMapPins))
+	s.mux.Handle("GET /api/v1/sensors/{name}/config", s.require(RoleViewer, s.sensorConfig))
+	s.mux.Handle("PUT /api/v1/sensors/{name}/config", s.require(RoleOperator, s.setSensorConfig))
 	s.mux.Handle("PUT /api/v1/devices/{mac}/label", s.require(RoleOperator, s.setLabel))
 	s.mux.Handle("PUT /api/v1/devices/{mac}/profile", s.require(RoleOperator, s.setProfile))
 	s.mux.Handle("POST /api/v1/devices/{mac}/link", s.require(RoleOperator, s.decideLink))
@@ -802,6 +805,55 @@ func (s *Server) setLabel(w http.ResponseWriter, r *http.Request) {
 }
 
 // setProfile records what a person says a device is and who it belongs to.
+// sensorOwnConfig tells a sensor what's asked of it. It takes the ingest token, as
+// shipping does; there's nothing secret in it, so unlike Wi-Fi keys -no-auth is no bar.
+func (s *Server) sensorOwnConfig(w http.ResponseWriter, r *http.Request) {
+	if !tokenOK(r, s.ingestToken()) {
+		httpError(w, http.StatusUnauthorized, errors.New("missing or wrong ingest token"))
+		return
+	}
+	name := r.Header.Get(wire.HeaderSensor)
+	if name == "" {
+		httpError(w, http.StatusBadRequest, fmt.Errorf("missing %s header", wire.HeaderSensor))
+		return
+	}
+	c, err := s.cfg.Store.SensorConfigFor(r.Context(), name)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, c)
+}
+
+// sensorConfig is what's been asked of one name, or of "*" for all of them, unmerged.
+func (s *Server) sensorConfig(w http.ResponseWriter, r *http.Request) {
+	c, err := s.cfg.Store.SensorConfigOwn(r.Context(), r.PathValue("name"))
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, c)
+}
+
+func (s *Server) setSensorConfig(w http.ResponseWriter, r *http.Request) {
+	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		httpError(w, http.StatusUnsupportedMediaType, errors.New("expected application/json"))
+		return
+	}
+	var body wire.SensorConfig
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096))
+	dec.DisallowUnknownFields() // a typo shouldn't read as "saved"
+	if err := dec.Decode(&body); err != nil {
+		httpError(w, http.StatusBadRequest, errors.New(`expected {"log_level", "rdns", "active_timeout_s", "flush_s"}`))
+		return
+	}
+	if err := s.cfg.Store.SetSensorConfig(r.Context(), r.PathValue("name"), body); err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) setProfile(w http.ResponseWriter, r *http.Request) {
 	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
 		httpError(w, http.StatusUnsupportedMediaType, errors.New("expected application/json"))

@@ -149,6 +149,16 @@ func New(cfg Config, emit func(*wire.Flow)) *Table {
 	return &Table{cfg: cfg, emit: emit, flows: make(map[key]*entry), lru: list.New()}
 }
 
+// SetActiveTimeout changes how often long flows report, from the next check on.
+func (t *Table) SetActiveTimeout(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.cfg.ActiveTimeout = d
+}
+
 // Len returns the number of tracked flows.
 func (t *Table) Len() int {
 	t.mu.Lock()

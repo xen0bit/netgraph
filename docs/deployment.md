@@ -198,6 +198,20 @@ or can't run at all. Each shows up as its own entry under Sensors.
 A file has to be readable from where the server runs. Routers' own APIs aren't read: copy the
 lease file across, or run a sensor there.
 
+### Managing sensors
+
+Settings → Sensors shows how each sensor is doing: `Reporting`, `Quiet`, or `Struggling` with what's
+going wrong now (dropped packets, lost events, failed sends, a full flow table), judged from the
+change between its last two reports, so last week's drops don't count. A sensor older than the
+server gets an `Upgrade` prompt saying what to install. netgraph never changes software on a router itself.
+
+Open a sensor to change how it runs, or use "Settings for all sensors" (an operator's job):
+log level, reverse DNS, seconds between records of a long flow, and seconds between batches.
+A sensor asks every minute, applies them without restarting, and reports what it's doing, so the
+panel shows whether it's picked them up. It keeps them in memory only, and asks again after a
+restart. Clearing a setting returns it to the sensor's flag. Nothing here can run anything on a
+sensor or change where it sends data; `-remote-config=false` refuses even this.
+
 ### Connection tracking
 
 Hardware offload moves a router's busiest connections off the CPU, where a capture can't see

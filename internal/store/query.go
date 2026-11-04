@@ -2093,27 +2093,41 @@ func (s *Store) WiFiGroupKeysSince(ctx context.Context, since int64) ([]wire.WiF
 }
 
 func (s *Store) Sensors(ctx context.Context) ([]model.Sensor, error) {
-	rows, err := s.r.QueryContext(ctx, `SELECT name, version, first_seen, last_seen, hello, stats FROM sensors ORDER BY name`)
+	rows, err := s.r.QueryContext(ctx, `SELECT name, version, first_seen, last_seen, hello, stats, stats_prev FROM sensors ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	out := []model.Sensor{}
+	type extra struct {
+		hello wire.Hello
+		prev  string
+	}
+	var extras []extra
 	for rows.Next() {
 		var sn model.Sensor
 		var hello, stats string
-		if err := rows.Scan(&sn.Name, &sn.Version, &sn.FirstSeen, &sn.LastSeen, &hello, &stats); err != nil {
+		var ex extra
+		if err := rows.Scan(&sn.Name, &sn.Version, &sn.FirstSeen, &sn.LastSeen, &hello, &stats, &ex.prev); err != nil {
 			return nil, err
 		}
-		var h struct {
-			Interfaces []struct{ Name string } `json:"interfaces"`
-		}
-		_ = json.Unmarshal([]byte(hello), &h)
-		for _, i := range h.Interfaces {
+		_ = json.Unmarshal([]byte(hello), &ex.hello)
+		for _, i := range ex.hello.Interfaces {
 			sn.Interfaces = append(sn.Interfaces, i.Name)
 		}
 		_ = json.Unmarshal([]byte(stats), &sn.Stats)
 		out = append(out, sn)
+		extras = append(extras, ex)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	now := s.cfg.Now()
+	for i := range out {
+		if err := s.fillFleet(ctx, &out[i], extras[i].hello, extras[i].prev, now); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }

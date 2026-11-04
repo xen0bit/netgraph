@@ -11,6 +11,7 @@ import (
 // accident. Rows are checked by hand here; TestErasure* check the behaviour.
 var tableErasure = map[string]string{
 	"sensors":           "operational: a sensor's name and counters, not about any device",
+	"sensor_config":     "operational: settings for a sensor, not about any device",
 	"ingest_seq":        "operational: batch sequence numbers",
 	"entities":          "forget, purge",
 	"facts":             "forget, purge, disk guard",

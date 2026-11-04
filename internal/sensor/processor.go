@@ -732,3 +732,6 @@ func (p *Processor) Flush(now time.Time, reason string) {
 	p.flows.Flush(now, reason)
 	p.Tick(now.Add(p.cfg.DNSTimeout))
 }
+
+// SetActiveTimeout changes how often long flows report.
+func (p *Processor) SetActiveTimeout(d time.Duration) { p.flows.SetActiveTimeout(d) }

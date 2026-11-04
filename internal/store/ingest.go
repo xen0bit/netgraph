@@ -370,7 +370,7 @@ func (g *ingester) event(ctx context.Context, sid int64, sensor, boot string, ev
 	case wire.TypeStats:
 		if ev.Stats != nil {
 			b, _ := json.Marshal(ev.Stats)
-			if _, err := g.tx.ExecContext(ctx, `UPDATE sensors SET stats = ? WHERE id = ?`, string(b), sid); err != nil {
+			if _, err := g.tx.ExecContext(ctx, `UPDATE sensors SET stats_prev = stats, stats = ? WHERE id = ?`, string(b), sid); err != nil {
 				return err
 			}
 			return g.timeline(ctx, ts, "sensor", 0, "sensor:"+sensor, 0, "", "", "stats", "sensors", strconv.FormatInt(sid, 10)+":"+strconv.FormatInt(ts, 10), map[string]string{"sensor": sensor})

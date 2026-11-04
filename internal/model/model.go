@@ -7,6 +7,7 @@ package model
 import (
 	"context"
 	"fmt"
+	"github.com/xen0bit/netgraph/internal/wire"
 	"net/netip"
 	"net/url"
 	"slices"
@@ -725,7 +726,32 @@ type Sensor struct {
 	LastSeen   int64          `json:"last_seen"`
 	Interfaces []string       `json:"interfaces,omitempty"`
 	Stats      map[string]any `json:"stats,omitempty"`
+
+	OS   string `json:"os,omitempty"`
+	Arch string `json:"arch,omitempty"`
+	// Status is SensorOK, SensorQuiet or SensorStruggling, and Problems says why.
+	Status   string   `json:"status,omitempty"`
+	Problems []string `json:"problems,omitempty"`
+	// UpgradeTo is the server's version, if this sensor's is older. Nothing upgrades it:
+	// a router's software is its owner's to change.
+	UpgradeTo string `json:"upgrade_to,omitempty"`
+	// Settable is false for a source inside the server, which has no settings to push.
+	Settable bool `json:"settable,omitempty"`
+	// Config is what's been asked of this sensor alone, InEffect what it last said it's
+	// doing, and ConfigApplied whether that matches what's asked, fleet settings included.
+	Config        *wire.SensorConfig `json:"config,omitempty"`
+	InEffect      *wire.SensorConfig `json:"in_effect,omitempty"`
+	ConfigApplied bool               `json:"config_applied,omitempty"`
+	// TakesConfig is false for one too old to, or started with -remote-config=false.
+	TakesConfig bool `json:"takes_config,omitempty"`
 }
+
+// How a sensor is doing.
+const (
+	SensorOK         = "ok"
+	SensorQuiet      = "quiet"
+	SensorStruggling = "struggling"
+)
 
 // Anomaly kinds.
 const (
