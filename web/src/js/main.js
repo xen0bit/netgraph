@@ -431,7 +431,7 @@ function renderSummary(s, rep) {
     as.length ? `<a class="badge sev-${top}" data-tab="anomalies" title="Most severe: ${esc(top)}">${as.length} ${as.length === 1 ? "anomaly" : "anomalies"}</a>`
       : rep?.learning ? `<span class="hour" title="Checks that compare with history start a day after the first sensor reported">learning the network</span>` : "",
     `<span><b>${s.devices}</b> devices</span>`,
-    `<span title="Connections in the window; inbound ones were opened from outside to a device here"><b>${s.flows}</b> connections${s.inbound ? ` (<b>${s.inbound}</b> inbound)` : ""}, peak <b>${s.peak_connections}</b> open</span>`,
+    `<span title="Connections in the window; inbound ones were opened from outside to a device here"><b>${s.flows}</b> connections${s.inbound ? ` (<b>${s.inbound}</b> inbound)` : ""}${s.precision === "hour" ? "" : `, peak <b>${s.peak_connections}</b> open`}</span>`,
     `<span><b>${s.dns_queries}</b> lookups of <b>${s.domains}</b> names</span>`,
     `<span title="Bytes sent and received by the devices here">sent <b>${bytes(s.bytes_out)}</b> · received <b>${bytes(s.bytes_in)}</b></span>`,
     s.precision === "hour" ? `<span class="hour" title="Older than raw retention: answered from hourly rollups">hourly precision</span>` : "",
@@ -581,7 +581,7 @@ const tables = {
         client, `<span class="muted">→</span>`, server,
         esc(f.name) + (f.sni && f.qname && f.sni !== f.qname ? `<div class="sub">dns: ${esc(f.qname)}</div>` : ""),
         esc(f.app),
-        badge(f.state, f.state) + (f.closed ? badge(f.truncated ? "truncated" : f.end_reason || "closed", "closed") : ""),
+        (f.state ? badge(f.state, f.state) : "") + (f.closed ? badge(f.truncated ? "truncated" : f.end_reason || "closed", "closed") : ""),
         bytes(f.bytes_out), bytes(f.bytes_in), when(f.last_seen),
       ];
     },
@@ -1054,7 +1054,7 @@ async function openEntity(id, { anomaly } = {}) {
     const line = f.direction === "in"
       ? `${link(peerID(f), hostPort(f.client_ip, f.client_port))} → ${dev}:${f.server_port}/${esc(f.proto)}${f.name ? ` <span class="muted">for ${esc(f.name)}</span>` : ""}`
       : `${dev} → ${link(peerID(f), f.name || f.server_ip)}:${f.server_port}/${esc(f.proto)}`;
-    return `<li><time>${when(f.first_seen)}</time>${dirBadge(f.direction)} ${line} ${badge(f.state, f.state)}${f.closed ? badge(f.end_reason, "closed") : ""} <span class="muted">sent ${bytes(f.bytes_out)} · received ${bytes(f.bytes_in)}</span></li>`;
+    return `<li><time>${when(f.first_seen)}</time>${dirBadge(f.direction)} ${line} ${f.state ? badge(f.state, f.state) : ""}${f.closed ? badge(f.end_reason, "closed") : ""} <span class="muted">sent ${bytes(f.bytes_out)} · received ${bytes(f.bytes_in)}</span></li>`;
   }).join("");
   const timeline = (d.timeline || []).slice(-300).map((e) => `<li><time>${when(e.ts)}</time>${badge(e.type)} ${esc(e.detail)}</li>`).join("");
   const flagged = anomaly

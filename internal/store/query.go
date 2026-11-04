@@ -615,8 +615,9 @@ func (s *Store) flowsHourly(ctx context.Context, f model.Filter, from, to int64)
 		}
 		fl.Key = hourlyFlowKey(dev, localIP, fl.RemoteIP, port, proto, fl.Name, fl.Direction)
 		fl.Proto = ProtoName(proto)
-		fl.FirstSeen, fl.LastSeen = first, last+hourMS
-		fl.State = model.StateOpened
+		// A rollup knows its hour, not when in it: the current hour has not
+		// ended, and rollups do not record connection states.
+		fl.FirstSeen, fl.LastSeen = first, min(last+hourMS, ms(s.cfg.Now()))
 		// Rollups keep only the server's port, which is the device's own
 		// when the connection came in.
 		if fl.Direction != model.DirIn {

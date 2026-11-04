@@ -489,3 +489,17 @@ func TestScreenshots(t *testing.T) {
 		}
 	}
 }
+
+// Rollups cannot say what raw records can: the page must not claim it.
+func TestHourlyWindowClaimsOnlyWhatItKnows(t *testing.T) {
+	s := open(t, fmt.Sprintf("from=%d&to=%d&tab=flows", dataEnd-3*864e5, dataEnd), "")
+	s.settle()
+	s.waitFor("rows", `!!document.querySelector("#t-flows tbody tr[data-i]")`)
+	var text string
+	s.eval(`document.querySelector("#summary").textContent + document.querySelector("#t-flows tbody").textContent`, &text)
+	for _, claim := range []string{"peak", "opened", "carried"} {
+		if strings.Contains(text, claim) {
+			t.Errorf("hourly precision claims %q: %s", claim, text)
+		}
+	}
+}
