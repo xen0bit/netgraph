@@ -370,18 +370,18 @@ func TestFindingsInbox(t *testing.T) {
 	s := open(t, "tab=findings", "")
 	s.waitFor("a finding", `!!document.querySelector("#findings-body [data-finding]")`)
 	s.waitFor("the count", `!document.querySelector("#findings-count").hidden || document.querySelectorAll("#findings-body .finding.unread").length === 0`)
-	s.run(chromedp.Click(`#findings-body [data-finding]`, chromedp.ByQuery))
+	s.clickNow(`#findings-body [data-finding]`)
 	s.waitFor("the explanation", `!document.querySelector("#panel").hidden && document.querySelector("#panel-body").textContent.includes("Why this fired") && document.querySelector("#panel-body").textContent.includes("What you could do")`)
 	id := `document.querySelector("#findings-body [data-finding]").dataset.finding`
 	var first string
 	s.eval(id, &first)
-	s.run(chromedp.Click(`#panel-body [data-fstatus="resolved"]`, chromedp.ByQuery))
+	s.clickNow(`#panel-body [data-fstatus="resolved"]`)
 	s.waitFor("it to leave Open", fmt.Sprintf(`!document.querySelector('#findings-body [data-finding="%s"]')`, first))
-	s.run(chromedp.Click(`[data-findings-status="resolved"]`, chromedp.ByQuery))
+	s.clickNow(`[data-findings-status="resolved"]`)
 	s.waitFor("it under Resolved", fmt.Sprintf(`!!document.querySelector('#findings-body [data-finding="%s"]')`, first))
-	s.run(chromedp.Click(fmt.Sprintf(`#findings-body [data-finding="%s"]`, first), chromedp.ByQuery))
+	s.clickNow(fmt.Sprintf(`#findings-body [data-finding="%s"]`, first))
 	s.waitFor("its panel", `!!document.querySelector('#panel-body [data-fstatus="new"]')`)
-	s.run(chromedp.Click(`#panel-body [data-fstatus="new"]`, chromedp.ByQuery))
+	s.clickNow(`#panel-body [data-fstatus="new"]`)
 	s.waitFor("it reopened", fmt.Sprintf(`!document.querySelector('#findings-body [data-finding="%s"]')`, first))
 }
 

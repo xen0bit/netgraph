@@ -16,6 +16,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -211,6 +212,15 @@ var awaitPromise = func(p *runtime.EvaluateParams) *runtime.EvaluateParams { ret
 func (s *session) eval(js string, out any) {
 	s.t.Helper()
 	s.run(chromedp.Evaluate(js, out))
+}
+
+// clickNow clicks in one step in the page. These lists redraw when a refresh lands, and
+// chromedp.Click finds a node and then acts on it, so a redraw in between fails the click. A
+// person's click has no such gap. It waits until there's something to click.
+func (s *session) clickNow(sel string) {
+	s.t.Helper()
+	q := strconv.Quote(sel)
+	s.waitFor(sel, `(() => { const e = document.querySelector(`+q+`); if (e) e.click(); return !!e; })()`)
 }
 
 func (s *session) settle() {
