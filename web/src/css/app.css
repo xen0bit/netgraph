@@ -253,3 +253,8 @@ table.mini th, table.mini td { text-align: left; padding: 3px 5px; border-bottom
 .weather { display: flex; align-items: flex-end; gap: 2px; height: 60px; padding: 4px 0; }
 .wbar { flex: 1; min-width: 2px; background: var(--accent); border-radius: 1px 1px 0 0; opacity: .8; }
 .wbar.forecast { background: transparent; border: 1px dashed var(--accent); opacity: .6; }
+
+/* Notes. */
+dialog.note { max-width: 620px; width: min(620px, 94vw); }
+dialog.note input, dialog.note textarea { width: 100%; margin: 6px 0; }
+dialog.note .actions { display: flex; gap: 10px; align-items: center; }

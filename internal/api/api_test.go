@@ -672,6 +672,22 @@ func TestRecorderEndpoints(t *testing.T) {
 	if inc.ID == 0 {
 		t.Fatal("incident has no id")
 	}
+	resp = post("/api/v1/annotations", map[string]any{"ts": window.To.UnixMilli(), "text": "api note", "entity": "device:3c:22:fb:01:02:03"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("annotation: %s", resp.Status)
+	}
+	var ann model.Annotation
+	_ = json.NewDecoder(resp.Body).Decode(&ann)
+	resp.Body.Close()
+	if ann.ID == 0 {
+		t.Fatal("annotation id is zero")
+	}
+	resp = post("/api/v1/bookmarks", map[string]any{"ts": window.To.UnixMilli(), "name": "api bookmark"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("bookmark: %s", resp.Status)
+	}
+	resp.Body.Close()
+
 	req, _ = http.NewRequest(http.MethodGet, srv.URL+"/api/v1/incidents/"+strconv.FormatInt(inc.ID, 10)+"/autopsy", nil)
 	req.Header.Set("Authorization", "Bearer rd-tok")
 	resp, err = http.DefaultClient.Do(req)

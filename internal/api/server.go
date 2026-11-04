@@ -145,6 +145,8 @@ func New(cfg Config) *Server {
 	read("/api/v1/coverage", s.coverage)
 	read("/api/v1/airspace", s.airspace)
 	read("/api/v1/weather", s.weather)
+	read("/api/v1/annotations", s.annotations)
+	read("/api/v1/bookmarks", s.bookmarks)
 	read("/api/v1/autopsy", s.autopsyPreview)
 	read("/api/v1/incidents", s.incidents)
 	read("/api/v1/incidents/{id}", s.incident)
@@ -157,6 +159,10 @@ func New(cfg Config) *Server {
 	s.mux.Handle("POST /api/v1/anomalies/mute", s.requireRead(http.HandlerFunc(s.muteAnomaly)))
 	s.mux.Handle("POST /api/v1/whatif", s.requireRead(http.HandlerFunc(s.whatif)))
 	s.mux.Handle("POST /api/v1/ask", s.requireRead(http.HandlerFunc(s.ask)))
+	s.mux.Handle("POST /api/v1/annotations", s.requireRead(http.HandlerFunc(s.createAnnotation)))
+	s.mux.Handle("DELETE /api/v1/annotations/{id}", s.requireRead(http.HandlerFunc(s.deleteAnnotation)))
+	s.mux.Handle("POST /api/v1/bookmarks", s.requireRead(http.HandlerFunc(s.createBookmark)))
+	s.mux.Handle("DELETE /api/v1/bookmarks/{id}", s.requireRead(http.HandlerFunc(s.deleteBookmark)))
 	s.mux.Handle("POST /api/v1/incidents", s.requireRead(http.HandlerFunc(s.createIncident)))
 	s.mux.Handle("PATCH /api/v1/incidents/{id}", s.requireRead(http.HandlerFunc(s.updateIncident)))
 	s.mux.Handle("DELETE /api/v1/incidents/{id}", s.requireRead(http.HandlerFunc(s.deleteIncident)))
@@ -700,6 +706,92 @@ func parseLookback(q map[string][]string, def time.Duration) (time.Duration, err
 		return 0, fmt.Errorf("lookback must be a positive duration up to 90d")
 	}
 	return d, nil
+}
+
+func (s *Server) annotations(w http.ResponseWriter, r *http.Request) {
+	f, ok := s.filter(w, r)
+	if !ok {
+		return
+	}
+	if e := r.URL.Query().Get("entity"); e != "" {
+		f.Device = e
+	}
+	out, err := s.cfg.Store.Annotations(r.Context(), f)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, out)
+}
+
+func (s *Server) createAnnotation(w http.ResponseWriter, r *http.Request) {
+	var a model.Annotation
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&a); err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	out, err := s.cfg.Store.CreateAnnotation(r.Context(), a)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, out)
+}
+
+func (s *Server) deleteAnnotation(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		httpError(w, http.StatusBadRequest, errors.New("bad annotation id"))
+		return
+	}
+	if err := s.cfg.Store.DeleteAnnotation(r.Context(), id); err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) bookmarks(w http.ResponseWriter, r *http.Request) {
+	f, ok := s.filter(w, r)
+	if !ok {
+		return
+	}
+	if e := r.URL.Query().Get("entity"); e != "" {
+		f.Device = e
+	}
+	out, err := s.cfg.Store.Bookmarks(r.Context(), f)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, out)
+}
+
+func (s *Server) createBookmark(w http.ResponseWriter, r *http.Request) {
+	var b model.Bookmark
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&b); err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	out, err := s.cfg.Store.CreateBookmark(r.Context(), b)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, out)
+}
+
+func (s *Server) deleteBookmark(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		httpError(w, http.StatusBadRequest, errors.New("bad bookmark id"))
+		return
+	}
+	if err := s.cfg.Store.DeleteBookmark(r.Context(), id); err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) exposure(w http.ResponseWriter, r *http.Request) {

@@ -97,6 +97,8 @@ TIME                 DEVICE           TYPE  NAME               RCODE     MS    A
 | `query coverage` | which sensors saw which devices |
 | `query airspace` | Wi-Fi APs, clients, channels and rogue flags |
 | `query weather` | observed traffic and a simple forecast |
+| `note "text" -at TIME` | add a note to the recorded moment |
+| `bookmark "name" -at TIME` | mark a moment |
 | `graph -o FILE` | the window's graph: `.svg`, `.d2`, `.txt`, `.json`, or `-` for text on stdout |
 | `label MAC NAME...`, `label -clear MAC` | name a device by hand; it overrides DHCP, mDNS and every other source until cleared. With `-server` it goes through the API; without, it writes the database file (stop the server first) |
 | `import FILE.pcap...` | ingest captures directly (re-importing a file is a no-op) |
