@@ -25,8 +25,10 @@ import (
 	"github.com/xen0bit/netgraph/internal/hass"
 	"github.com/xen0bit/netgraph/internal/llm"
 	"github.com/xen0bit/netgraph/internal/model"
+	"github.com/xen0bit/netgraph/internal/sources"
 	"github.com/xen0bit/netgraph/internal/store"
 	"github.com/xen0bit/netgraph/internal/wifi"
+	"github.com/xen0bit/netgraph/internal/wire"
 	"github.com/xen0bit/netgraph/web"
 )
 
@@ -49,6 +51,12 @@ func runServe(args []string) error {
 	alertLearn := fs.String("alert-learn", "24h", "after the first sensor connects, learn the network this long before alerting on new devices")
 	notifyFile := fs.String("notify-file", "", "file of notification channels, one URL a line: ntfy://, gotify://, telegram://, smtp://, https://; or $NETGRAPH_NOTIFY")
 	mqttFile := fs.String("mqtt-file", "", "file holding an MQTT broker's URL, to publish to Home Assistant: mqtt://user:pass@host:1883/prefix; or $NETGRAPH_MQTT")
+	netflowListen := fs.String("netflow-listen", "", "receive NetFlow v5, v9 and IPFIX on this UDP address, such as :2055 (needs -netflow-allow)")
+	netflowAllow := fs.String("netflow-allow", "", "comma-separated addresses or CIDRs to accept exports from")
+	dnsLog := fs.String("dns-log", "", "follow this DNS server's log: dnsmasq's log-queries output, Pi-hole's pihole.log, or AdGuard Home's querylog.json")
+	dnsLogFormat := fs.String("dns-log-format", "dnsmasq", "dnsmasq (also Pi-hole) or adguard")
+	leasesFile := fs.String("leases-file", "", "read device names and addresses from this dnsmasq lease file")
+	sourceLocal := fs.String("source-local", "", "comma-separated CIDRs that are \"here\", for -netflow-listen, -dns-log and -leases-file (default the private ranges)")
 	llmFile := fs.String("llm-file", "", "file holding an OpenAI-compatible model's URL, to let Ask use it: http://localhost:11434/v1?model=llama3.2; or $NETGRAPH_LLM. Off by default: a model elsewhere receives your network's data")
 	alertAnomalies := fs.String("alert-anomalies", "", "also POST anomalies at or above this severity: low, medium or high (default off)")
 	alertKinds := fs.String("alert-anomaly-kinds", "", "comma-separated anomaly kinds to alert on (default: all kinds at the chosen severity)")
@@ -162,6 +170,20 @@ func runServe(args []string) error {
 	if err != nil {
 		return err
 	}
+	allowExporters, err := parsePrefixes("-netflow-allow", *netflowAllow)
+	if err != nil {
+		return err
+	}
+	if *netflowListen != "" && len(allowExporters) == 0 {
+		return errors.New("-netflow-listen needs -netflow-allow: UDP has no login, so this says who to believe")
+	}
+	localNets, err := parsePrefixes("-source-local", *sourceLocal)
+	if err != nil {
+		return err
+	}
+	if !sources.ValidDNSLogFormat(*dnsLogFormat) {
+		return fmt.Errorf("-dns-log-format: %q is not dnsmasq or adguard", *dnsLogFormat)
+	}
 	if *trimRollups && *maxDB <= 0 {
 		return errors.New("-trim-rollups needs -max-db-mb")
 	}
@@ -247,6 +269,36 @@ func runServe(args []string) error {
 	defer stop()
 	go reloadTokens(ctx, apiSrv, *tokenFile, *readTokenFile, *operatorTokenFile, *adminTokenFile, *noAuth, log)
 	go st.RunRetention(ctx, time.Hour)
+	sink := func(ctx context.Context, sensor, boot string, evs []wire.Event) error {
+		_, err := st.Ingest(ctx, sensor, boot, evs)
+		return err
+	}
+	if *netflowListen != "" {
+		go func() {
+			n := &sources.NetFlow{Listen: *netflowListen, Allow: allowExporters, Local: localNets, Sink: sink, Log: log}
+			if err := n.Run(ctx); err != nil && ctx.Err() == nil {
+				log.Error("netflow", "err", err)
+			}
+		}()
+		log.Info("receiving NetFlow", "listen", *netflowListen)
+	}
+	if *dnsLog != "" {
+		go func() {
+			d := &sources.DNSLog{Path: *dnsLog, Format: *dnsLogFormat, Local: localNets, Sink: sink, Log: log}
+			if err := d.Run(ctx); err != nil && ctx.Err() == nil {
+				log.Error("dns log", "err", err)
+			}
+		}()
+		log.Info("following a DNS log", "path", *dnsLog, "format", *dnsLogFormat)
+	}
+	if *leasesFile != "" {
+		go func() {
+			if err := (&sources.LeaseFile{Path: *leasesFile, Local: localNets, Sink: sink, Log: log}).Run(ctx); err != nil && ctx.Err() == nil {
+				log.Error("lease file", "err", err)
+			}
+		}()
+		log.Info("reading a lease file", "path", *leasesFile)
+	}
 	var anomalyAlerts *alert.Notifier
 	if notifier != nil && *alertAnomalies != "" {
 		anomalyAlerts = notifier
@@ -502,6 +554,27 @@ func readBridge(file string, log *slog.Logger) (*hass.Config, error) {
 	return &c, nil
 }
 
+// parsePrefixes reads comma-separated addresses and CIDRs.
+func parsePrefixes(flagName, list string) ([]netip.Prefix, error) {
+	var out []netip.Prefix
+	for _, t := range strings.Split(list, ",") {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
+		pre, err := netip.ParsePrefix(t)
+		if err != nil {
+			a, aerr := netip.ParseAddr(t)
+			if aerr != nil {
+				return nil, fmt.Errorf("%s: %q is not an address or CIDR", flagName, t)
+			}
+			pre = netip.PrefixFrom(a, a.BitLen())
+		}
+		out = append(out, pre.Masked())
+	}
+	return out, nil
+}
+
 // readProxyAuth reads who to trust to say who someone is. Nil if nobody.
 func readProxyAuth(trusted, header, rolesFile string) (*api.ProxyAuth, error) {
 	if strings.TrimSpace(trusted) == "" {
@@ -511,20 +584,9 @@ func readProxyAuth(trusted, header, rolesFile string) (*api.ProxyAuth, error) {
 		return nil, nil
 	}
 	p := &api.ProxyAuth{Header: header, Roles: map[string]api.Role{}, Default: api.RoleViewer}
-	for _, t := range strings.Split(trusted, ",") {
-		t = strings.TrimSpace(t)
-		if t == "" {
-			continue
-		}
-		pre, err := netip.ParsePrefix(t)
-		if err != nil {
-			a, aerr := netip.ParseAddr(t)
-			if aerr != nil {
-				return nil, fmt.Errorf("-trusted-proxy: %q is not an address or CIDR", t)
-			}
-			pre = netip.PrefixFrom(a, a.BitLen())
-		}
-		p.Trusted = append(p.Trusted, pre.Masked())
+	var err error
+	if p.Trusted, err = parsePrefixes("-trusted-proxy", trusted); err != nil {
+		return nil, err
 	}
 	if rolesFile == "" {
 		return p, nil
