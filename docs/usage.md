@@ -248,6 +248,12 @@ Incidents, Insights, What-if), **Wi-Fi** and **Settings** (General, Sensors).
   A resolved finding comes back only for something that happened later, and one
   quiet for a week resolves itself. Findings about one device close together are
   grouped. **This window** still runs the checks over whatever window you've chosen.
+- **Ask** (`?`): answers from the record, with no model involved, and every claim
+  cites what it came from. It reads times (`yesterday`, `at 3pm`, `tuesday`, `last 3
+  hours`, `2 hours ago`) in your timezone, device types and owners (`the printer`,
+  `alice's devices`), rankings (`biggest uploader`, `top sites`), `who's home`, `new
+  devices`, `what changed` and `any anomalies`, and two questions joined by `and`.
+  It says what it couldn't read, and shows a small map when the answer is about one device.
 - **Settings:** theme, saved views, the commands to add a sensor to this server, what this
   browser remembers, and what the server holds.
 - **Window:** pick presets, type times, shift with ◀ ▶ or `[` `]`, or drag

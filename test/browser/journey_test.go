@@ -439,14 +439,27 @@ func TestBookmarkUsesAppDialog(t *testing.T) {
 }
 
 // The Ask box does not promise what Ask cannot do.
-func TestAskPlaceholderIsHonest(t *testing.T) {
+func TestAskDoesWhatItsPlaceholderSays(t *testing.T) {
 	s := open(t, window()+"&tab=devices", "")
 	s.settle()
-	var ph string
-	s.eval(`document.querySelector("#ask-q").placeholder`, &ph)
-	if strings.Contains(ph, "yesterday") {
-		t.Errorf("placeholder promises time parsing: %q", ph)
+	s.run(chromedp.Click(`#ask-open`, chromedp.ByQuery))
+	s.waitFor("the dialog", `document.querySelector("#ask-dialog").open`)
+	s.run(chromedp.SendKeys(`#ask-q`, "what did the printer do today?"+kb.Enter, chromedp.ByQuery))
+	s.waitFor("the answer", `document.querySelector("#ask-answer").textContent.includes("BRN001BA9")`)
+	s.waitFor("a citation", `!!document.querySelector("#ask-answer .cite")`)
+	var text string
+	s.eval(`document.querySelector("#ask-answer").textContent`, &text)
+	if !strings.Contains(text, "From ") {
+		t.Errorf("it doesn't say what time it answers: %q", text)
 	}
+	// A device with connections gets a small map of them.
+	s.eval(`document.querySelector("#ask-q").value = ""`, nil)
+	s.run(chromedp.SendKeys(`#ask-q`, "who was the biggest uploader today?"+kb.Enter, chromedp.ByQuery))
+	s.waitFor("the mini map", `!document.querySelector("#ask-map").hidden && Number(document.querySelector("#ask-map canvas")?.dataset.nodes) > 1`)
+	// Two questions, and no map for no one device.
+	s.eval(`document.querySelector("#ask-q").value = ""`, nil)
+	s.run(chromedp.SendKeys(`#ask-q`, "who's home and any anomalies?"+kb.Enter, chromedp.ByQuery))
+	s.waitFor("both answers", `document.querySelector("#ask-answer").textContent.includes("seen") && document.querySelector("#ask-answer").textContent.toLowerCase().includes("anomal") && document.querySelector("#ask-map").hidden`)
 }
 
 // The graph draws when it is ready, however long the anomaly checks take.

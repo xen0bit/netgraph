@@ -1321,6 +1321,7 @@ func (s *Server) ask(w http.ResponseWriter, r *http.Request) {
 		Q    string `json:"q"`
 		From string `json:"from"`
 		To   string `json:"to"`
+		TZ   *int   `json:"tz"` // the reader's minutes east of UTC, for "yesterday"
 	}
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in); err != nil {
 		httpError(w, http.StatusBadRequest, err)
@@ -1354,7 +1355,15 @@ func (s *Server) ask(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusBadRequest, errors.New("from must be before to"))
 		return
 	}
-	out, err := s.cfg.Store.Ask(r.Context(), in.Q, f)
+	loc := time.Local
+	if in.TZ != nil {
+		if *in.TZ < -14*60 || *in.TZ > 14*60 {
+			httpError(w, http.StatusBadRequest, errors.New("tz must be minutes from UTC"))
+			return
+		}
+		loc = time.FixedZone("reader", *in.TZ*60)
+	}
+	out, err := s.cfg.Store.AskIn(r.Context(), in.Q, f, loc)
 	if err != nil {
 		s.fail(w, err)
 		return
