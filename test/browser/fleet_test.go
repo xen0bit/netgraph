@@ -176,3 +176,8 @@ func TestPolicyIsText(t *testing.T) {
 		t.Error("a rule was made for an end it can't name")
 	}
 }
+
+func TestSettingsSaysAboutTheArchive(t *testing.T) {
+	s := open(t, "tab=settings", "")
+	s.waitFor("what it says", `document.querySelector("#settings-archive")?.textContent.startsWith("Off.")`)
+}

@@ -35,6 +35,8 @@ func (s *Store) Retain(ctx context.Context) (RetentionResult, error) {
 	now := s.cfg.Now()
 	raw := ms(now.Add(-s.cfg.RawRetention))
 	roll := ms(now.Add(-s.cfg.RollupRetention))
+	// With an archive, each table deletes only what's been kept.
+	rawConn, rawDNS, rollTraffic, rollDNS := s.archiveCuts(ctx, raw, roll)
 	steps := []struct {
 		n   *int64
 		sql string
@@ -42,8 +44,8 @@ func (s *Store) Retain(ctx context.Context) (RetentionResult, error) {
 		all bool // run until the statement removes nothing
 	}{
 		{&r.Flows, `DELETE FROM flows WHERE rowid IN (SELECT rowid FROM flows WHERE t_end < ? LIMIT ` + retainChunkSQL + `)`, raw, false},
-		{&r.Flows, `DELETE FROM connections WHERE flow_key IN (SELECT flow_key FROM connections WHERE last_seen < ? LIMIT ` + retainChunkSQL + `)`, raw, false},
-		{&r.DNS, `DELETE FROM dns WHERE rowid IN (SELECT rowid FROM dns WHERE ts < ? LIMIT ` + retainChunkSQL + `)`, raw, false},
+		{&r.Flows, `DELETE FROM connections WHERE flow_key IN (SELECT flow_key FROM connections WHERE last_seen < ? LIMIT ` + retainChunkSQL + `)`, rawConn, false},
+		{&r.DNS, `DELETE FROM dns WHERE rowid IN (SELECT rowid FROM dns WHERE ts < ? LIMIT ` + retainChunkSQL + `)`, rawDNS, false},
 		{&r.Answers, `DELETE FROM dns_answers WHERE rowid IN (SELECT rowid FROM dns_answers WHERE expires < ? LIMIT ` + retainChunkSQL + `)`, raw, false},
 		{&r.Observations, `DELETE FROM observations WHERE rowid IN (SELECT rowid FROM observations WHERE ts < ? LIMIT ` + retainChunkSQL + `)`, raw, false},
 		// Notes and bookmarks are kept until deleted, so their rail events are too.
@@ -53,8 +55,8 @@ func (s *Store) Retain(ctx context.Context) (RetentionResult, error) {
 		// one unbounded DELETE can hold the ingest lock for a long time
 		// after a long capture or a missed retention run.
 		{&r.Rollups, `DELETE FROM traffic_minute WHERE bucket IN (SELECT bucket FROM traffic_minute WHERE bucket < ? ORDER BY bucket LIMIT 60)`, ms(now.Add(-s.cfg.MinuteRetention)), true},
-		{&r.Rollups, `DELETE FROM traffic_hourly WHERE bucket IN (SELECT bucket FROM traffic_hourly WHERE bucket < ? ORDER BY bucket LIMIT 6)`, roll, true},
-		{&r.Rollups, `DELETE FROM dns_hourly WHERE bucket IN (SELECT bucket FROM dns_hourly WHERE bucket < ? ORDER BY bucket LIMIT 24)`, roll, true},
+		{&r.Rollups, `DELETE FROM traffic_hourly WHERE bucket IN (SELECT bucket FROM traffic_hourly WHERE bucket < ? ORDER BY bucket LIMIT 6)`, rollTraffic, true},
+		{&r.Rollups, `DELETE FROM dns_hourly WHERE bucket IN (SELECT bucket FROM dns_hourly WHERE bucket < ? ORDER BY bucket LIMIT 24)`, rollDNS, true},
 		// A handshake's key stays valid while the client stays associated,
 		// which can be months for a fixed device, so these follow the
 		// rollups. Without a limit, clients with rotating private MACs

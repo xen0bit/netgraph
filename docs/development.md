@@ -11,6 +11,7 @@
 | `internal/flow` | the flow table and interval export |
 | `internal/capture` | AF_PACKET (pure Go, TPACKET_V3), pcap/pcapng, radiotap/802.11 link types |
 | `internal/sensor` | frame parsing, dispatch, DNS matching, dedupe, runners |
+| `internal/archive` | the long-term archive's files: writing, reading, and erasing from them |
 | `internal/conntrack` | the kernel connection table, over netlink, as flow records (`-conntrack`) |
 | `internal/sources` | what runs on the server: NetFlow, IPFIX, sFlow, DNS logs, lease files |
 | `internal/rdns` | bounded background reverse-DNS lookups at observation time |

@@ -97,6 +97,9 @@ func runDB(args []string) error {
 			return err
 		}
 		defer st.Close()
+		if err := st.UseRecordedArchive(context.Background()); err != nil {
+			return err
+		}
 		r, err := st.Retain(context.Background())
 		if err != nil {
 			return err
@@ -125,8 +128,8 @@ func runDB(args []string) error {
 		if r.DryRun {
 			verb = "would delete"
 		}
-		fmt.Fprintf(os.Stderr, "%s: %d flow records, %d connections, %d lookups, %d answers, %d observations, %d facts, %d rollup rows, %d entities, %d Wi-Fi records, %d mutes, %d rail events, %d notes, %d incidents\n",
-			verb, r.Flows, r.Connections, r.DNS, r.Answers, r.Observations, r.Facts, r.Rollups, r.Entities, r.Handshakes, r.Mutes, r.Timeline, r.Notes, r.Incidents)
+		fmt.Fprintf(os.Stderr, "%s: %d flow records, %d connections, %d lookups, %d answers, %d observations, %d facts, %d rollup rows, %d entities, %d Wi-Fi records, %d mutes, %d rail events, %d notes, %d incidents, %d archived rows\n",
+			verb, r.Flows, r.Connections, r.DNS, r.Answers, r.Observations, r.Facts, r.Rollups, r.Entities, r.Handshakes, r.Mutes, r.Timeline, r.Notes, r.Incidents, r.Archived)
 		return nil
 	case "forget":
 		if fs.NArg() != 1 {
@@ -145,8 +148,8 @@ func runDB(args []string) error {
 		if r.DryRun {
 			verb = "would forget"
 		}
-		fmt.Fprintf(os.Stderr, "%s %s: %d connections, %d flow records, %d lookups, %d observations, %d facts, %d rollup rows, %d entities, %d Wi-Fi records, %d mutes, %d rail events, %d notes, %d incidents\n",
-			verb, r.Device, r.Connections, r.Flows, r.DNS, r.Observations, r.Facts, r.Rollups, r.Entities, r.Handshakes+r.Groups, r.Mutes, r.Timeline, r.Notes, r.Incidents)
+		fmt.Fprintf(os.Stderr, "%s %s: %d connections, %d flow records, %d lookups, %d observations, %d facts, %d rollup rows, %d entities, %d Wi-Fi records, %d mutes, %d rail events, %d notes, %d incidents, %d archived rows\n",
+			verb, r.Device, r.Connections, r.Flows, r.DNS, r.Observations, r.Facts, r.Rollups, r.Entities, r.Handshakes+r.Groups, r.Mutes, r.Timeline, r.Notes, r.Incidents, r.Archived)
 		return nil
 	case "enrich":
 		var table *asn.DB

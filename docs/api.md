@@ -62,6 +62,7 @@ are unix milliseconds.
 | `POST /api/v1/whatif` | `{policy, from, to}`: what a policy would have done to the window's traffic. Viewer |
 | `GET /api/v1/policy/learn?device=device:MAC&from=-14d` | `{device, from, to, connections, policy, gaps}`: the least a device needs, from what it did. Saves nothing. Viewer |
 | `POST /api/v1/policy/export` | `{policy, format, from, to}`, with `format` as `nftables`, `openwrt` or `opnsense`: `{format, filename, config, warnings}`. Changes nothing. Viewer |
+| `GET /api/v1/archive` | `{enabled, bytes, files, oldest, newest}`: the long-term archive. Viewer |
 | `GET /api/v1/sensors` | `[{name, version, os, arch, interfaces, first_seen, last_seen, stats, status, problems, upgrade_to, settable, config, in_effect, config_applied, takes_config}]`. `status` is `ok`, `quiet` or `struggling`; `problems` says what's going wrong now, from the difference between its last two reports; `upgrade_to` is set if it's older than the server |
 | `GET /api/v1/sensors/{name}/config` | what's been asked of this name alone, `%2A` for all sensors: `{log_level, rdns, active_timeout_s, flush_s}`. Viewer |
 | `PUT /api/v1/sensors/{name}/config` | replaces it; `{}` clears it. `204`, or `400`. Operator |

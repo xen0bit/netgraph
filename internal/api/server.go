@@ -202,6 +202,7 @@ func New(cfg Config) *Server {
 	s.mux.Handle("POST /api/v1/findings/seen", s.require(RoleOperator, s.findingsSeen))
 	s.mux.Handle("POST /api/v1/anomalies/mute", s.require(RoleOperator, s.muteAnomaly))
 	s.mux.Handle("POST /api/v1/whatif", s.require(RoleViewer, s.whatif))
+	s.mux.Handle("GET /api/v1/archive", s.require(RoleViewer, s.archiveStatus))
 	s.mux.Handle("GET /api/v1/policy/learn", s.require(RoleViewer, s.policyLearn))
 	s.mux.Handle("POST /api/v1/policy/export", s.require(RoleViewer, s.policyExport))
 	s.mux.Handle("POST /api/v1/ask", s.require(RoleViewer, s.ask))
@@ -1553,6 +1554,15 @@ func (s *Server) policyWindow(from, to string, q url.Values) (model.Filter, erro
 		return f, errors.New("from must be before to")
 	}
 	return f, nil
+}
+
+func (s *Server) archiveStatus(w http.ResponseWriter, r *http.Request) {
+	out, err := s.cfg.Store.ArchiveStatus(r.Context())
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, out)
 }
 
 // policyLearn proposes a policy for a device. It reads, and saves nothing.

@@ -50,6 +50,8 @@ func main() {
 		err = runWhatIf(os.Args[2:])
 	case "policy":
 		err = runPolicy(os.Args[2:])
+	case "archive":
+		err = runArchive(os.Args[2:])
 	case "mcp":
 		err = runMCP(os.Args[2:])
 	case "ask":
@@ -84,6 +86,8 @@ commands:
   tui        interactive terminal UI
   label      name a device by hand (or -clear the name)
   whatif     test a proposed policy against observed traffic
+  policy     propose a policy from what a device did, or write one out for a firewall
+  archive    read the long-term archive
   ask        answer a question from recorded evidence, with citations
   mcp        serve read-only tools to an AI assistant, on stdin and stdout
   note       add a timestamped note to the Flight Recorder rail

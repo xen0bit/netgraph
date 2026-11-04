@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/xen0bit/netgraph/internal/archive"
 	"github.com/xen0bit/netgraph/internal/model"
 )
 
@@ -32,6 +33,7 @@ type ForgetResult struct {
 	Timeline     int64  `json:"timeline"`
 	Notes        int64  `json:"notes"`
 	Incidents    int64  `json:"incidents"`
+	Archived     int64  `json:"archived"`
 	DryRun       bool   `json:"dry_run,omitempty"`
 }
 
@@ -45,6 +47,27 @@ func (s *Store) ForgetDevice(ctx context.Context, mac string) (ForgetResult, err
 }
 
 func (s *Store) ForgetDeviceWithOptions(ctx context.Context, mac string, opts ForgetOptions) (ForgetResult, error) {
+	res, err := s.forgetInDatabase(ctx, mac, opts)
+	// A device can have aged out of the database and still be in the archive, so "not found"
+	// here doesn't end it: that's just when someone would need this.
+	if err != nil && !errors.Is(err, ErrNotFound) {
+		return res, err
+	}
+	notFound := err
+	// Outside the ingest lock: rewriting a long archive takes a while, and ingest needn't wait.
+	m, _ := normMAC(mac)
+	var archErr error
+	res.Archived, archErr = s.eraseFromArchive(ctx, func(d archive.Dir) (int64, error) { return d.Forget(m, opts.DryRun) })
+	if archErr != nil {
+		return res, archErr
+	}
+	if notFound != nil && res.Archived == 0 {
+		return res, notFound
+	}
+	return res, nil
+}
+
+func (s *Store) forgetInDatabase(ctx context.Context, mac string, opts ForgetOptions) (ForgetResult, error) {
 	res := ForgetResult{Device: mac, DryRun: opts.DryRun}
 	m, ok := normMAC(mac)
 	if !ok {
@@ -178,7 +201,7 @@ type PurgeOptions struct {
 // PurgeResult counts what PurgeBefore removed.
 type PurgeResult struct {
 	Flows, Connections, DNS, Answers, Observations, Facts, Rollups, Entities, Handshakes, Mutes int64
-	Timeline, Notes, Incidents                                                                  int64
+	Timeline, Notes, Incidents, Archived                                                        int64
 	DryRun                                                                                      bool
 }
 
@@ -190,6 +213,15 @@ func (s *Store) PurgeBefore(ctx context.Context, before time.Time) (PurgeResult,
 }
 
 func (s *Store) PurgeBeforeWithOptions(ctx context.Context, before time.Time, opts PurgeOptions) (PurgeResult, error) {
+	r, err := s.purgeInDatabase(ctx, before, opts)
+	if err != nil {
+		return r, err
+	}
+	r.Archived, err = s.eraseFromArchive(ctx, func(d archive.Dir) (int64, error) { return d.PurgeBefore(before, opts.DryRun) })
+	return r, err
+}
+
+func (s *Store) purgeInDatabase(ctx context.Context, before time.Time, opts PurgeOptions) (PurgeResult, error) {
 	var r PurgeResult
 	r.DryRun = opts.DryRun
 	if s.w == nil {

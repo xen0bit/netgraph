@@ -64,6 +64,7 @@ netgraph serve -db /var/lib/netgraph/netgraph.db -listen :8443
 | `-trusted-proxy` | | addresses or CIDRs of a reverse proxy to trust to say who someone is |
 | `-proxy-user-header` | `Remote-User` | the header it says so in |
 | `-proxy-roles-file` | | lines of `user role`; `* role` sets the default, otherwise `viewer` |
+| `-archive-dir`, `-archive-raw`, `-archive-max-mb` | off | keep what retention would delete, in files: see [Long-term archive](#long-term-archive) |
 | `-netflow-listen`, `-netflow-allow` | | receive NetFlow v5, v9 and IPFIX on a UDP address, from these addresses only: see [Other sources](#other-sources) |
 | `-sflow-listen`, `-sflow-allow` | | receive sFlow v5 on a UDP address, from these addresses only |
 | `-dns-log`, `-dns-log-format` | `dnsmasq` | follow a DNS server's log |
@@ -168,6 +169,32 @@ are looked up when it loads; `netgraph db enrich` does the same for a
 database offline, with the built-in table or `-asn-file`. The networks'
 names are kept in the database, so `netgraph query` reading the file shows
 them without the table.
+
+### Long-term archive
+
+`-archive-dir /var/lib/netgraph/archive` keeps hourly rollups beyond `-rollup-retention`, in files
+outside the database: `traffic_hourly/2026-03-01.jsonl.gz`, one per table per day. Add `-archive-raw`
+to keep raw connections and lookups too: far larger, and far more detailed about what people did,
+so think about whether you want them kept. `-archive-max-mb` removes the oldest days beyond a limit.
+
+Nothing leaves the database until it's safely in a file. If the archive can't be written, say with a
+full disk, the rows stay and the error is logged, so the database grows until it's fixed. A day is
+archived once all of it is past retention, so data can stay up to a day longer than its setting.
+
+The server doesn't read the archive, so the web UI doesn't show this history. Read it with:
+
+```sh
+netgraph archive list -dir DIR
+netgraph archive read -dir DIR -table traffic_hourly -from 2026-01-01 -device aa:bb:cc:dd:ee:ff
+zcat DIR/traffic_hourly/*.jsonl.gz | jq .
+duckdb -c "SELECT device, sum(bytes_out) FROM read_json_auto('DIR/traffic_hourly/*.jsonl.gz') GROUP BY 1"
+```
+
+Each row says when (`t`, unix milliseconds) and whose it is (`device`, `device_label`), and stands
+alone from the database. `db forget MAC` and `db purge BEFORE` rewrite the archive too, without
+being told where it is, including for a device that's aged out of the database. The disk guard
+(`-max-db-mb`) doesn't apply to the archive, and what it trims from the database isn't archived,
+as it's for a disk that's already full. A backup of the archive keeps what erasure later removes.
 
 ### Other sources
 

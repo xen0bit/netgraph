@@ -688,6 +688,7 @@ function renderSettings() {
       <div class="segmented" role="group" aria-label="Theme">
         ${[["", "Match the system"], ["light", "Light"], ["dark", "Dark"]].map(([v, l]) => `<button type="button" data-theme-set="${v}" aria-pressed="${t === v}">${l}</button>`).join("")}
       </div></section>
+    <section class="card"><h2>Long-term archive</h2><div id="settings-archive" class="muted">Reading…</div></section>
     ${can("admin") && me ? `<section class="card"><h2>What's been changed</h2><div id="settings-audit" class="muted">Reading…</div></section>` : ""}
     <section class="card"><h2>Notifications</h2><div id="settings-notify" class="muted">Reading…</div></section>
     <section class="card"><h2>Saved views</h2>
@@ -706,6 +707,13 @@ function renderSettings() {
       <p class="muted" id="settings-version"></p></section>
   </div>`;
   $("#settings-version").textContent = $("#version").textContent;
+  api("archive", new URLSearchParams()).then((a) => {
+    const el = $("#settings-archive");
+    if (!el) return;
+    const held = a.files ? `${a.files} ${a.files === 1 ? "file" : "files"}, ${bytes(a.bytes)}, from ${stamp(a.oldest).slice(0, 10)} to ${stamp(a.newest).slice(0, 10)}.` : "Nothing in it yet.";
+    el.textContent = a.enabled ? `On. ${held} Read it with netgraph archive; the pages here don't show it.`
+      : a.files ? `Off, with what was kept still there. ${held}` : "Off. With -archive-dir, what passes retention is kept in files instead of deleted.";
+  }).catch(() => { const el = $("#settings-archive"); if (el) el.textContent = "Can't read it."; });
   if ($("#settings-audit")) {
     api("audit", new URLSearchParams({ limit: 50 })).then((rows) => {
       const el = $("#settings-audit");
