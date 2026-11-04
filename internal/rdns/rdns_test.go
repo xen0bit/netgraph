@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"net/netip"
 	"sync"
 	"sync/atomic"
@@ -118,20 +119,53 @@ func TestLookupUsesObservationTime(t *testing.T) {
 	}
 }
 
+// cached waits until a lookup's answer has been recorded: the resolver having been
+// called says only that it started.
+func cached(t *testing.T, l *Lookup, ip netip.Addr) {
+	t.Helper()
+	waitFor(t, func() bool {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		_, ok := l.cache[ip]
+		return ok && !l.inflight[ip]
+	})
+}
+
 func TestLookupNegativeCacheAndRetry(t *testing.T) {
-	f := &fakeResolver{err: errors.New("no such host")}
+	f := &fakeResolver{err: &net.DNSError{Err: "no such host", IsNotFound: true}}
 	clk := newClock(time.Now())
 	l := New(Config{Resolver: f, Now: clk.Now, Workers: 1, NegativeTTL: time.Minute})
 	defer l.Close()
 
 	ip := netip.MustParseAddr("192.168.1.99")
 	l.Observe(ip, "", clk.Now())
-	waitFor(t, func() bool { return f.count(ip.String()) == 1 })
+	cached(t, l, ip)
 	l.Observe(ip, "", clk.Now())
+	// Long enough for a second lookup to have started, if one had been queued.
+	time.Sleep(20 * time.Millisecond)
 	if n := f.count(ip.String()); n != 1 {
 		t.Fatalf("negative cache did not hold: %d lookups", n)
 	}
 	clk.Add(2 * time.Minute)
+	l.Observe(ip, "", clk.Now())
+	waitFor(t, func() bool { return f.count(ip.String()) == 2 })
+}
+
+// A timeout or a resolver restarting says nothing about the name, so it must not hide
+// the host's name for the whole negative TTL: the next sighting tries again.
+func TestLookupDoesNotCacheOtherErrors(t *testing.T) {
+	f := &fakeResolver{err: errors.New("resolver unavailable")}
+	clk := newClock(time.Now())
+	l := New(Config{Resolver: f, Now: clk.Now, Workers: 1, NegativeTTL: time.Hour})
+	defer l.Close()
+
+	ip := netip.MustParseAddr("192.168.1.98")
+	l.Observe(ip, "", clk.Now())
+	waitFor(t, func() bool {
+		l.mu.Lock()
+		defer l.mu.Unlock()
+		return f.count(ip.String()) == 1 && !l.inflight[ip]
+	})
 	l.Observe(ip, "", clk.Now())
 	waitFor(t, func() bool { return f.count(ip.String()) == 2 })
 }
