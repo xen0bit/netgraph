@@ -9,7 +9,7 @@ import { tokens, lastToken, localSuggestions, searched } from "./filters.js";
 import { passportHTML } from "./passport.js";
 import { Privacy } from "./privacy.js";
 import { findingsHTML, findingDetail } from "./findings.js";
-import { typeBadge, typeWhy, profileForm, presenceHTML, linksHTML } from "./devices.js";
+import { typeBadge, typeWhy, profileForm, presenceHTML, linksHTML, qualityHTML } from "./devices.js";
 import { Pulse } from "./pulse.js";
 
 const $ = (s) => document.querySelector(s);
@@ -57,7 +57,7 @@ const areas = {
   home: { tabs: [["home", "Home"]] },
   map: { tabs: [["graph", "Map"]] },
   devices: { tabs: [["devices", "Devices"], ["presence", "Presence"], ["links", "To confirm"], ["passport", "Passport"]] },
-  activity: { tabs: [["flows", "Connections"], ["destinations", "Destinations"], ["dns", "DNS"], ["facts", "Facts"], ["pulse", "Pulse"]] },
+  activity: { tabs: [["flows", "Connections"], ["destinations", "Destinations"], ["dns", "DNS"], ["facts", "Facts"], ["pulse", "Pulse"], ["quality", "Internet"]] },
   findings: { tabs: [["findings", "Inbox"], ["anomalies", "This window"], ["incidents", "Incidents"], ["insights", "Insights"]], tools: `<button id="whatif-open" type="button" title="Test a proposed policy against observed traffic">What-if</button>` },
   wifi: { tabs: [["wifi", "Wi-Fi"]] },
   settings: { tabs: [["settings", "General"], ["sensors", "Sensors"]] },
@@ -747,6 +747,11 @@ async function renderTab(seq) {
     if (t === "settings") return renderSettings();
     if (t === "passport") return await renderPassport(seq);
     if (t === "findings") return await renderFindings(seq);
+    if (t === "quality") {
+      const q = await track(api("quality"));
+      if (seq === refreshSeq) $("#quality-body").innerHTML = qualityHTML(q);
+      return;
+    }
     if (t === "presence") {
       const p = await track(api("presence"));
       if (seq === refreshSeq) $("#presence-body").innerHTML = presenceHTML(p);
@@ -2829,7 +2834,7 @@ function filterSuggest() {
 function commands() {
   const go = [["Home", "home", "1"], ["Map", "map", "2"], ["Devices", "devices", "3"], ["Activity", "activity", "4"], ["Findings", "findings", "5"], ["Wi-Fi", "wifi", "6"], ["Settings", "settings", "7"]]
     .map(([label, area, key]) => ({ label: `Go to ${label}`, key, run: () => selectArea(area) }));
-  const views = [["Connections", "flows"], ["Destinations", "destinations"], ["DNS", "dns"], ["Facts", "facts"], ["Pulse", "pulse"], ["Presence", "presence"], ["Devices to confirm", "links"], ["Findings inbox", "findings"], ["Anomalies in this window", "anomalies"], ["Incidents", "incidents"], ["Insights", "insights"], ["Sensors", "sensors"]]
+  const views = [["Connections", "flows"], ["Destinations", "destinations"], ["DNS", "dns"], ["Facts", "facts"], ["Pulse", "pulse"], ["Presence", "presence"], ["Devices to confirm", "links"], ["Internet quality", "quality"], ["Findings inbox", "findings"], ["Anomalies in this window", "anomalies"], ["Incidents", "incidents"], ["Insights", "insights"], ["Sensors", "sensors"]]
     .map(([label, t]) => ({ label: `Go to ${label}`, run: () => selectTab(t) }));
   const onMap = (f) => () => { if (state.tab !== "graph") selectTab("graph"); f(); };
   return [
@@ -3221,6 +3226,7 @@ function init() {
       openEntity(state.open);
     } catch (err) { out.textContent = err.message; }
   });
+  $("#quality-body").onclick = (e) => { const b = e.target.closest("[data-open]"); if (b) openEntity(b.dataset.open); };
   $("#presence-body").onclick = (e) => { const b = e.target.closest("[data-open]"); if (b) openEntity(b.dataset.open); };
   $("#links-body").onclick = async (e) => {
     const b = e.target.closest("[data-link]");

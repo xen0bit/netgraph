@@ -944,9 +944,12 @@ func (g *ingester) flowRecord(ctx context.Context, sid int64, sensor, boot strin
 	if _, err := g.tx.ExecContext(ctx, `INSERT INTO connections (
 		flow_key, sensor_id, proto, client_ip, client_port, client_mac, client_device, remote_ip, remote_port, direction, multicast,
 		first_seen, last_seen, final, end_reason, app, sni, alpn, ja4, http_host, user_agent, qname, bytes_out, bytes_in, pkts_out, pkts_in,
-		remote_asn, remote_cc)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		remote_asn, remote_cc, rtt_server_us, rtt_client_us, retrans)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (flow_key) DO UPDATE SET
+			rtt_server_us = CASE WHEN excluded.rtt_server_us > 0 THEN excluded.rtt_server_us ELSE rtt_server_us END,
+			rtt_client_us = CASE WHEN excluded.rtt_client_us > 0 THEN excluded.rtt_client_us ELSE rtt_client_us END,
+			retrans = retrans + excluded.retrans,
 			remote_asn = coalesce(remote_asn, excluded.remote_asn),
 			remote_cc = CASE WHEN remote_asn IS NULL THEN excluded.remote_cc ELSE remote_cc END,
 			first_seen = min(first_seen, excluded.first_seen), last_seen = max(last_seen, excluded.last_seen),
@@ -965,7 +968,7 @@ func (g *ingester) flowRecord(ctx context.Context, sid int64, sensor, boot strin
 			pkts_out = pkts_out + excluded.pkts_out, pkts_in = pkts_in + excluded.pkts_in`,
 		key, sid, f.Proto, client.String(), cport, devMAC, dev, remote.String(), rport, dir, boolInt(multicast),
 		first, end, boolInt(f.Final), f.EndReason, f.App, f.SNI, f.ALPN, f.JA4, f.HTTPHost, f.UserAgent, qname,
-		f.BytesOut, f.BytesIn, f.PktsOut, f.PktsIn, rasn, rcc); err != nil {
+		f.BytesOut, f.BytesIn, f.PktsOut, f.PktsIn, rasn, rcc, f.RTTServerUS, f.RTTClientUS, f.Retrans); err != nil {
 		return err
 	}
 	devKey, err := g.deviceKey(ctx, dev)

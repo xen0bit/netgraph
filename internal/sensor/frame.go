@@ -40,6 +40,7 @@ type frame struct {
 
 	sport, dport uint16
 	tcpFlags     uint8
+	tcpSegLen    int
 	seq          uint32
 	payload      []byte
 }
@@ -199,6 +200,13 @@ func parseL4(f *frame) {
 		f.tcpFlags = b[13]
 		if hl >= 20 && hl <= len(b) {
 			f.payload = b[hl:]
+			// From the IP length, not what was captured: a snaplen cuts the bytes off,
+			// not the segment. l4 is a slice of l3, so the capacities give its offset. A
+			// reassembled packet has no l3, and all of its bytes.
+			f.tcpSegLen = len(b) - hl
+			if off := cap(f.l3) - cap(f.l4); f.l3 != nil && off >= 0 {
+				f.tcpSegLen = max(f.ipLen-off-hl, 0)
+			}
 		}
 	case 17:
 		if len(b) < 8 {

@@ -33,6 +33,7 @@ type Backend interface {
 	Search(ctx context.Context, q string, limit int) ([]model.SearchResult, error)
 	Story(ctx context.Context, id string, f model.Filter) (*model.Story, error)
 	Diff(ctx context.Context, a, b model.Filter, scope string) (*model.Diff, error)
+	Quality(ctx context.Context, f model.Filter) (*model.Quality, error)
 }
 
 // MaxResult is the most one tool call returns, in bytes. Past it the list is cut, and
@@ -179,6 +180,17 @@ var List = []Tool{
 		Params: []Param{{Name: "a", Description: "the earlier moment: RFC 3339, or relative as -1h", Required: true}, {Name: "b", Description: "the later moment. Default: now."}, {Name: "lookback", Description: "how much before each moment counts, as 15m. Default 5m."}},
 		run: func(ctx context.Context, b Backend, a args) (any, error) {
 			return runDiff(ctx, b, a)
+		},
+	},
+	{
+		Name: "quality", Description: "How the network is doing: delay upstream and on the local network, packet loss, DNS, outages, and a plain verdict on whether trouble looks local or upstream. It measures delay and loss, not speed.",
+		Params: withWindow(Param{Name: "device", Description: "only this device"}),
+		run: func(ctx context.Context, b Backend, a args) (any, error) {
+			f, err := a.filter()
+			if err != nil {
+				return nil, err
+			}
+			return b.Quality(ctx, f)
 		},
 	},
 	{

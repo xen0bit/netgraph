@@ -75,6 +75,7 @@ type Packet struct {
 	Len      int // IP length: header plus payload, independent of snaplen
 	TCPFlags uint8
 	Seq      uint32
+	SegLen   int    // TCP payload length from the headers, whatever was captured
 	Payload  []byte // L4 payload as captured (may be truncated)
 }
 
@@ -102,6 +103,18 @@ type entry struct {
 	flags                      uint8
 	finSrc, finDst, rst        bool
 	closedAt                   time.Time
+
+	// The handshake's two legs, as seen from where the sensor sits: from the SYN to
+	// the SYN-ACK is the path to the server, and from there to the ACK the path back
+	// to the client. A SYN sent twice can't say which one was answered (Karn), so it
+	// measures neither.
+	synAt, synAckAt        time.Time
+	synRetried             bool
+	rttServer, rttClient   time.Duration
+	rttSent                bool
+	seqEndSrc, seqEndDst   uint32 // the highest sequence number seen each way
+	seqSeenSrc, seqSeenDst bool
+	retrans                uint32 // since intervalStart
 
 	app, sni, alpn, ja4, host, ua string
 
@@ -204,6 +217,7 @@ func (t *Table) Add(p *Packet) (opened bool) {
 	}
 	if p.Proto == ProtoTCP {
 		e.flags |= p.TCPFlags
+		e.measure(p, fromSrc)
 		if p.TCPFlags&FIN != 0 {
 			if fromSrc {
 				e.finSrc = true
@@ -222,6 +236,62 @@ func (t *Table) Add(p *Packet) (opened bool) {
 		t.inspectPayload(e, p)
 	}
 	return opened
+}
+
+// A leg longer than this isn't a measurement: it's a capture gap, or a clock step.
+const maxRTT = time.Minute
+
+// measure takes what a TCP packet says about the path. All of it is arithmetic on
+// a few fixed fields, whatever the packet claims.
+func (e *entry) measure(p *Packet, fromSrc bool) {
+	syn, ack := p.TCPFlags&SYN != 0, p.TCPFlags&ACK != 0
+	switch {
+	case syn && !ack && fromSrc:
+		if !e.synAt.IsZero() {
+			e.synRetried = true
+			e.retrans++
+		} else {
+			e.synAt = p.TS
+		}
+	case syn && ack && !fromSrc:
+		if e.synAckAt.IsZero() {
+			e.synAckAt = p.TS
+			if !e.synAt.IsZero() && !e.synRetried {
+				e.rttServer = leg(e.synAt, p.TS)
+			}
+		} else {
+			e.retrans++
+			e.synRetried = true
+		}
+	case ack && fromSrc && e.rttClient == 0 && !e.synAckAt.IsZero() && !e.synRetried:
+		e.rttClient = leg(e.synAckAt, p.TS)
+	}
+	if p.SegLen <= 0 {
+		return
+	}
+	// Data at or below what this side has already sent is being sent again. Packets
+	// arriving out of order look the same, so this slightly overcounts.
+	end := p.Seq + uint32(p.SegLen)
+	high, seen := &e.seqEndSrc, &e.seqSeenSrc
+	if !fromSrc {
+		high, seen = &e.seqEndDst, &e.seqSeenDst
+	}
+	switch {
+	case !*seen:
+		*high, *seen = end, true
+	case int32(end-*high) <= 0: // modulo 2^32: sequence numbers wrap
+		e.retrans++
+	default:
+		*high = end
+	}
+}
+
+func leg(from, to time.Time) time.Duration {
+	d := to.Sub(from)
+	if d <= 0 || d > maxRTT {
+		return 0
+	}
+	return d
 }
 
 func (t *Table) newEntry(p *Packet) *entry {
@@ -483,10 +553,16 @@ func (t *Table) export(e *entry, end time.Time, final bool, reason string) {
 		SrcMAC: macString(e.srcMAC), DstMAC: macString(e.dstMAC),
 		FirstSeen: e.first, Start: e.intervalStart, End: end,
 		BytesOut: e.bout, BytesIn: e.bin, PktsOut: e.pout, PktsIn: e.pin,
-		TCPFlags: e.flags, Final: final, EndReason: reason,
+		TCPFlags: e.flags, Final: final, EndReason: reason, Retrans: e.retrans,
 		App: e.app, SNI: e.sni, ALPN: e.alpn, JA4: e.ja4, HTTPHost: e.host, UserAgent: e.ua,
 	}
+	// Once each, when known: later records have nothing new to say.
+	if !e.rttSent && (e.rttServer > 0 && e.rttClient > 0 || final && e.rttServer+e.rttClient > 0) {
+		f.RTTServerUS, f.RTTClientUS = uint32(e.rttServer/time.Microsecond), uint32(e.rttClient/time.Microsecond)
+		e.rttSent = true
+	}
 	t.emit(f)
+	e.retrans = 0
 	e.bout, e.bin, e.pout, e.pin = 0, 0, 0, 0
 	e.intervalStart = end
 }

@@ -124,6 +124,13 @@ type Flow struct {
 	Final     bool       `json:"final,omitempty"`
 	EndReason string     `json:"reason,omitempty"` // fin, rst, idle, evict, shutdown
 
+	// Path measurements, for TCP. Each leg is sent once, when known. From a sensor on
+	// the router, the server leg is the way upstream and the client leg the way back
+	// to the device.
+	RTTServerUS uint32 `json:"rtt_s,omitempty"` // SYN to SYN-ACK, microseconds
+	RTTClientUS uint32 `json:"rtt_c,omitempty"` // SYN-ACK to ACK, microseconds
+	Retrans     uint32 `json:"retx,omitempty"`  // segments seen again, this record
+
 	// Application metadata, set once learned and repeated on later records.
 	App       string `json:"app,omitempty"` // tls, quic, http, dns, ...
 	SNI       string `json:"sni,omitempty"`

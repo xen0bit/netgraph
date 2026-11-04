@@ -109,7 +109,7 @@ func (s *Store) askOne(ctx context.Context, out *model.Answer, question string, 
 	}
 	var err error
 	switch {
-	case hasAny(words, "slow", "slower", "lag", "laggy", "latency", "buffering") && !s.entityNamed(ctx, words):
+	case hasAny(words, "slow", "slower", "lag", "laggy", "latency", "buffering", "isp", "down", "outage") && !s.entityNamed(ctx, words):
 		err = s.askSlow(ctx, out, f)
 	case has("changed", "change", "changes", "difference", "differences", "diff", "different"):
 		err = s.askDiff(ctx, out, from, to)
@@ -477,10 +477,31 @@ func (s *Store) askNewDevices(ctx context.Context, out *model.Answer, f model.Fi
 	return nil
 }
 
-// askSlow says what netgraph can and can't say: it doesn't measure latency yet, so
-// it can only show who's using the connection.
+// askSlow says what the numbers look like, and who's using the connection. It sees
+// delay and loss, not speed, and a slow site and a slow line look alike from here.
 func (s *Store) askSlow(ctx context.Context, out *model.Answer, f model.Filter) error {
-	out.Gaps = append(out.Gaps, "netgraph doesn't measure latency or loss yet, so it can't say whether the connection itself is slow")
+	out.Plan = append(out.Plan, model.ToolCall{Tool: "quality"})
+	q, err := s.Quality(ctx, f)
+	if err != nil {
+		return err
+	}
+	out.Gaps = append(out.Gaps, q.Gaps...)
+	out.Gaps = append(out.Gaps, "this measures delay and loss, not speed, and a slow site looks like a slow connection")
+	out.Answer = q.Summary
+	out.Confidence = "medium"
+	if q.Verdict == model.QualityUnknown {
+		out.Confidence = "low"
+	}
+	ev := []model.EvidenceRef{{Kind: "quality", ID: q.Verdict, TS: q.ToMS, Text: fmt.Sprintf("%d handshakes upstream, %d to devices here", q.WAN.Samples, q.LAN.Samples)}}
+	if q.WAN.Samples > 0 {
+		out.Claims = append(out.Claims, model.Claim{Text: fmt.Sprintf("Upstream answers in %.0f ms, %.0f ms at worst for most (%d connections).", q.WAN.P50MS, q.WAN.P95MS, q.WAN.Samples), Evidence: ev})
+	}
+	if q.LAN.Samples > 0 {
+		out.Claims = append(out.Claims, model.Claim{Text: fmt.Sprintf("Devices here answer in %.0f ms.", q.LAN.P50MS), Evidence: ev})
+	}
+	if q.DNS.Samples > 0 {
+		out.Claims = append(out.Claims, model.Claim{Text: fmt.Sprintf("DNS answers in %.0f ms; %d of %d lookups went unanswered.", q.DNS.P50MS, q.DNSTimeouts, q.DNSQueries), Evidence: ev})
+	}
 	devs, err := s.Devices(ctx, f)
 	if err != nil {
 		return err
@@ -489,15 +510,11 @@ func (s *Store) askSlow(ctx context.Context, out *model.Answer, f model.Filter) 
 	slices.SortFunc(devs, func(a, b model.Device) int {
 		return cmp.Or(cmp.Compare(b.BytesIn+b.BytesOut, a.BytesIn+a.BytesOut), cmp.Compare(a.MAC, b.MAC))
 	})
-	if len(devs) == 0 || devs[0].BytesIn+devs[0].BytesOut == 0 {
-		out.Answer = "I can't tell why, and no device moved much in that time."
-		return nil
-	}
-	out.Confidence = "medium"
-	out.Answer = fmt.Sprintf("I can't measure speed yet, but %s was using the most: %s.", devs[0].Label, model.FormatBytes(devs[0].BytesIn+devs[0].BytesOut))
-	out.Focus = devs[0].ID
-	for _, d := range firstN(devs, 3) {
-		out.Claims = append(out.Claims, model.Claim{Text: fmt.Sprintf("%s moved %s.", d.Label, model.FormatBytes(d.BytesIn+d.BytesOut)), Evidence: deviceEvidence(d, d.Label)})
+	if len(devs) > 0 && devs[0].BytesIn+devs[0].BytesOut > 0 {
+		out.Focus = devs[0].ID
+		for _, d := range firstN(devs, 3) {
+			out.Claims = append(out.Claims, model.Claim{Text: fmt.Sprintf("%s moved %s.", d.Label, model.FormatBytes(d.BytesIn+d.BytesOut)), Evidence: deviceEvidence(d, d.Label)})
+		}
 	}
 	return nil
 }
@@ -514,7 +531,7 @@ var askTypeWords = map[string]string{
 // after the common words. A name beats the word "slow" in it.
 func (s *Store) entityNamed(ctx context.Context, words []string) bool {
 	terms := slices.DeleteFunc(searchTerms(words), func(t string) bool {
-		return hasAny([]string{t}, "slow", "slower", "lag", "laggy", "latency", "buffering", "internet", "wifi", "network", "connection")
+		return hasAny([]string{t}, "slow", "slower", "lag", "laggy", "latency", "buffering", "isp", "down", "outage", "internet", "wifi", "network", "connection")
 	})
 	for _, t := range terms {
 		if r, err := s.Search(ctx, t, 1); err == nil && len(r) > 0 {

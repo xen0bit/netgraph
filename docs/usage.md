@@ -279,6 +279,12 @@ Incidents, Insights, What-if), **Wi-Fi** and **Settings** (General, Sensors).
   still works. Notes and fingerprints are hidden, and exports straight from the server are
   off. Makers, device types, traffic volumes and times stay. It recognises addresses by shape and names by where they appear, so it's best
   effort: check before sharing. A chip in the header says when it's on.
+- **Internet** (Activity): "is it me or the ISP?" A sensor on the router sees both legs
+  of each TCP handshake, so it can tell the way upstream from the way to your devices.
+  It compares upstream with the week before, and shows packets sent again, DNS and
+  outages (minutes with several attempts outward and none answered), with a plain verdict.
+  It's delay and loss, not speed, and a slow site reads the same as a slow line. Anywhere
+  other than the router, "upstream" and "here" mean less. Ask answers "why is it slow?" from this.
 - **Settings:** theme, saved views, the commands to add a sensor to this server, what this
   browser remembers, and what the server holds.
 - **Window:** pick presets, type times, shift with ◀ ▶ or `[` `]`, or drag

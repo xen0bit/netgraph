@@ -650,3 +650,23 @@ func TestPrivacyRoundTrips(t *testing.T) {
 		t.Errorf("path %q", got.Path)
 	}
 }
+
+// The verdict, in the browser, from the capture's real handshakes.
+func TestInternetView(t *testing.T) {
+	s := open(t, window()+"&tab=quality", "")
+	s.waitFor("the verdict", `!!document.querySelector("#quality-body .home-status b")`)
+	var text string
+	s.eval(`document.querySelector("#quality-body").textContent`, &text)
+	for _, want := range []string{"upstream", "sent again", "delay and loss, not speed"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("no %q in %q", want, text)
+		}
+	}
+	var samples float64
+	if err := chromedp.Run(s.ctx, chromedp.Evaluate(`fetch("/api/v1/quality?from=`+fmt.Sprint(dataEnd-2*3600_000)+`&to=`+fmt.Sprint(dataEnd)+`").then((r) => r.json()).then((q) => q.wan.samples)`, &samples, awaitPromise)); err != nil {
+		t.Fatal(err)
+	}
+	if samples == 0 {
+		t.Error("a capture with real handshakes measured none")
+	}
+}

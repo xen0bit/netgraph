@@ -40,6 +40,7 @@ type Backend interface {
 	Coverage(ctx context.Context, f Filter) (*CoverageReport, error)
 	Airspace(ctx context.Context, f Filter) (*AirspaceReport, error)
 	Weather(ctx context.Context, f Filter) (*WeatherReport, error)
+	Quality(ctx context.Context, f Filter) (*Quality, error)
 }
 
 // SearchResult is an entity whose key or name matches a search: a device by
@@ -776,6 +777,69 @@ type Anomaly struct {
 	Entity     string            `json:"entity,omitempty"` // what it is about: a site, address, SSID or access point ID
 	Summary    string            `json:"summary"`
 	Evidence   map[string]string `json:"evidence,omitempty"`
+}
+
+// Quality verdicts.
+const (
+	QualityGood         = "good"
+	QualityUnknown      = "unknown"
+	QualitySlowLocal    = "slow_local"
+	QualitySlowUpstream = "slow_upstream"
+	QualityLossy        = "lossy"
+	QualityOutage       = "outage"
+)
+
+// PathStats is delay over some path.
+type PathStats struct {
+	P50MS   float64 `json:"p50_ms"`
+	P95MS   float64 `json:"p95_ms"`
+	Samples int     `json:"samples"`
+}
+
+// QualityPoint is one step of a window.
+type QualityPoint struct {
+	TS         int64   `json:"ts"`
+	WANP50MS   float64 `json:"wan_p50_ms"`
+	LANP50MS   float64 `json:"lan_p50_ms"`
+	RetransPct float64 `json:"retrans_pct"`
+}
+
+// QualityDevice is how one device's connections are doing.
+type QualityDevice struct {
+	ID         string    `json:"id"`
+	Label      string    `json:"label"`
+	WAN        PathStats `json:"wan"`
+	LAN        PathStats `json:"lan"`
+	RetransPct float64   `json:"retrans_pct"`
+}
+
+// Outage is a stretch when nothing outward was answered.
+type Outage struct {
+	FromMS   int64 `json:"from"`
+	ToMS     int64 `json:"to"`
+	Attempts int   `json:"attempts"`
+}
+
+// Quality is how the network is doing, from what passes through it. It measures delay
+// and loss, not speed.
+type Quality struct {
+	FromMS      int64           `json:"from"`
+	ToMS        int64           `json:"to"`
+	StepMS      int64           `json:"step"`
+	Verdict     string          `json:"verdict"`
+	Summary     string          `json:"summary"`
+	WAN         PathStats       `json:"wan"`   // the way upstream
+	LAN         PathStats       `json:"lan"`   // the way to devices here
+	Usual       PathStats       `json:"usual"` // the WAN over the week before
+	DNS         PathStats       `json:"dns"`
+	DNSQueries  int             `json:"dns_queries"`
+	DNSTimeouts int             `json:"dns_timeouts"`
+	RetransPct  float64         `json:"retrans_pct"`
+	Unanswered  int             `json:"unanswered"`
+	Outages     []Outage        `json:"outages"`
+	Series      []QualityPoint  `json:"series"`
+	Devices     []QualityDevice `json:"devices"`
+	Gaps        []string        `json:"gaps,omitempty"`
 }
 
 // AuditEntry is one change someone made through the API.

@@ -78,3 +78,33 @@ export function linksHTML(links) {
     <p class="muted">Yes links them and copies the name, owner and groups across. History stays under each address, and a passport's “Undo the link” takes it back.</p>
   </section>`).join("")}</div>`;
 }
+
+const verdictMark = { good: ["ok", "●"], unknown: ["info", "■"], slow_local: ["warn", "▲"], slow_upstream: ["warn", "▲"], lossy: ["warn", "▲"], outage: ["warn", "▲"] };
+const ms = (v, samples) => (samples ? `${v < 10 ? v.toFixed(1) : Math.round(v)} ms` : "no data");
+
+// qualityHTML is how the network is doing, in words first.
+export function qualityHTML(q) {
+  const [cls, icon] = verdictMark[q.verdict] || verdictMark.unknown;
+  const peak = Math.max(1, ...q.series.map((p) => p.wan_p50_ms));
+  const chart = q.series.length ? `<div class="tchart short" role="group" aria-label="${esc(`Delay upstream over the window, at most ${Math.round(peak)} ms`)}">${q.series.map((p) => {
+    const tip = `${stamp(p.ts)} · upstream ${ms(p.wan_p50_ms, p.wan_p50_ms)} · here ${ms(p.lan_p50_ms, p.lan_p50_ms)} · ${p.retrans_pct.toFixed(1)}% sent again`;
+    return `<span class="tbar still" title="${esc(tip)}"><span style="height:${p.wan_p50_ms ? Math.max(3, (p.wan_p50_ms / peak) * 100).toFixed(1) : 0}%"></span></span>`;
+  }).join("")}</div><div class="taxis"><span>${esc(stamp(q.from))}</span><span>at most ${Math.round(peak)} ms</span><span>${esc(stamp(q.to))}</span></div>` : `<p class="muted">No handshakes in this window.</p>`;
+  return `<div class="home">
+    <div class="home-status ${cls}" role="status"><span class="status-icon" aria-hidden="true">${icon}</span><b>${esc(q.summary)}</b></div>
+    <div class="home-grid">
+      <section class="card"><h3>In numbers</h3><div class="stats">
+        <div><b>${esc(ms(q.wan.p50_ms, q.wan.samples))}</b><span>upstream${q.usual.samples ? `, usually ${esc(ms(q.usual.p50_ms, q.usual.samples))}` : ""}</span></div>
+        <div><b>${esc(ms(q.lan.p50_ms, q.lan.samples))}</b><span>to devices here</span></div>
+        <div><b>${q.retrans_pct.toFixed(1)}%</b><span>sent again</span></div>
+        <div><b>${esc(ms(q.dns.p50_ms, q.dns.samples))}</b><span>DNS${q.dns_timeouts ? `, ${q.dns_timeouts} unanswered` : ""}</span></div>
+      </div>
+      ${q.outages.length ? `<h3>Outages</h3><ul class="finds">${q.outages.map((o) => `<li>${esc(stamp(o.from))} to ${esc(stamp(o.to).slice(11))} <span class="muted">${o.attempts} connections unanswered</span></li>`).join("")}</ul>` : ""}
+      <h3>Upstream over the window</h3>${chart}</section>
+      <section class="card"><h3>By device, slowest link first</h3>
+      ${q.devices.length ? `<table class="mini"><thead><tr><th>Device</th><th class="num">Here</th><th class="num">Upstream</th><th class="num">Sent again</th></tr></thead><tbody>${q.devices.slice(0, 20).map((d) => `<tr data-open="${esc(d.id)}"><td>${esc(d.label)}</td><td class="num">${esc(ms(d.lan.p50_ms, d.lan.samples))}</td><td class="num">${esc(ms(d.wan.p50_ms, d.wan.samples))}</td><td class="num">${d.retrans_pct.toFixed(1)}%</td></tr>`).join("")}</tbody></table>` : `<p class="muted">Nothing measured.</p>`}</section>
+    </div>
+    ${(q.gaps || []).map((g) => `<p class="muted">${esc(g)}</p>`).join("")}
+    <p class="muted">Measured from TCP handshakes and retransmits as they pass the sensor. This is delay and loss, not speed. From a sensor on the router, "upstream" and "here" are the two sides of it; elsewhere, they mean less.</p>
+  </div>`;
+}
