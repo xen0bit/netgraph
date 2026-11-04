@@ -126,6 +126,8 @@ func New(cfg Config) *Server {
 	read("/api/v1/range", s.dataRange)
 	read("/api/v1/home", s.home)
 	read("/api/v1/passport", s.passport)
+	read("/api/v1/presence", s.presence)
+	read("/api/v1/devices/links", s.deviceLinks)
 	read("/api/v1/reel", s.reel)
 	read("/api/v1/reel/markers", s.reelMarkers)
 	read("/api/v1/summary", s.summary)
@@ -165,6 +167,8 @@ func New(cfg Config) *Server {
 	s.mux.Handle("PUT /api/v1/map/pins", s.requireRead(http.HandlerFunc(s.setMapPins)))
 	s.mux.Handle("DELETE /api/v1/map/pins", s.requireRead(http.HandlerFunc(s.deleteMapPins)))
 	s.mux.Handle("PUT /api/v1/devices/{mac}/label", s.requireRead(http.HandlerFunc(s.setLabel)))
+	s.mux.Handle("PUT /api/v1/devices/{mac}/profile", s.requireRead(http.HandlerFunc(s.setProfile)))
+	s.mux.Handle("POST /api/v1/devices/{mac}/link", s.requireRead(http.HandlerFunc(s.decideLink)))
 	s.mux.Handle("POST /api/v1/anomalies/mute", s.requireRead(http.HandlerFunc(s.muteAnomaly)))
 	s.mux.Handle("POST /api/v1/whatif", s.requireRead(http.HandlerFunc(s.whatif)))
 	s.mux.Handle("POST /api/v1/ask", s.requireRead(http.HandlerFunc(s.ask)))
@@ -791,6 +795,57 @@ func (s *Server) setLabel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// setProfile records what a person says a device is and who it belongs to.
+func (s *Server) setProfile(w http.ResponseWriter, r *http.Request) {
+	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		httpError(w, http.StatusUnsupportedMediaType, errors.New("expected application/json"))
+		return
+	}
+	var body model.DeviceProfile
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil {
+		httpError(w, http.StatusBadRequest, errors.New(`expected {"type": "...", "owner": "...", "groups": [...]}`))
+		return
+	}
+	if err := s.cfg.Store.SetDeviceProfile(r.Context(), r.PathValue("mac"), body); err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) decideLink(w http.ResponseWriter, r *http.Request) {
+	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		httpError(w, http.StatusUnsupportedMediaType, errors.New("expected application/json"))
+		return
+	}
+	var body struct {
+		Same     string `json:"same"`
+		Decision string `json:"decision"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 4096)).Decode(&body); err != nil {
+		httpError(w, http.StatusBadRequest, errors.New(`expected {"same": "<mac>", "decision": "same|different|undo"}`))
+		return
+	}
+	if err := s.cfg.Store.DecideLink(r.Context(), r.PathValue("mac"), body.Same, body.Decision); err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) deviceLinks(w http.ResponseWriter, r *http.Request) {
+	links, err := s.cfg.Store.DeviceLinks(r.Context())
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, links)
+}
+
+func (s *Server) presence(w http.ResponseWriter, r *http.Request) {
+	answer(s, w, r, s.cfg.Store.Presence)
 }
 
 func (s *Server) timeseries(w http.ResponseWriter, r *http.Request) {

@@ -54,6 +54,10 @@ func (s *Store) Passport(ctx context.Context, id string, tzOffset time.Duration)
 	if out.Device == nil {
 		return nil, ErrNotFound
 	}
+	s.explainType(ctx, out.Device)
+	if err := s.alsoSeenAs(ctx, out); err != nil {
+		return nil, err
+	}
 	if out.Story, err = s.Story(ctx, id, model.Filter{From: end.Add(-24 * time.Hour), To: end}); err != nil {
 		return nil, err
 	}
@@ -168,6 +172,33 @@ func (s *Store) passportDevice(ctx context.Context, key string, end time.Time) (
 		return d.Device, nil
 	}
 	return &model.Device{ID: "device:" + key, MAC: key, Label: d.Label, FirstSeen: d.FirstSeen, LastSeen: d.LastSeen}, nil
+}
+
+// alsoSeenAs lists the MACs a person linked to this device, in either direction.
+func (s *Store) alsoSeenAs(ctx context.Context, p *model.Passport) error {
+	facts, err := s.deviceFacts(ctx)
+	if err != nil {
+		return err
+	}
+	mine := p.Device.MAC
+	var macs []string
+	for _, f := range facts {
+		if f.sameAs == mine {
+			macs = append(macs, f.mac)
+		}
+	}
+	if p.Device.SameAs != "" {
+		macs = append(macs, p.Device.SameAs)
+	}
+	slices.Sort(macs)
+	for _, m := range macs {
+		e, err := s.Entity(ctx, model.EntityID(model.KindDevice, m), model.Filter{From: time.UnixMilli(p.AsOfMS), To: time.UnixMilli(p.AsOfMS + 1)})
+		if err != nil {
+			continue
+		}
+		p.AlsoSeenAs = append(p.AlsoSeenAs, model.Device{ID: e.ID, MAC: m, Label: e.Label, FirstSeen: e.FirstSeen, LastSeen: e.LastSeen})
+	}
+	return nil
 }
 
 // pmod is the remainder that is never negative, for times before an offset.

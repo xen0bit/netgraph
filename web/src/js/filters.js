@@ -4,6 +4,9 @@
 
 export const filterKeys = [
   ["device:", "a device: name, MAC or glob"],
+  ["type:", "printer, phone, tv…"],
+  ["owner:", "whose it is"],
+  ["group:", "a group you named"],
   ["domain:", "a name: example.com or *.example.com"],
   ["ip:", "an address or CIDR"],
   ["port:", "the server's port"],
@@ -15,6 +18,7 @@ export const filterKeys = [
 ];
 
 const fixed = {
+  type: [["router", ""], ["ap", "access point"], ["switch", ""], ["phone", ""], ["tablet", ""], ["laptop", "computer"], ["tv", ""], ["speaker", ""], ["printer", ""], ["camera", ""], ["nas", "storage"], ["server", ""], ["game", "console"], ["iot", "smart home"]],
   dir: [["out", "a device here connected out"], ["in", "opened from outside"], ["local", "both ends here"], ["external", "neither end here"]],
   proto: [["tcp", ""], ["udp", ""], ["icmp", ""], ["icmpv6", ""]],
   app: [["tls", ""], ["quic", ""], ["http", ""], ["dns", ""], ["dhcp", ""], ["mdns", ""], ["ssdp", ""]],

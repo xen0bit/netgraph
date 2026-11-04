@@ -70,6 +70,7 @@ func (s *Store) Entity(ctx context.Context, id string, f model.Filter) (*model.E
 		for i := range devs {
 			if devs[i].MAC == key {
 				d.Device = &devs[i]
+				s.explainType(ctx, d.Device)
 			}
 		}
 	case model.KindIP:

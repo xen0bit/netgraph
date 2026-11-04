@@ -109,6 +109,8 @@ type Store struct {
 	nets *localNets
 	sub  *broker
 
+	types typeCache
+
 	anomMu  sync.Mutex
 	anomGen uint64 // bumped by invalidateAnomalies
 	anomKey string

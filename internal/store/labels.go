@@ -38,6 +38,12 @@ func (s *Store) SetDeviceLabel(ctx context.Context, mac, label string) error {
 		strings.IndexFunc(label, unicode.IsControl) >= 0 {
 		return fmt.Errorf("%w: a label is at most %d printable characters", ErrInvalid, MaxLabel)
 	}
+	return s.editDevice(ctx, func(g *ingester) error { return g.userLabel(ctx, m, label) })
+}
+
+// editDevice runs a person's edit in the ingester's transaction, so its cached
+// rows and the database stay in step.
+func (s *Store) editDevice(ctx context.Context, edit func(*ingester) error) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	g := s.ing
@@ -47,7 +53,7 @@ func (s *Store) SetDeviceLabel(ctx context.Context, mac, label string) error {
 	}
 	g.tx = tx
 	defer func() { g.tx = nil }()
-	err = g.userLabel(ctx, m, label)
+	err = edit(g)
 	if err == nil {
 		err = tx.Commit()
 	} else {
@@ -63,6 +69,7 @@ func (s *Store) SetDeviceLabel(ctx context.Context, mac, label string) error {
 	if err == nil {
 		// Anomaly summaries and alert payloads carry the old label.
 		s.invalidateAnomalies()
+		s.types.reset()
 	}
 	return err
 }

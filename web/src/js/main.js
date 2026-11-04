@@ -7,6 +7,7 @@ import { homeHTML, installBlock } from "./home.js";
 import { parseWhen, fuzzy } from "./palette.js";
 import { tokens, lastToken, localSuggestions, searched } from "./filters.js";
 import { passportHTML } from "./passport.js";
+import { typeBadge, typeWhy, profileForm, presenceHTML, linksHTML } from "./devices.js";
 import { Pulse } from "./pulse.js";
 
 const $ = (s) => document.querySelector(s);
@@ -53,7 +54,7 @@ const state = {
 const areas = {
   home: { tabs: [["home", "Home"]] },
   map: { tabs: [["graph", "Map"]] },
-  devices: { tabs: [["devices", "Devices"], ["passport", "Passport"]] },
+  devices: { tabs: [["devices", "Devices"], ["presence", "Presence"], ["links", "To confirm"], ["passport", "Passport"]] },
   activity: { tabs: [["flows", "Connections"], ["destinations", "Destinations"], ["dns", "DNS"], ["facts", "Facts"], ["pulse", "Pulse"]] },
   findings: { tabs: [["anomalies", "Anomalies"], ["incidents", "Incidents"], ["insights", "Insights"]], tools: `<button id="whatif-open" type="button" title="Test a proposed policy against observed traffic">What-if</button>` },
   wifi: { tabs: [["wifi", "Wi-Fi"]] },
@@ -62,7 +63,7 @@ const areas = {
 const areaOf = (t) => Object.keys(areas).find((a) => areas[a].tabs.some(([id]) => id === t));
 // Views that answer about now rather than about the window: the time controls,
 // the Recorder and the filter have nothing to say to them.
-const plainTabs = new Set(["home", "settings", "sensors", "incidents", "pulse", "passport"]);
+const plainTabs = new Set(["home", "settings", "sensors", "incidents", "pulse", "passport", "links"]);
 
 function loadHash() {
   const raw = location.hash.slice(1);
@@ -131,6 +132,8 @@ function parseFilter(s) {
     const k = i > 0 ? tok.slice(0, i) : "";
     const v = tok.slice(i + 1);
     if (["device", "ip", "domain", "port", "proto", "app", "dir", "asn", "cc", "multicast"].includes(k)) out[k] = v;
+    // The server reads these through its device filter, so one device term applies.
+    else if (["type", "owner", "group"].includes(k)) out.device = tok;
     else if (/^([0-9a-f]{2}:){5}[0-9a-f]{2}$/i.test(tok)) out.device = tok;
     else if (tok.split(":").length > 2) out.ip = tok;
     else out.domain = tok;
@@ -417,13 +420,13 @@ function visitSince() {
   return v.since;
 }
 
-let homeState = { at: 0, report: null, findings: null, firstVisit: false };
+let homeState = { at: 0, report: null, findings: null, firstVisit: false, links: 0 };
 const homePoll = () => (homeState.report?.state === "no_data" ? 3000 : 30_000);
 
 function drawHome() {
   const el = $("#home-body");
   if (!homeState.report) return;
-  el.innerHTML = homeHTML(homeState.report, homeState.findings, { firstVisit: homeState.firstVisit, origin: location.origin });
+  el.innerHTML = homeHTML(homeState.report, homeState.findings, { firstVisit: homeState.firstVisit, origin: location.origin, links: homeState.links });
 }
 
 // renderHome draws what it has, then the findings when their checks finish: they
@@ -441,6 +444,11 @@ async function renderHome(seq, { force = false } = {}) {
   if (!sameSince) homeState.findings = null;
   drawHome();
   if (report.state === "no_data") return;
+  track(api("devices/links", new URLSearchParams())).then((l) => {
+    if (seq !== refreshSeq) return;
+    homeState.links = l.length;
+    drawHome();
+  }).catch(() => {});
   // At most a day of checks: they read every connection in what they cover.
   const to = report.as_of + 1;
   const from = Math.max(report.since, to - units.d);
@@ -509,6 +517,14 @@ function passportClick(e) {
   const tab = e.target.closest("[data-tab]");
   if (tab) { selectTab(tab.dataset.tab); return; }
   const id = state.passport;
+  const other = e.target.closest("[data-pp-open]");
+  if (other) { openPassport(other.dataset.ppOpen); return; }
+  const unlink = e.target.closest("[data-pp-unlink]");
+  if (unlink) {
+    send("POST", `devices/${encodeURIComponent(unlink.dataset.ppUnlink)}/link`, { decision: "undo" })
+      .then(() => { homeState.at = 0; refresh(); }).catch((err) => setStatus(err.message, true));
+    return;
+  }
   if (e.target.closest("[data-pp-details]")) { openEntity(id); return; }
   if (e.target.closest("[data-pp-map]")) { state.filter = `device:${id.slice("device:".length)}`; $("#filter").value = state.filter; selectTab("graph"); return; }
   if (e.target.closest("[data-pp-follow]")) { selectTab("graph"); follow(id); return; }
@@ -566,7 +582,7 @@ function settingsClick(e) {
   if (e.target.closest("[data-forget-token]")) { token = ""; store.remove("netgraph.token"); renderSettings(); setStatus("Token forgotten"); return; }
   const del = e.target.closest("[data-view-delete]");
   if (del) { const v = savedViews(); v.splice(Number(del.dataset.viewDelete), 1); saveViews(v); renderSettings(); return; }
-  if (e.target.closest("[data-forget-visit]")) { store.remove("netgraph.visit"); homeState = { at: 0, report: null, findings: null, firstVisit: false }; setStatus("Last visit forgotten"); }
+  if (e.target.closest("[data-forget-visit]")) { store.remove("netgraph.visit"); homeState = { at: 0, report: null, findings: null, firstVisit: false, links: 0 }; setStatus("Last visit forgotten"); }
 }
 
 // copyClick copies a command block, saying so on the button.
@@ -589,6 +605,16 @@ async function renderTab(seq) {
     if (t === "home") return await renderHome(seq);
     if (t === "settings") return renderSettings();
     if (t === "passport") return await renderPassport(seq);
+    if (t === "presence") {
+      const p = await track(api("presence"));
+      if (seq === refreshSeq) $("#presence-body").innerHTML = presenceHTML(p);
+      return;
+    }
+    if (t === "links") {
+      const l = await track(api("devices/links", new URLSearchParams()));
+      if (seq === refreshSeq) { homeState.links = l.length; $("#links-body").innerHTML = linksHTML(l); }
+      return;
+    }
     if (t === "pulse") return;
     if (t === "insights") return await renderInsights(seq);
     const path = tablePath[t];
@@ -730,11 +756,12 @@ const peerID = (f) => f.peer_device || (f.direction !== "in" && f.name ? `domain
 
 const tables = {
   devices: {
-    cols: ["Device", "Vendor", "Addresses", "Hostnames · services", "Conns", "Lookups", "Sent", "Received", "Active"],
-    titles: { 4: "Connections; how many of them came in from outside", 6: "Bytes the device sent", 7: "Bytes the device received" },
-    num: [4, 5, 6, 7],
+    cols: ["Device", "Type", "Vendor", "Addresses", "Hostnames · services", "Conns", "Lookups", "Sent", "Received", "Active"],
+    titles: { 1: "What it probably is, from what it said about itself; open it for why", 5: "Connections; how many of them came in from outside", 7: "Bytes the device sent", 8: "Bytes the device received" },
+    num: [5, 6, 7, 8],
     row: (d) => [
-      `${esc(d.label)}${d.user_label && d.auto_label ? `<div class="sub">${esc(d.auto_label)}</div>` : ""}<div class="sub mono">${esc(d.mac)}</div>`,
+      `${esc(d.label)}${d.owner ? ` <span class="badge">${esc(d.owner)}</span>` : ""}${(d.groups || []).map((g) => ` <span class="badge">${esc(g)}</span>`).join("")}${d.user_label && d.auto_label ? `<div class="sub">${esc(d.auto_label)}</div>` : ""}<div class="sub mono">${esc(d.mac)}</div>`,
+      typeBadge(d),
       esc(d.randomized ? "private MAC" : d.vendor_short || d.vendor || "") + (d.role ? " " + badge(d.role) : ""),
       `<span class="mono">${(d.ips || []).map(esc).join("<br>")}</span>`,
       (d.serves?.length ? `<span class="badge dir-in" title="Ports clients connected to">serves ${esc(d.serves.join(", "))}</span>` : "") +
@@ -742,7 +769,7 @@ const tables = {
       d.flows + (d.inbound ? `<div class="sub">${d.inbound} in</div>` : ""), d.dns_queries, bytes(d.bytes_out), bytes(d.bytes_in),
       `${when(d.active_from)}–${when(d.active_to)}`,
     ],
-    keys: [(d) => d.label, (d) => (d.randomized ? "private MAC" : d.vendor_short || d.vendor), (d) => addrKey(d.ips?.[0]),
+    keys: [(d) => d.label, (d) => d.type, (d) => (d.randomized ? "private MAC" : d.vendor_short || d.vendor), (d) => addrKey(d.ips?.[0]),
       (d) => [...(d.hostnames || []), ...(d.services || [])].join(" "), (d) => d.flows, (d) => d.dns_queries, (d) => d.bytes_out,
       (d) => d.bytes_in, (d) => d.active_from],
     id: (d) => d.id,
@@ -1568,7 +1595,8 @@ async function openEntity(id, { anomaly } = {}) {
   if (req !== entityReq) return;
   const userLabel = d.attrs?.user_label || "";
   const autoLabel = d.attrs?.auto_label || "";
-  const attrs = Object.entries(d.attrs || {}).filter(([k]) => k !== "user_label" && k !== "auto_label")
+  const hiddenAttrs = new Set(["user_label", "auto_label", "user_type", "owner", "groups", "same_as", "not_same_as", "link_copied"]);
+  const attrs = Object.entries(d.attrs || {}).filter(([k]) => !hiddenAttrs.has(k))
     .map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("");
   const rename = d.kind === "device" ? `
     <form class="rename" autocomplete="off">
@@ -1579,6 +1607,7 @@ async function openEntity(id, { anomaly } = {}) {
     </form>` : "";
   const dev = d.device;
   const devInfo = dev ? `
+    <dt>type</dt><dd>${typeBadge(dev)}</dd>
     <dt>addresses</dt><dd class="mono">${(dev.ips || []).map(esc).join(", ")}</dd>
     <dt>hostnames</dt><dd>${(dev.hostnames || []).map(esc).join(", ")}</dd>
     <dt>services</dt><dd>${(dev.services || []).map(esc).join(", ")}</dd>
@@ -1605,8 +1634,9 @@ async function openEntity(id, { anomaly } = {}) {
   const anomalyBox = flagged ? `<div class="anomaly-box"><b>${anomaly ? `${esc(anomaly.severity)} ${esc(anomaly.kind.replaceAll("_", " "))}` : "Anomalies"}</b><ul>${flagged.map((l) => `<li>${esc(l)}</li>`).join("")}</ul>${anomaly ? `<button type="button" id="autopsy-anomaly">Autopsy</button> <button type="button" id="save-incident">Save incident</button> <button type="button" id="mute-anomaly">Mute this for 1 hour</button>` : ""}</div>` : "";
   $("#panel-body").innerHTML = `${anomalyBox}
     <h2>${esc(d.label || d.key)}</h2>
-    <div class="muted mono">${esc(d.id)}</div>${d.kind === "device" ? `<p><a data-passport="${esc(d.id)}">Open its passport →</a></p>` : ""}${rename}
+    <div class="muted mono">${esc(d.id)}</div>${d.kind === "device" ? `<p><a data-passport="${esc(d.id)}">Open its passport →</a></p>` : ""}${rename}${d.kind === "device" ? profileForm(dev, d.attrs) : ""}
     <dl><dt>first seen</dt><dd>${stamp(d.first_seen)}</dd><dt>last seen</dt><dd>${stamp(d.last_seen)}</dd>${devInfo}${attrs}</dl>
+    ${dev ? `<details class="why-box"><summary>Why this type</summary>${typeWhy(dev)}</details>` : ""}
     ${facts ? `<h3>Relationships in this window</h3><ul>${facts}</ul>` : ""}
     ${flows ? `<h3>Connections</h3><ul>${flows}</ul>` : ""}
     ${timeline ? `<h3>Timeline</h3><ul>${timeline}</ul>` : ""}
@@ -2608,7 +2638,7 @@ function filterSuggest() {
 function commands() {
   const go = [["Home", "home", "1"], ["Map", "map", "2"], ["Devices", "devices", "3"], ["Activity", "activity", "4"], ["Findings", "findings", "5"], ["Wi-Fi", "wifi", "6"], ["Settings", "settings", "7"]]
     .map(([label, area, key]) => ({ label: `Go to ${label}`, key, run: () => selectArea(area) }));
-  const views = [["Connections", "flows"], ["Destinations", "destinations"], ["DNS", "dns"], ["Facts", "facts"], ["Pulse", "pulse"], ["Anomalies", "anomalies"], ["Incidents", "incidents"], ["Insights", "insights"], ["Sensors", "sensors"]]
+  const views = [["Connections", "flows"], ["Destinations", "destinations"], ["DNS", "dns"], ["Facts", "facts"], ["Pulse", "pulse"], ["Presence", "presence"], ["Devices to confirm", "links"], ["Anomalies", "anomalies"], ["Incidents", "incidents"], ["Insights", "insights"], ["Sensors", "sensors"]]
     .map(([label, t]) => ({ label: `Go to ${label}`, run: () => selectTab(t) }));
   const onMap = (f) => () => { if (state.tab !== "graph") selectTab("graph"); f(); };
   return [
@@ -2982,6 +3012,33 @@ function init() {
     const a = e.target.closest("a[data-passport]");
     if (a) openPassport(a.dataset.passport);
   });
+  $("#panel").addEventListener("submit", async (e) => {
+    const form = e.target.closest("form.profile");
+    if (!form) return;
+    e.preventDefault();
+    const out = form.querySelector("output");
+    try {
+      await send("PUT", `devices/${encodeURIComponent(state.open.slice("device:".length))}/profile`, {
+        type: form.elements.type.value,
+        owner: form.elements.owner.value,
+        groups: form.elements.groups.value.split(/[\s,]+/).filter(Boolean),
+      });
+      out.textContent = "Saved";
+      refresh();
+      openEntity(state.open);
+    } catch (err) { out.textContent = err.message; }
+  });
+  $("#presence-body").onclick = (e) => { const b = e.target.closest("[data-open]"); if (b) openEntity(b.dataset.open); };
+  $("#links-body").onclick = async (e) => {
+    const b = e.target.closest("[data-link]");
+    if (!b) return;
+    b.disabled = true;
+    try {
+      await send("POST", `devices/${encodeURIComponent(b.dataset.mac)}/link`, { same: b.dataset.same, decision: b.dataset.link });
+      homeState.at = 0;
+      refresh();
+    } catch (err) { setStatus(err.message, true); b.disabled = false; }
+  };
   $("#theme").onclick = () => { setTheme(theme() === "dark" ? "light" : "dark"); refresh(); };
   document.addEventListener("keydown", (e) => {
     if (e.target.matches("input, select, textarea")) return;
