@@ -7,6 +7,7 @@ import { homeHTML, installBlock } from "./home.js";
 import { parseWhen, fuzzy } from "./palette.js";
 import { tokens, lastToken, localSuggestions, searched } from "./filters.js";
 import { passportHTML } from "./passport.js";
+import { Privacy } from "./privacy.js";
 import { findingsHTML, findingDetail } from "./findings.js";
 import { typeBadge, typeWhy, profileForm, presenceHTML, linksHTML } from "./devices.js";
 import { Pulse } from "./pulse.js";
@@ -166,15 +167,17 @@ const store = {
 };
 
 let token = store.get("netgraph.token") || "";
+const privacy = new Privacy(store);
 
 // api reads JSON. Its query is the window and filter on screen plus extra, or
 // exactly extra when that is already a URLSearchParams.
 async function api(path, extra = {}, raw = false) {
   let retried = false;
   const query = extra instanceof URLSearchParams ? extra : params(extra);
+  if (privacy.on) for (const [k, v] of [...query]) query.set(k, privacy.restore(v));
   for (;;) {
     const headers = token ? { Authorization: `Bearer ${token}` } : {};
-    const resp = await fetch(`/api/v1/${path}?${query}`, { headers });
+    const resp = await fetch(`/api/v1/${privacy.restorePath(path)}?${query}`, { headers });
     if (resp.status === 401) {
       if (retried) {
         token = "";
@@ -195,7 +198,7 @@ async function api(path, extra = {}, raw = false) {
       throw new Error(`${path}: ${msg}`);
     }
     saveToken();
-    return raw ? resp.text() : resp.json();
+    return raw ? resp.text() : privacy.walk(await resp.json());
   }
 }
 
@@ -206,7 +209,7 @@ async function send(method, path, body) {
   for (;;) {
     const headers = { "Content-Type": "application/json" };
     if (token) headers.Authorization = `Bearer ${token}`;
-    const resp = await fetch(`/api/v1/${path}`, { method, headers, body: JSON.stringify(body) });
+    const resp = await fetch(`/api/v1/${privacy.restorePath(path)}`, { method, headers, body: privacy.restore(JSON.stringify(body)) });
     if (resp.status === 401) {
       if (retried) {
         token = "";
@@ -229,7 +232,7 @@ async function send(method, path, body) {
     saveToken();
     if (resp.status === 204) return null;
     const ct = resp.headers.get("content-type") || "";
-    return ct.includes("application/json") ? resp.json() : resp.text();
+    return ct.includes("application/json") ? privacy.walk(await resp.json()) : resp.text();
   }
 }
 
@@ -654,6 +657,9 @@ function renderSettings() {
     <section class="card"><h2>Saved views</h2>
       ${savedViews().length ? `<ul class="saved-list">${savedViews().map((v, i) => `<li><span><b>${esc(v.name)}</b> <span class="muted">${esc(v.tab)}${v.filter ? ` · ${esc(v.filter)}` : ""}</span></span> <button type="button" data-view-delete="${i}">Delete</button></li>`).join("")}</ul>` : `<p class="muted">None yet. “Save view” above any table or the map keeps its filter and window length, in this browser.</p>`}</section>
     <section class="card"><h2>Add a sensor</h2>${installBlock(location.origin)}</section>
+    <section class="card"><h2>Privacy mode</h2>
+      <p class="muted">For screenshots and demos: names and addresses become stand-ins, in this browser. Best effort, so check before you share. Exports that come straight from the server are turned off while it's on.</p>
+      <button type="button" data-privacy-toggle>${privacy.on ? "Turn off privacy mode" : "Turn on privacy mode"}</button></section>
     <section class="card"><h2>You</h2>
       <p>${me ? `${me.user ? `<b>${esc(me.user)}</b>, a` : "A"} ${esc(me.role)}${{ proxy: ", as your login proxy says", token: ", with a token", session: ", signed in with a token", open: ": this server needs no sign-in" }[me.via] || ""}.` : "Reading…"}</p>
       <div class="actions"><button type="button" data-sign-out${me?.via === "session" || me?.via === "token" ? "" : " disabled"}>Sign out of this browser</button>
@@ -682,6 +688,14 @@ function renderSettings() {
   }).catch(() => { const el = $("#settings-notify"); if (el) el.textContent = "Can't read them."; });
 }
 
+// Turning it on or off reloads, from a clean address: what's on screen came through
+// the old setting, and the address bar can hold real names.
+function setPrivacy(on) {
+  privacy.set(on);
+  location.hash = on ? "tab=home" : "";
+  location.reload();
+}
+
 function setTheme(t) {
   if (t) { document.documentElement.dataset.theme = t; store.set("netgraph.theme", t); }
   else { delete document.documentElement.dataset.theme; store.remove("netgraph.theme"); }
@@ -698,6 +712,7 @@ function settingsClick(e) {
       .catch((err) => { out.textContent = err.message; });
     return;
   }
+  if (e.target.closest("[data-privacy-toggle]")) { setPrivacy(!privacy.on); return; }
   const th = e.target.closest("[data-theme-set]");
   if (th) { setTheme(th.dataset.themeSet); renderSettings(); return; }
   if (e.target.closest("[data-sign-out]")) {
@@ -1890,7 +1905,7 @@ function syncFeed() {
 function feedPulse(frame) {
   const data = /^data: (.*)$/m.exec(frame);
   if (!data) return;
-  try { pulse.add(JSON.parse(data[1])); } catch { /* a frame it can't read costs that frame */ }
+  try { pulse.add(privacy.walk(JSON.parse(data[1]))); } catch { /* a frame it can't read costs that frame */ }
 }
 
 function closeLive() {
@@ -2829,6 +2844,7 @@ function commands() {
     { label: "What-if: test a policy", run: () => openWhatIf() },
     { label: "Fit the map to the screen", key: "0", run: onMap(() => diagram.fit()) },
     { label: "Re-arrange the map", run: onMap(() => diagram.rearrange()) },
+    { label: privacy.on ? "Turn off privacy mode" : "Turn on privacy mode", run: () => setPrivacy(!privacy.on) },
     { label: "Toggle dark mode", run: () => setTheme(theme() === "dark" ? "light" : "dark") },
     { label: "Save this view", run: saveCurrentView },
     { label: "Add a sensor", run: () => selectTab("settings") },
@@ -3253,6 +3269,8 @@ function init() {
     else $("#panel").hidden = true;
   });
   search();
+  document.body.classList.toggle("privacy", privacy.on);
+  $("#privacy-off").onclick = () => setPrivacy(false);
   loadMe();
   // Installable, and survives the server restarting. Needs HTTPS or localhost.
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
