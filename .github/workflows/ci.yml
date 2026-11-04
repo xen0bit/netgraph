@@ -3,8 +3,8 @@ name: ci
 on:
   push:
     branches: [main]
+  # Every pull request, including stacked ones based on another branch.
   pull_request:
-    branches: [main]
   workflow_dispatch:
 
 concurrency:
@@ -59,7 +59,7 @@ jobs:
         run: |
           go vet ./...
           go vet -tags lab ./test/lab/...
-          GOOS=js GOARCH=wasm go vet ./cmd/web
+          go vet -tags browser ./test/browser/...
       - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.14.0
@@ -76,6 +76,18 @@ jobs:
       - run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
           "$(go env GOPATH)/bin/govulncheck" ./...
+
+  # Real journeys through the web UI, in the Chrome the runner ships with.
+  browser:
+    name: browser journeys
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27"
+          cache: true
+      - run: make browser
 
   # The sensor ships to mips/arm routers nobody runs CI on; a compile on
   # every release target is what catches 32-bit and softfloat breakage

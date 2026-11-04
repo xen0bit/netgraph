@@ -225,7 +225,6 @@ func TestExport(t *testing.T) {
 func TestLiveAndWeb(t *testing.T) {
 	web := fstest.MapFS{
 		"index.html":  {Data: []byte("<html>netgraph ui</html>")},
-		"web.wasm.gz": {Data: gzipped("raw wasm")},
 	}
 	srv, st := serve(t, web)
 
@@ -273,23 +272,9 @@ func TestLiveAndWeb(t *testing.T) {
 	if _, body := get("/", ""); body != "<html>netgraph ui</html>" {
 		t.Errorf("index: %q", body)
 	}
-	if resp, body := get("/web.wasm", "gzip"); body != string(gzipped("raw wasm")) || resp.Header.Get("Content-Encoding") != "gzip" || resp.Header.Get("Content-Type") != "application/wasm" {
-		t.Errorf("wasm gz: %q %v", body, resp.Header)
-	}
-	if _, body := get("/web.wasm", ""); body != "raw wasm" {
-		t.Errorf("wasm inflated: %q", body)
-	}
 	if _, body := get("/devices/somewhere", ""); body != "<html>netgraph ui</html>" {
 		t.Errorf("client route: %q", body)
 	}
-}
-
-func gzipped(s string) []byte {
-	var b bytes.Buffer
-	zw := gzip.NewWriter(&b)
-	_, _ = zw.Write([]byte(s))
-	zw.Close()
-	return b.Bytes()
 }
 
 // TestWiFiKeys checks that sensors get the server's Wi-Fi keys and stored

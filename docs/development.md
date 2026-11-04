@@ -6,7 +6,6 @@
 |---|---|
 | `cmd/netgraph-sensor` | the router agent. Must never import SQLite, d2 or the TUI libraries: `deps_test.go` enforces it (modernc SQLite does not build for MIPS, d2 adds ~20 MB) |
 | `cmd/netgraph` | server, CLI, TUI |
-| `cmd/web` | the former WASM engine, no longer built or served; awaiting removal along with its CI step |
 | `internal/wire` | event schema, batch codec, shipper (spool, retry) |
 | `internal/decode` | protocol parsers: DNS/mDNS/LLMNR/NBNS, DHCPv4/v6, ARP/NDP, LLDP, SSDP, HTTP, TLS ClientHello + JA4, QUIC Initial |
 | `internal/flow` | the flow table and interval export |
