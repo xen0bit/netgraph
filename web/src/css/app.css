@@ -463,6 +463,20 @@ form.profile output { grid-column: 1 / -1; }
 .links h2 em { font-style: normal; color: var(--accent); }
 .links .actions { display: flex; gap: var(--sp-2); }
 
+/* Findings. */
+.nav-count { display: inline-block; min-width: 18px; margin-left: 6px; padding: 0 5px; border-radius: 999px; background: var(--accent); color: var(--accent-fg); font-size: 11px; font-weight: 600; line-height: 18px; text-align: center; }
+.finding-tools { padding: var(--sp-2) 0; flex-wrap: wrap; }
+.findings { list-style: none; margin: 0; padding: 0; }
+.finding .row-link { display: grid; grid-template-columns: auto 1fr; gap: 2px var(--sp-2); padding: 6px var(--sp-2); border-bottom: 1px solid var(--bg-3); }
+.finding.unread .finding-what { font-weight: 600; }
+.finding-what { overflow-wrap: anywhere; }
+.finding-meta { grid-column: 2; font-size: var(--text-xs); }
+.finding-group { border-left: 3px solid var(--border); margin: var(--sp-2) 0; padding-left: var(--sp-2); }
+.finding-group summary { cursor: pointer; padding: var(--sp-1) 0; }
+.finding-actions { display: flex; flex-wrap: wrap; gap: var(--sp-1); margin: var(--sp-3) 0; }
+.finding-note { display: flex; gap: var(--sp-1); }
+.finding-note input { flex: 1; min-width: 0; }
+
 /* Phones: the window is presets only, everything is one column, and what isn't
    the map folds away on the map. */
 @media (max-width: 760px) {

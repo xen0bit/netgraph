@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"path/filepath"
+	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -146,5 +148,52 @@ func TestWeatherUsesTheStepItGot(t *testing.T) {
 	}
 	if forecast[0].Upper == 0 || forecast[0].Lower > forecast[0].Upper {
 		t.Errorf("band = %+v", forecast[0])
+	}
+}
+
+// The forecast knows that evenings are busy: a moving mean over a quiet morning
+// would predict a quiet evening.
+func TestWeatherFollowsTheHourOfTheWeek(t *testing.T) {
+	hour := time.Hour.Milliseconds()
+	// A Sunday, 18:00 UTC, on an hour boundary.
+	now := time.Date(2026, 10, 25, 18, 0, 0, 0, time.UTC)
+	st, err := Open(filepath.Join(t.TempDir(), "ng.db"), Config{Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	end := now.UnixMilli()
+	// Three weeks: 1 MB an hour from 18:00 to 23:00, 1 kB otherwise.
+	for b := end - 3*7*24*hour; b < end; b += hour {
+		bytes := int64(1000)
+		if h := time.UnixMilli(b).UTC().Hour(); h >= 18 {
+			bytes = 1_000_000
+		}
+		if _, err := st.w.ExecContext(ctx, `INSERT INTO traffic_hourly (bucket, flow_key, client_device, client_ip, remote_ip, remote_port, proto, name, direction, app, multicast, flows, bytes_out, bytes_in)
+			VALUES (?, 'k', 1, '10.0.0.1', '1.1.1.1', 443, 6, '', 'out', '', 0, 1, ?, 0)`, b, bytes); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rep, err := st.Weather(ctx, model.Filter{From: now.Add(-6 * time.Hour), To: now})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var forecast int
+	for _, p := range rep.Points {
+		if !p.Forecast {
+			continue
+		}
+		forecast++
+		hourly := float64(p.Upper) / (float64(rep.StepMS) / float64(hour))
+		if hourly < 500_000 || hourly > 2_000_000 {
+			t.Errorf("forecast at %s: %.0f an hour, want about 1 MB", time.UnixMilli(p.TS).UTC(), hourly)
+		}
+	}
+	if forecast != 6 {
+		t.Errorf("%d forecast points", forecast)
+	}
+	if !slices.ContainsFunc(rep.Gaps, func(g string) bool { return strings.Contains(g, "usual traffic") }) {
+		t.Errorf("gaps: %v", rep.Gaps)
 	}
 }

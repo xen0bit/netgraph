@@ -69,8 +69,8 @@ function people(list) {
 
 function findingsBlock(rep) {
   if (!rep) return `<p class="muted"><span class="spinner inline"></span> Checking for findings…</p>`;
-  const list = rep.anomalies || [];
-  if (!list.length) return `<p class="muted">${rep.learning ? "Still learning this network: checks that compare with history start after a day." : "No findings."}</p>`;
+  const list = rep.findings || [];
+  if (!list.length) return `<p class="muted">${rep.learning ? "Still learning this network: checks that compare with history start after a day." : rep.scanned_at ? "Nothing needs a look." : "The first check is still running."}</p>`;
   const order = { high: 0, medium: 1, low: 2 };
   const top = [...list].sort((a, b) => order[a.severity] - order[b.severity]).slice(0, 5);
   return `<ul class="finds">${top.map((a) => `<li><span class="badge sev-${esc(a.severity)}">${esc(a.severity)}</span> ${esc(a.summary)}</li>`).join("")}</ul>
@@ -114,12 +114,12 @@ export function homeHTML(h, rep, { firstVisit, origin, links = 0 }) {
         <header class="card-head"><h2 id="h-since">${esc(sinceTitle(h, firstVisit))}</h2>${firstVisit ? "" : `<button type="button" data-home-seen>Mark as seen</button>`}</header>
         <div class="stats">
           <div><b>${h.new_devices.length}</b><span>new ${h.new_devices.length === 1 ? "device" : "devices"}</span></div>
-          <div><b>${rep ? (rep.anomalies || []).length : "…"}</b><span>findings</span></div>
+          <div><b>${rep ? (rep.findings || []).length : "…"}</b><span>open findings</span></div>
           <div><b>${esc(bytes(s?.bytes_out))}</b><span>sent</span></div>
           <div><b>${esc(bytes(s?.bytes_in))}</b><span>received</span></div>
         </div>
         ${h.new_devices.length ? `<h3>New devices</h3><ul class="new-devices">${h.new_devices.slice(0, 6).map((d) => `<li><button type="button" class="row-link" data-open="${esc(d.id)}"><b>${esc(d.label)}</b> <span class="muted">${esc(deviceSub(d))} · first seen ${esc(stamp(d.first_seen))}</span></button></li>`).join("")}</ul>` : ""}
-        <h3>Findings${h.as_of - h.since > units.d ? ", last 24 hours" : ""}</h3>
+        <h3>Findings</h3>
         ${findingsBlock(rep)}
       </section>
       ${links ? `<section class="card" aria-labelledby="h-links"><header class="card-head"><h2 id="h-links">${links === 1 ? "A device to confirm" : `${links} devices to confirm`}</h2><button type="button" data-tab="links">Review →</button></header>

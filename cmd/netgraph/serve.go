@@ -206,12 +206,16 @@ func runServe(args []string) error {
 	defer stop()
 	go reloadTokens(ctx, apiSrv, *tokenFile, *readTokenFile, *noAuth, log)
 	go st.RunRetention(ctx, time.Hour)
+	var anomalyAlerts *alert.Notifier
+	if notifier != nil && *alertAnomalies != "" {
+		anomalyAlerts = notifier
+	}
+	go scanFindings(ctx, st, anomalyAlerts, log)
 	if notifier != nil {
 		notifier.SetSince(st.FirstSensorSeen)
 		go notifier.Run(ctx)
 		log.Info("new-device alerts on", "learn", learnD)
 		if *alertAnomalies != "" {
-			go watchAnomalies(ctx, st, notifier, log)
 			log.Info("anomaly alerts on", "minimum", *alertAnomalies)
 		}
 		if reportD > 0 {
@@ -357,26 +361,34 @@ func reportLoop(ctx context.Context, st *store.Store, n *alert.Notifier, every t
 	}
 }
 
-// watchAnomalies checks the last hour every five minutes and hands new
-// findings to the notifier, which applies its own cooldown.
-func watchAnomalies(ctx context.Context, st *store.Store, n *alert.Notifier, log *slog.Logger) {
+// scanFindings records what the checks find, now and every five minutes, so that a
+// finding has a history whether or not anyone is looking. Alerts follow from it: a
+// finding pages when it's new and when it comes back, not while it simply continues.
+func scanFindings(ctx context.Context, st *store.Store, n *alert.Notifier, log *slog.Logger) {
+	scan := func() {
+		events, err := st.ScanFindings(ctx)
+		if err != nil {
+			if ctx.Err() == nil {
+				log.Error("scan for findings", "err", err)
+			}
+			return
+		}
+		if n == nil {
+			return
+		}
+		for _, e := range events {
+			n.NotifyAnomaly(e.Finding.Anomaly)
+		}
+	}
+	scan()
 	t := time.NewTicker(5 * time.Minute)
 	defer t.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case now := <-t.C:
-			rep, err := st.Anomalies(ctx, model.Filter{From: now.Add(-time.Hour), To: now})
-			if err != nil {
-				if ctx.Err() == nil {
-					log.Error("scan anomalies for alerts", "err", err)
-				}
-				continue
-			}
-			for _, a := range rep.Anomalies {
-				n.NotifyAnomaly(a)
-			}
+		case <-t.C:
+			scan()
 		}
 	}
 }

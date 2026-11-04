@@ -111,6 +111,10 @@ type Store struct {
 
 	types typeCache
 
+	findMu       sync.Mutex // serialises scans; guards the two below
+	findScanned  time.Time
+	findLearning bool
+
 	anomMu  sync.Mutex
 	anomGen uint64 // bumped by invalidateAnomalies
 	anomKey string
