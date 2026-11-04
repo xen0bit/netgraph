@@ -64,6 +64,10 @@ netgraph serve -db /var/lib/netgraph/netgraph.db -listen :8443
 | `-trusted-proxy` | | addresses or CIDRs of a reverse proxy to trust to say who someone is |
 | `-proxy-user-header` | `Remote-User` | the header it says so in |
 | `-proxy-roles-file` | | lines of `user role`; `* role` sets the default, otherwise `viewer` |
+| `-netflow-listen`, `-netflow-allow` | | receive NetFlow v5, v9 and IPFIX on a UDP address, from these addresses only: see [Other sources](#other-sources) |
+| `-dns-log`, `-dns-log-format` | `dnsmasq` | follow a DNS server's log |
+| `-leases-file` | | read names and addresses from a dnsmasq lease file |
+| `-source-local` | private ranges | the CIDRs that are "here", for those three |
 | `-llm-file` | `$NETGRAPH_LLM` | let Ask use a language model: an OpenAI-compatible URL such as `http://localhost:11434/v1?model=llama3.2`, or `https://api.example.com/v1?model=name&key=KEY`. Off by default: a model on another network receives your network's data, and the page warns before sending any |
 | `-mqtt-file` | `$NETGRAPH_MQTT` | publish to Home Assistant: see [Home Assistant](#home-assistant) |
 | `-alert-webhook` | `$NETGRAPH_ALERT_WEBHOOK` | POST a JSON alert when a new device joins, and optionally for anomalies and scheduled reports ([alerts](#new-device-alerts)) |
@@ -163,6 +167,29 @@ are looked up when it loads; `netgraph db enrich` does the same for a
 database offline, with the built-in table or `-asn-file`. The networks'
 names are kept in the database, so `netgraph query` reading the file shows
 them without the table.
+
+### Other sources
+
+Useful where a sensor can't see everything, such as with hardware offload on the router,
+or can't run at all. Each shows up as its own entry under Sensors.
+
+- **NetFlow and IPFIX** (`-netflow-listen :2055 -netflow-allow 192.168.1.1`): gives
+  connections and volumes, from a router that can export them. UDP has no login, so only
+  allowed addresses are heard. Each direction arrives separately: the side on a well-known
+  port is taken as the server and the two are joined, and with two high ports nothing says
+  who began, so that traffic shows as two connections. A flow only says what it says: no
+  names, no MACs, no fingerprints. Add a lease file, or a sensor, to tie addresses to devices.
+- **DNS logs** (`-dns-log /var/log/pihole.log`, or `-dns-log-format adguard` for AdGuard
+  Home's `querylog.json`): gives names, and shows lookups a filter blocked as `BLOCKED`.
+  dnsmasq needs `log-queries`. It reads from the end of the file on, and follows rotation.
+  dnsmasq logs nothing for some answers, so a lookup with no reply shows as `UNKNOWN`.
+  Only the log's arrival is timed, so DNS latency isn't available from dnsmasq or Pi-hole.
+  AdGuard's entries say what was asked and whether it was blocked, not what it resolved to.
+- **Lease files** (`-leases-file /var/lib/misc/dnsmasq.leases`): gives each device's MAC,
+  address and name, which also lets the other two attribute traffic to a device.
+
+A file has to be readable from where the server runs. sFlow, conntrack and other routers'
+lease formats aren't supported yet.
 
 ### Who can do what
 

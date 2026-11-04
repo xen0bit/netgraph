@@ -388,3 +388,11 @@ can't say which one was answered. Data sent at or below what that side has alrea
 counts as a retransmit; packets arriving out of order look the same, so that overcounts a
 little. None of this measures speed, and the delay to a slow site reads like a slow line,
 so a verdict says what the numbers look like, and only compares with a week of history.
+
+## Other sources
+
+NetFlow, DNS logs and lease files become the same events a sensor sends, under their own
+sensor name, so they need nothing special elsewhere. They carry less: no MAC says which
+device an address is unless a lease or a sensor has said so. If a sensor and NetFlow watch
+the same traffic, it's counted twice: they're separate records of it, so use one for any
+given path.

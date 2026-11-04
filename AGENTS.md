@@ -26,6 +26,8 @@ that are easy to break.
   a map, and DNS timeouts are sorted: replaying a capture twice gives
   identical events (`TestReplayDeterministic`). Active lookups — reverse
   DNS, channel hopping — are live-capture only.
+- **Other sources run on the server** (`internal/sources`): decoders bound what they read
+  and have `Fuzz*` targets, as the sensor's do, and UDP exports need an allow-list.
 - **The sensor persists nothing.** It writes no file: no database, spool,
   cache or keyring on disk. Its only inputs from disk are the token and CA
   files it is pointed at.
