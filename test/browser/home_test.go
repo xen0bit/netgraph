@@ -96,6 +96,17 @@ func TestRecorderLeavesTheMapRoom(t *testing.T) {
 	}
 }
 
+// The header is one row on a laptop-sized window, or the map pays for it.
+func TestHeaderIsOneRow(t *testing.T) {
+	s := open(t, window(), "")
+	s.waitFor("the map", nodesDrawn)
+	var same bool
+	s.eval(`Math.abs(document.querySelector(".window").getBoundingClientRect().top - document.querySelector(".right").getBoundingClientRect().top) < 20`, &same)
+	if !same {
+		t.Error("the header wrapped at 1500px")
+	}
+}
+
 // On a phone the map gets most of the screen; its options fold away and come back.
 func TestPhoneMapGetsTheScreen(t *testing.T) {
 	s := open(t, window(), "")

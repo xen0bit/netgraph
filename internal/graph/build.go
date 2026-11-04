@@ -619,7 +619,7 @@ func (b *builder) sourceNode(id string, devices map[string]*model.Device) {
 		n := b.node(id, model.KindDevice, d.Label, strings.TrimPrefix(sub, " · "))
 		n.Local = true
 		n.Attrs = map[string]string{"mac": d.MAC}
-		for k, v := range map[string]string{"vendor": d.Vendor, "role": d.Role, "hostnames": strings.Join(d.Hostnames, ","),
+		for k, v := range map[string]string{"vendor": d.Vendor, "role": d.Role, "class": d.Type, "owner": d.Owner, "hostnames": strings.Join(d.Hostnames, ","),
 			"services": strings.Join(d.Services, ","), "ips": strings.Join(d.IPs, ",")} {
 			if v != "" {
 				n.Attrs[k] = v

@@ -285,3 +285,79 @@ func TestColumnChoiceSticks(t *testing.T) {
 		t.Error("rows and headers disagree")
 	}
 }
+
+// A device's type shows in the table, can be explained and overruled, and filters.
+func TestDeviceTypes(t *testing.T) {
+	s := open(t, window()+"&tab=devices", "")
+	row := `[...document.querySelectorAll("#t-devices tbody tr")].find((r) => r.textContent.includes("BRN001BA9"))`
+	s.waitFor("the printer", row+`?.textContent.includes("Printer")`)
+	s.eval(row+`.click()`, nil)
+	s.waitFor("details", `!!document.querySelector("#panel form.profile")`)
+	var why string
+	s.eval(`document.querySelector("#panel .why-box").textContent`, &why)
+	if !strings.Contains(why, "_ipp") {
+		t.Errorf("the reasons: %q", why)
+	}
+	s.run(chromedp.SetValue(`#panel form.profile select`, "camera", chromedp.ByQuery))
+	s.run(chromedp.SendKeys(`#panel form.profile input[name="owner"]`, "<b>Pat</b>", chromedp.ByQuery))
+	s.run(chromedp.Click(`#panel form.profile button[type="submit"]`, chromedp.ByQuery))
+	s.waitFor("the new type", row+`?.textContent.includes("Camera") && `+row+`.textContent.includes("you said") && `+row+`.textContent.includes("<b>Pat</b>")`)
+	var markup bool
+	s.eval(`!!document.querySelector("#t-devices b b, #panel b b")`, &markup)
+	if markup {
+		t.Error("an owner became markup")
+	}
+	s.run(chromedp.Reload())
+	s.waitFor("it stuck", row+`?.textContent.includes("Camera")`)
+	// The filter words reach every view.
+	s.run(chromedp.Navigate(baseURL + "/#" + window() + "&tab=devices&q=type:camera"))
+	s.waitFor("one camera", `document.querySelectorAll("#t-devices tbody tr[data-i]").length === 1`)
+	// Put it back: the tests share a server.
+	s.eval(`(async () => { const r = await fetch("/api/v1/devices/" + document.querySelector("#t-devices tbody .mono").textContent + "/profile", {method: "PUT", headers: {"Content-Type": "application/json", Authorization: "Bearer " + localStorage.getItem("netgraph.token")}, body: JSON.stringify({type: "", owner: "", groups: []})}); return r.status; })()`, nil)
+	time.Sleep(300 * time.Millisecond)
+}
+
+// The map draws a device's type.
+func TestMapDrawsTypes(t *testing.T) {
+	s := open(t, window()+"&top=-1", "")
+	s.waitFor("the map", nodesDrawn)
+	s.settle()
+	var classes string
+	s.eval(`document.querySelector("#diagram").__map.graph.nodes.map((n) => n.attrs?.class || "").filter(Boolean).join(",")`, &classes)
+	if !strings.Contains(classes, "phone") {
+		t.Errorf("classes: %q", classes)
+	}
+}
+
+func TestPresenceView(t *testing.T) {
+	s := open(t, window()+"&tab=presence", "")
+	s.waitFor("presence", `document.querySelectorAll("#presence-body .presence-track span").length > 0`)
+	var ok bool
+	s.eval(`[...document.querySelectorAll("#presence-body .presence-track span")].every((b) => { const l = parseFloat(b.style.left), w = parseFloat(b.style.width); return l >= 0 && l + w <= 100.01 && w > 0; })`, &ok)
+	if !ok {
+		t.Error("a bar outside its track")
+	}
+	s.run(chromedp.Click(`#presence-body [data-open]`, chromedp.ByQuery))
+	s.waitFor("details", `!document.querySelector("#panel").hidden`)
+}
+
+// A suggestion asks, and an answer clears it. Stubbed: the scenario has no pair.
+func TestLinkSuggestionsAsk(t *testing.T) {
+	bad := `<img src=x onerror=window.__pwned=1>`
+	stub := fmt.Sprintf(`const real = window.fetch; window.__link = null; window.fetch = async (u, o) => {
+		if (String(u).includes("/devices/links") && !window.__link) return new Response(JSON.stringify([{device: {id: "device:da", mac: "da:00:00:00:00:01", label: %q, first_seen: 1}, same: {id: "device:aa", mac: "aa:00:00:00:00:01", label: "bob", last_seen: 1}, confidence: "high", reasons: [{signal: "hostname", value: %q}]}]), {headers: {"content-type": "application/json"}});
+		if (String(u).includes("/devices/links")) return new Response("[]", {headers: {"content-type": "application/json"}});
+		if (String(u).includes("/link") && o?.method === "POST") { window.__link = {url: String(u), body: o.body}; return new Response(null, {status: 204}); }
+		return real(u, o); };`, bad, bad)
+	s := open(t, "", stub)
+	s.waitFor("Home asks", `(document.querySelector("#h-links")?.textContent || "").includes("A device to confirm")`)
+	s.run(chromedp.Click(`[data-tab="links"]`, chromedp.ByQuery))
+	s.waitFor("the question", `document.querySelector("#links-body h2")?.textContent.includes("Is ")`)
+	var pwned bool
+	s.eval(`!!window.__pwned || !!document.querySelector("#links-body img")`, &pwned)
+	if pwned {
+		t.Error("a name became markup")
+	}
+	s.run(chromedp.Click(`[data-link="same"]`, chromedp.ByQuery))
+	s.waitFor("it answered", `window.__link?.body.includes('"decision":"same"') && window.__link.url.includes("da%3A00") && document.querySelector("#links-body h2")?.textContent === "Nothing to ask"`)
+}

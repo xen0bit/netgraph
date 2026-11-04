@@ -193,6 +193,66 @@ type Device struct {
 	BytesOut     uint64   `json:"bytes_out"` // what the device sent
 	BytesIn      uint64   `json:"bytes_in"`  // what it received
 	Remotes      int      `json:"remotes"`
+
+	// What kind of thing it is: a person's word if UserType, else the verdict of
+	// the classifier, with its confidence. TypeWhy is only on single-device answers.
+	Type           string       `json:"type,omitempty"`
+	TypeConfidence string       `json:"type_confidence,omitempty"`
+	UserType       bool         `json:"user_type,omitempty"`
+	TypeWhy        []TypeReason `json:"type_why,omitempty"`
+	Owner          string       `json:"owner,omitempty"`
+	Groups         []string     `json:"groups,omitempty"`
+	SameAs         string       `json:"same_as,omitempty"` // the MAC a person said this also is
+}
+
+// TypeReason is one signal behind a device's type.
+type TypeReason struct {
+	Signal string `json:"signal"`
+	Value  string `json:"value"`
+	Says   string `json:"says"`
+	Weight int    `json:"weight"`
+}
+
+// DeviceProfile is what a person says about a device. A nil field is left alone;
+// an empty one clears it.
+type DeviceProfile struct {
+	Type   *string  `json:"type,omitempty"`
+	Owner  *string  `json:"owner,omitempty"`
+	Groups []string `json:"groups,omitempty"` // nil is left alone; empty clears
+}
+
+// LinkReason is one thing two MACs have in common.
+type LinkReason struct {
+	Signal string `json:"signal"` // hostname, service, fingerprint, user_agent
+	Value  string `json:"value"`
+}
+
+// DeviceLink suggests that a private MAC is a device already known under another
+// address. It is a suggestion: nothing changes until a person says so.
+type DeviceLink struct {
+	Device     Device       `json:"device"`
+	Same       Device       `json:"same"`
+	Confidence string       `json:"confidence"`
+	Reasons    []LinkReason `json:"reasons"`
+}
+
+// PresenceDevice is when one device was seen in a window.
+type PresenceDevice struct {
+	ID        string     `json:"id"`
+	Label     string     `json:"label"`
+	Type      string     `json:"type,omitempty"`
+	Owner     string     `json:"owner,omitempty"`
+	Intervals [][2]int64 `json:"intervals"` // half-open, ms
+}
+
+// Presence is when devices were seen. "Seen" means they moved traffic: a phone
+// asleep on the network doesn't show.
+type Presence struct {
+	FromMS    int64            `json:"from"`
+	ToMS      int64            `json:"to"`
+	Precision string           `json:"precision"` // minute or hour
+	GapMS     int64            `json:"gap"`       // silence shorter than this doesn't split an interval
+	Devices   []PresenceDevice `json:"devices"`
 }
 
 // Home states: how far to trust what the landing page shows as "now".
@@ -261,6 +321,7 @@ type Passport struct {
 	WeekFromMS      int64          `json:"week_from"`
 	LastWeekFromMS  int64          `json:"last_week_from"`
 	Device          *Device        `json:"device"`
+	AlsoSeenAs      []Device       `json:"also_seen_as,omitempty"`
 	Hours           []uint64       `json:"hours"` // bytes this week per hour of the day, in the reader's timezone
 	Days            []PassportDay  `json:"days"`
 	ThisWeek        PassportWeek   `json:"this_week"`

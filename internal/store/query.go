@@ -182,6 +182,10 @@ func (w *where) sql() string {
 // deviceIDs resolves a device pattern to entity IDs: MAC, label, or any
 // hostname the device ever had.
 func (s *Store) deviceIDs(ctx context.Context, pattern string) ([]int64, error) {
+	// type:printer, owner:alice and group:iot pick devices by what's known of them.
+	if ids, ok, err := s.deviceIDsByProfile(ctx, pattern); ok || err != nil {
+		return ids, err
+	}
 	g := glob(pattern)
 	rows, err := s.r.QueryContext(ctx, `
 		SELECT id FROM entities WHERE kind = 'device' AND (lower(key) GLOB ?1 OR lower(label) GLOB ?1)
@@ -1216,6 +1220,7 @@ func (s *Store) Devices(ctx context.Context, f model.Filter) ([]model.Device, er
 	if n := limit(f, 1000, 100000); len(out) > n {
 		out = out[:n]
 	}
+	s.applyProfiles(ctx, out)
 	return out, nil
 }
 

@@ -228,6 +228,18 @@ Incidents, Insights, What-if), **Wi-Fi** and **Settings** (General, Sensors).
   own search finds only those; All CSV has everything. **Columns** chooses what shows, in this
   browser. Sorting Connections by a time or by bytes covers the whole window on the
   server; other columns, and hourly answers, sort the rows loaded.
+- **Device types:** each device is classified from what it says about itself: maker,
+  names, mDNS services, DHCP and browser fingerprints, UPnP, and ports it answers
+  on. "Why this type" shows the signals, since a device can claim anything, and the
+  details panel lets you overrule it and set an owner and groups. The map draws the
+  type as the icon, and `type:printer`, `owner:alice` and `group:iot` filter
+  everything (one device term at a time).
+- **Presence** (Devices): when each device moved traffic in the window, by owner.
+  It's traffic, not attendance: a phone asleep on the network doesn't show.
+- **To confirm** (Devices): a private MAC with the name or services of a known device
+  it was never online alongside. Nothing happens until you answer. Yes links them and
+  copies the name, owner and groups; history stays under each address, and the
+  passport can undo it.
 - **Settings:** theme, saved views, the commands to add a sensor to this server, what this
   browser remembers, and what the server holds.
 - **Window:** pick presets, type times, shift with ◀ ▶ or `[` `]`, or drag

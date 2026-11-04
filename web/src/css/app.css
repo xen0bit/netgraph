@@ -66,7 +66,7 @@ button.toggle[aria-pressed="true"] { background: var(--ok); color: var(--bg); bo
 .brand { font-size: 17px; margin: 0; display: flex; align-items: center; gap: 8px; }
 .brand .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px var(--sel); }
 .window { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.window input[type="datetime-local"] { width: 13.5rem; }
+.window input[type="datetime-local"] { width: 12.5rem; }
 .arrow { color: var(--fg-2); }
 .presets { display: inline-flex; }
 .presets button { border-radius: 0; margin-left: -1px; }
@@ -75,7 +75,7 @@ button.toggle[aria-pressed="true"] { background: var(--ok); color: var(--bg); bo
 .presets button.on { background: var(--accent); color: var(--accent-fg); border-color: var(--accent); }
 .right { margin-left: auto; display: flex; align-items: center; gap: 8px; }
 .search { position: relative; }
-.search input { width: 15rem; }
+.search input { width: 11rem; }
 .search ul {
   position: absolute; right: 0; top: calc(100% + 4px); z-index: 5; min-width: 24rem; max-width: 36rem; max-height: 60vh; overflow: auto;
   margin: 0; padding: 4px 0; list-style: none; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; box-shadow: var(--shadow);
@@ -441,6 +441,28 @@ table[style*="fixed"] td { overflow-wrap: anywhere; }
 .saved-list { list-style: none; margin: 0; padding: 0; }
 .saved-list li { display: flex; justify-content: space-between; gap: var(--sp-2); align-items: center; padding: 3px 0; overflow-wrap: anywhere; }
 
+/* Device types, profiles and presence. */
+.sub-inline { color: var(--fg-2); font-size: var(--text-xs); }
+.why { list-style: none; margin: var(--sp-1) 0; padding: 0; font-size: var(--text-sm); }
+.why li { padding: 2px 0; overflow-wrap: anywhere; }
+.why-box { margin: var(--sp-2) 0; font-size: var(--text-sm); }
+.why-box summary { cursor: pointer; color: var(--fg-2); }
+form.profile { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: var(--sp-1) var(--sp-2); margin: var(--sp-2) 0; align-items: end; font-size: var(--text-xs); color: var(--fg-2); }
+form.profile label { display: flex; flex-direction: column; gap: 2px; }
+form.profile input, form.profile select { min-width: 0; width: 100%; font-size: var(--text-sm); color: var(--fg); }
+form.profile output { grid-column: 1 / -1; }
+.owners { margin: 0 0 var(--sp-2); }
+.presence { max-width: 1280px; margin: 0 auto; padding-top: var(--sp-2); }
+.presence-row { display: grid; grid-template-columns: minmax(150px, 280px) 1fr; gap: var(--sp-2); align-items: center; }
+.presence-row .row-link { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.presence-row.axis { position: sticky; top: 0; background: var(--bg); z-index: 1; }
+.presence-track { position: relative; height: 14px; background: var(--bg-2); border-radius: 4px; overflow: hidden; }
+.presence-track span { position: absolute; top: 2px; bottom: 2px; min-width: 2px; background: var(--accent); border-radius: 3px; }
+.presence-owner { margin: var(--sp-3) 0 var(--sp-1); font-size: var(--text-xs); text-transform: uppercase; letter-spacing: .04em; color: var(--fg-2); }
+.links { max-width: 760px; margin: 0 auto; padding-top: var(--sp-3); display: flex; flex-direction: column; gap: var(--sp-3); }
+.links h2 em { font-style: normal; color: var(--accent); }
+.links .actions { display: flex; gap: var(--sp-2); }
+
 /* Phones: the window is presets only, everything is one column, and what isn't
    the map folds away on the map. */
 @media (max-width: 760px) {
@@ -460,6 +482,7 @@ table[style*="fixed"] td { overflow-wrap: anywhere; }
   .search ul { left: 0; right: auto; min-width: 0; width: 100%; }
   .home-grid { grid-template-columns: 1fr; }
   .home-grid .since { grid-row: auto; }
+  .presence-row { grid-template-columns: 110px 1fr; }
   .stats b { font-size: var(--text-lg); }
   .tabs button { padding: 8px 10px; }
 }

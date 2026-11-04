@@ -143,6 +143,9 @@ func (s *Store) ForgetDeviceWithOptions(ctx context.Context, mac string, opts Fo
 	if opts.DryRun {
 		return res, nil
 	}
+	if err := dropDeadLinks(ctx, tx); err != nil {
+		return res, err
+	}
 	if err := tx.Commit(); err != nil {
 		return res, err
 	}
@@ -153,6 +156,7 @@ func (s *Store) ForgetDeviceWithOptions(ctx context.Context, mac string, opts Fo
 	}
 	_, _ = s.w.ExecContext(ctx, `PRAGMA incremental_vacuum`)
 	s.invalidateAnomalies()
+	s.types.reset()
 	return res, nil
 }
 
@@ -244,6 +248,9 @@ func (s *Store) PurgeBeforeWithOptions(ctx context.Context, before time.Time, op
 	if opts.DryRun {
 		return r, nil
 	}
+	if err := dropDeadLinks(ctx, tx); err != nil {
+		return r, err
+	}
 	if err := tx.Commit(); err != nil {
 		return r, err
 	}
@@ -253,5 +260,6 @@ func (s *Store) PurgeBeforeWithOptions(ctx context.Context, before time.Time, op
 	}
 	_, _ = s.w.ExecContext(ctx, `PRAGMA incremental_vacuum`)
 	s.invalidateAnomalies()
+	s.types.reset()
 	return r, nil
 }

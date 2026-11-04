@@ -2,6 +2,7 @@
 // who is here, who is busy. Drawn from GET /api/v1/home; every value that came
 // off the network goes through esc().
 import { esc, bytes, stamp, clock, ago, units } from "./util.js";
+import { typeName } from "./devices.js";
 
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
@@ -22,7 +23,7 @@ function sinceTitle(h, firstVisit) {
   return `Since you were last here, ${ago(h.as_of - h.since)}`;
 }
 
-const deviceSub = (d) => (d.randomized ? "private MAC" : d.vendor_short || d.vendor || d.ips?.[0] || d.mac);
+const deviceSub = (d) => [d.owner, d.type ? typeName(d.type) : d.randomized ? "private MAC" : d.vendor_short || d.vendor || d.ips?.[0] || d.mac].filter(Boolean).join(" · ");
 
 // trafficChart is one measure over the day: one colour, one axis, a tooltip per
 // bar. Clicking a bar opens the map at that moment.
@@ -59,9 +60,10 @@ function talkers(list) {
 
 function people(list) {
   if (!list.length) return `<p class="muted">No device was active in the 10 minutes before the newest data.</p>`;
+  const owners = [...new Set(list.map((d) => d.owner).filter(Boolean))].sort();
   const shown = list.slice(0, 24);
   const more = list.length - shown.length;
-  return `<div class="chips">${shown.map((d) => `<button type="button" class="device-chip" data-open="${esc(d.id)}"><b>${esc(d.label)}</b><span>${esc(deviceSub(d))}</span></button>`).join("")}
+  return `${owners.length ? `<p class="owners">${owners.map((o) => `<b>${esc(o)}</b>`).join(" · ")} <span class="muted">home</span></p>` : ""}<div class="chips">${shown.map((d) => `<button type="button" class="device-chip" data-open="${esc(d.id)}"><b>${esc(d.label)}</b><span>${esc(deviceSub(d))}</span></button>`).join("")}
     ${more > 0 ? `<button type="button" class="device-chip more" data-tab="devices"><b>${more} more</b><span>all devices</span></button>` : ""}</div>`;
 }
 
@@ -100,7 +102,7 @@ function firstRun(h, origin) {
 }
 
 // homeHTML is the whole page. rep is the findings report, null until it arrives.
-export function homeHTML(h, rep, { firstVisit, origin }) {
+export function homeHTML(h, rep, { firstVisit, origin, links = 0 }) {
   if (h.state === "no_data") return firstRun(h, origin);
   const [cls, icon, head, sub] = status(h);
   const s = h.summary_since;
@@ -120,6 +122,8 @@ export function homeHTML(h, rep, { firstVisit, origin }) {
         <h3>Findings${h.as_of - h.since > units.d ? ", last 24 hours" : ""}</h3>
         ${findingsBlock(rep)}
       </section>
+      ${links ? `<section class="card" aria-labelledby="h-links"><header class="card-head"><h2 id="h-links">${links === 1 ? "A device to confirm" : `${links} devices to confirm`}</h2><button type="button" data-tab="links">Review →</button></header>
+        <p class="muted">${links === 1 ? "A private address looks like" : "Private addresses look like"} a device you already know.</p></section>` : ""}
       <section class="card" aria-labelledby="h-here">
         <header class="card-head"><h2 id="h-here">${h.state === "ok" ? "Here now" : "Here at the end of the data"}</h2><span class="muted">${h.active.length}</span></header>
         ${people(h.active)}

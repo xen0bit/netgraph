@@ -70,7 +70,7 @@
   <section class="filters">
     <div class="filter-box">
       <input id="filter" type="search" spellcheck="false" autocomplete="off" role="combobox" aria-expanded="false" aria-controls="filter-suggest" aria-autocomplete="list" aria-label="Filter"
-             placeholder="Filter (/): device:alice-*  domain:*.example.com  ip:10.0.0.0/8  port:443  dir:in  asn:13335  cc:DE  app:quic">
+             placeholder="Filter (/): device:alice-*  domain:*.example.com  ip:10.0.0.0/8  port:443  dir:in  type:printer  owner:alice  asn:13335  cc:DE">
       <ul id="filter-suggest" role="listbox" aria-label="Filter suggestions" hidden></ul>
     </div>
     <div class="view-tools">
@@ -136,6 +136,8 @@
       </div>
       </details>
     </section>
+    <section id="view-presence" class="view" hidden><div id="presence-body"></div></section>
+    <section id="view-links" class="view" hidden><div id="links-body"></div></section>
     <section id="view-passport" class="view" hidden><div id="passport-body"></div></section>
     <section id="view-pulse" class="view" hidden>
       <div class="table-tools">

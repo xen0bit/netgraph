@@ -366,3 +366,15 @@ extensions ioctl, so it works with mac80211 monitor interfaces and not with
   decoding shifted bytes.
 - **Wi-Fi on other channels** is missed while the monitor interface is
   hopping. A busy network also loses frames during the hop itself.
+
+## What kind of device is it?
+
+`internal/classify` weighs what a device has said about itself and names a type,
+with a confidence and the signals behind it. Everything it reads comes off the
+network, so it's a judgement, and the UI shows the reasoning. Each kind of signal
+counts once per type, so a device can't win by repeating itself. A person's answer
+always beats it, and clearing that answer brings it back.
+
+A private MAC can't be merged into the device it probably is: history stays under
+each address. A link is a person's statement that the two are the same, which shares
+a name, an owner and groups, and can be undone.

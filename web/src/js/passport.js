@@ -1,5 +1,6 @@
 // One device's profile. Every value that came off the network goes through esc().
 import { esc, bytes, stamp, ago, pad2 } from "./util.js";
+import { typeBadge, typeWhy } from "./devices.js";
 
 // compare says how this week reads against the last, in words.
 function compare(now, then, has) {
@@ -53,6 +54,8 @@ export function passportHTML(p) {
   const d = p.device, w = p.this_week, l = p.last_week;
   const total = (x) => x.bytes_in + x.bytes_out;
   const identity = [
+    ["Owner", d.owner],
+    ["Groups", (d.groups || []).join(", ")],
     ["Vendor", d.randomized ? "private MAC (it changes; the vendor isn't known)" : d.vendor],
     ["MAC", d.mac],
     ["Addresses", (d.ips || []).join(", ")],
@@ -75,7 +78,10 @@ export function passportHTML(p) {
       </div>
     </header>
     <div class="home-grid">
-      <section class="card"><h3>Identity</h3><dl class="facts-list">${identity.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl></section>
+      <section class="card"><h3>Identity</h3><dl class="facts-list"><dt>Type</dt><dd>${typeBadge(d)}</dd>${identity.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl>
+        <details class="why-box"><summary>Why this type</summary>${typeWhy(d)}</details>
+        ${p.also_seen_as?.length ? `<h3>Also seen as</h3><ul class="finds">${p.also_seen_as.map((x) => `<li><button type="button" class="row-link" data-pp-open="${esc(x.id)}"><b>${esc(x.label)}</b> <span class="muted">${esc(x.mac)}, last seen ${esc(stamp(x.last_seen))}</span></button></li>`).join("")}</ul>${d.same_as ? `<button type="button" data-pp-unlink="${esc(d.mac)}">Undo the link</button>` : ""}` : ""}
+      </section>
       <section class="card"><h3>This week</h3>
         <div class="stats three">
           <div><b>${esc(bytes(total(w)))}</b><span>${esc(compare(total(w), total(l), p.has_last_week))}</span></div>

@@ -58,6 +58,10 @@ that are easy to break.
   it's added to `db forget`, `db purge` and the disk guard as it needs.
 - **d2 keys are always quoted** (`graph.quote`): an unquoted
   `example.com` or address is parsed as nested containers.
+- **A device's type is a judgement.** `internal/classify` is a pure function over
+  strings a device chose to send: bound what it reads, keep `FuzzClassify` passing,
+  and return the reasons with the verdict. A person's answer beats it. Suggestions,
+  such as linking a private MAC to a known device, change nothing until answered.
 - **Correlation is by evidence.** Devices are found by the MAC that sent
   the packets. mDNS records go to the device holding their address, not
   the sender. DNS names prefer the lookup the connection's own SNI/Host

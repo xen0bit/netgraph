@@ -517,6 +517,8 @@ func TestScreenshots(t *testing.T) {
 		"map":      window(),
 		"home":     "",
 		"settings": "tab=settings",
+		"devices":  window() + "&tab=devices",
+		"presence": window() + "&tab=presence",
 	} {
 		s := open(t, hash, "")
 		s.settle()
