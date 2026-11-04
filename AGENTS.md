@@ -50,6 +50,12 @@ that are easy to break.
   panic is still a bug.
 - **Everything shown in the web UI goes through `esc()` or `textContent`.**
   Hostnames, user agents and UPnP strings come from the LAN.
+- **The map keeps its places** (`web/src/js/map/`). A node with a known
+  position never moves unless a person moves it or asks to re-arrange: new
+  nodes give way. Don't add a layout step that shifts what is already placed.
+- **Every table has an erasure decision** in `tableErasure`
+  (`internal/store/erasure_tables_test.go`): a new one fails that test until
+  it's added to `db forget`, `db purge` and the disk guard as it needs.
 - **d2 keys are always quoted** (`graph.quote`): an unquoted
   `example.com` or address is parsed as nested containers.
 - **Correlation is by evidence.** Devices are found by the MAC that sent
@@ -61,7 +67,7 @@ that are easy to break.
 
 ```sh
 gofmt -l .        # must print nothing
-make lint test    # vet (default, lab and wasm tags), golangci-lint, tests with -race
+make lint test    # vet (default, lab, browser and wasm tags), golangci-lint, tests with -race
 make cross        # when touching dependencies or the sensor
 make browser      # when touching the web UI
 make lab          # when touching capture, decoding, ingest, queries or the web UI

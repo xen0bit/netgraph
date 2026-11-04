@@ -92,17 +92,27 @@
         <label title="One node per network (AS) for addresses whose network the server knows: visitors from outside, unnamed destinations"><input type="checkbox" id="g-networks" checked> Networks</label>
         <label><input type="checkbox" id="g-identity"> Identity</label>
         <label title="Draw each device's busiest N destinations and N clients; the rest become one node each (-1: all)">Top <input type="number" id="g-top" min="-1" max="500" value="15"></label>
-        <label>Layout <select id="g-layout"><option value="dagre">dagre (in browser)</option><option value="elk">elk (server)</option></select></label>
         <span class="spacer"></span>
-        <button id="g-fit" title="Fit to view">Fit</button>
-        <button id="g-svg" title="Download SVG">SVG</button>
+        <button id="g-unhide" hidden title="Put back what you hid from the map">Show hidden</button>
+        <button id="g-arrange" title="Lay the map out again; pinned nodes stay">Re-arrange</button>
+        <button id="g-fit" title="Fit to view (0)">Fit</button>
+        <button id="g-png" title="Download this view as a picture">PNG</button>
+        <button id="g-svg" title="Download the graph as SVG, drawn by the server">SVG</button>
         <button id="g-d2" title="Download the d2 script">d2</button>
       </div>
-      <div id="diagram" class="diagram" tabindex="0" aria-label="Graph; drag to pan, scroll to zoom, click a node for details"></div>
+      <div class="map-wrap">
+        <div id="diagram" class="diagram"></div>
+        <div id="map-selection" class="map-selection" hidden>
+          <span id="map-selection-count"></span>
+          <button id="map-selection-hide" type="button">Hide</button>
+          <button id="map-selection-unpin" type="button">Unpin</button>
+          <button id="map-selection-clear" type="button">Clear</button>
+        </div>
+      </div>
       <div id="graph-note" class="note"></div>
       <div class="legend" aria-label="How to read the graph">
-        <span><b>Arrows point from client to server</b>: a device here connecting out points away from it; a client connecting in points at it.</span>
-        <span>Edge label: server port · <b>up</b> client → server · <b>down</b> server → client · <b>xN</b> connections</span>
+        <span><b>Arrows point from client to server.</b> Width is volume. Dots flow <b class="flow-up">up</b> to the server and <b class="flow-down">down</b> from it.</span>
+        <span>Drag a node to pin it · shift-drag to select · right-click for actions · double-click “N more” or a site to open it</span>
         <span><span class="sw dev"></span>device here</span>
         <span><span class="sw oval name"></span>name or site</span>
         <span><span class="sw addr"></span>address</span>

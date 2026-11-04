@@ -56,6 +56,7 @@ they must not depend on the resolver of the machine replaying them.
 | `timeline_events` | the Flight Recorder's compact event rail: device joins, DNS, flow open/close, observations, sensor stats, notes and bookmarks | raw retention; the rail events of notes and bookmarks live as long as the note |
 | `annotations`, `bookmarks` | human notes and marked moments on the rail | until deleted, or erased by `db forget`/`db purge` |
 | `incidents`, `incident_*` | saved investigations | until deleted, or erased by `db forget`/`db purge` |
+| `map_pins` | where a person placed a node on the map | until unpinned, or erased by `db forget`/`db purge` |
 
 A fact's rows are its **periods**. Seeing a relationship again within
 `-fact-gap` (1 h) extends the current period; after a longer silence a new
@@ -193,11 +194,12 @@ Each relationship is drawn once, so a busy window stays readable:
   are nodes only when two or more devices share them, which is when they
   say something (the same JA4 on two devices; two devices claiming one
   address). One device's own are on its node and in its details.
-- A device with eight or more destinations that only it reaches, and that
-  nothing else in the graph touches, draws them as a grid, busiest first,
-  with one edge carrying their totals; each keeps its ports and connection
-  count on its label. Eight or more such clients are a grid too, with its
-  edge into the device.
+- In the d2 drawings (SVG, d2 script, `netgraph graph`, the TUI), a device with
+  eight or more destinations that only it reaches, and that nothing else in the
+  graph touches, draws them as a grid, busiest first, with one edge carrying
+  their totals; each keeps its ports and connection count on its label. Eight
+  or more such clients are a grid too, with its edge into the device. The web
+  map fans them out around the device instead.
 
 ## Anomalies
 

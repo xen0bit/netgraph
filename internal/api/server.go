@@ -157,6 +157,9 @@ func New(cfg Config) *Server {
 	read("/api/v1/export", s.export)
 	s.mux.Handle("GET /api/v1/live", s.requireLive(http.HandlerFunc(s.live)))
 	read("/metrics", s.metrics)
+	read("/api/v1/map/pins", s.mapPins)
+	s.mux.Handle("PUT /api/v1/map/pins", s.requireRead(http.HandlerFunc(s.setMapPins)))
+	s.mux.Handle("DELETE /api/v1/map/pins", s.requireRead(http.HandlerFunc(s.deleteMapPins)))
 	s.mux.Handle("PUT /api/v1/devices/{mac}/label", s.requireRead(http.HandlerFunc(s.setLabel)))
 	s.mux.Handle("POST /api/v1/anomalies/mute", s.requireRead(http.HandlerFunc(s.muteAnomaly)))
 	s.mux.Handle("POST /api/v1/whatif", s.requireRead(http.HandlerFunc(s.whatif)))
@@ -178,7 +181,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("X-Frame-Options", "DENY")
-	w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' 'wasm-unsafe-eval' 'unsafe-eval'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'")
+	w.Header().Set("Content-Security-Policy", "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'")
 	if r.Method == http.MethodHead && (r.URL.Path == "/api/v1/live" || r.URL.Path == "/api/v1/export") {
 		w.Header().Set("Allow", "GET")
 		httpError(w, http.StatusMethodNotAllowed, errors.New("HEAD is not supported for this endpoint"))
@@ -542,6 +545,62 @@ func (s *Server) sensors(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) wifi(w http.ResponseWriter, r *http.Request) {
 	answer(s, w, r, s.cfg.Store.WiFi)
+}
+
+func (s *Server) mapPins(w http.ResponseWriter, r *http.Request) {
+	pins, err := s.cfg.Store.MapPins(r.Context())
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, pins)
+}
+
+// jsonBody decodes a bounded JSON body into v, and answers the request itself
+// if it cannot. A JSON content type makes a cross-site request need a CORS
+// preflight, which this server never grants.
+func jsonBody(w http.ResponseWriter, r *http.Request, limit int64, v any) bool {
+	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		httpError(w, http.StatusUnsupportedMediaType, errors.New("expected application/json"))
+		return false
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, limit)).Decode(v); err != nil {
+		httpError(w, http.StatusBadRequest, fmt.Errorf("bad request body: %w", err))
+		return false
+	}
+	return true
+}
+
+func (s *Server) setMapPins(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Pins []model.MapPin `json:"pins"`
+	}
+	if !jsonBody(w, r, 1<<20, &body) {
+		return
+	}
+	if err := s.cfg.Store.SetMapPins(r.Context(), body.Pins); err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) deleteMapPins(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		IDs []string `json:"ids"`
+	}
+	if !jsonBody(w, r, 1<<20, &body) {
+		return
+	}
+	if len(body.IDs) == 0 {
+		httpError(w, http.StatusBadRequest, errors.New(`expected {"ids": [...]}`))
+		return
+	}
+	if err := s.cfg.Store.DeleteMapPins(r.Context(), body.IDs); err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) dataRange(w http.ResponseWriter, r *http.Request) {

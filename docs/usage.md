@@ -214,17 +214,30 @@ page asks for it once and keeps it in the browser.
   pointed, and the clients that connected in to them (see [the
   graph](concepts.md#the-graph) for how it stays readable). Every
   connection points from client to server, labelled with the server's port;
-  a legend under the graph says how to read it. Drag to pan, scroll to
-  zoom, click a node for its details; a device's grid of destinations or
-  clients opens the device, and "N more destinations" or "N more clients"
-  says how to see them.
+  a legend under the map says how to read it. Width is volume, and dots flow
+  along an edge to show direction and rate.
+
+  The map keeps its places. The router sits in the middle with the devices
+  around it and what they talk to outside them, and a node stays where it is
+  across windows and refreshes, so what changes on the map is what changed on
+  the network. **Re-arrange** lays it out again.
+
+  Drag empty space to pan and scroll to zoom. Click a node for its details and
+  an edge for its connections. Drag a node to pin it there for everyone who
+  uses this server. Shift-drag selects several nodes, to hide or unpin them.
+  Right-click anything for what you can do with it, including asking what
+  would happen if an edge were blocked. Double-click "N more destinations" or a
+  site to open it in place, and again to close it.
+
+  With the map focused, arrow keys move between nodes, Enter opens one, `+` and
+  `-` zoom and `0` fits. A list of the same nodes follows the map for screen
+  readers.
 - **Connections:** each connection's direction (`out`, `in`, `lan`), client
   and server with the server's port, and what the device sent and received.
-  Download the SVG or the d2 script. The graph is laid out in your
-  browser by the same Go code as the server, compiled to WebAssembly
-  (dagre). The **elk** layout is drawn by the server. While the next
-  window is fetched and laid out, the current graph stays visible under a
-  small spinner rather than blanking.
+  Download this view as a PNG, or the graph as SVG or a d2 script, which the
+  server draws with the same d2 code as the CLI. While the next window is
+  fetched, the current map stays visible under a small spinner. Anomalies
+  outline the map when their checks finish, so it never waits for them.
 - **Anomalies:** what stands out in the window, most severe first, with the
   evidence ([what is checked](concepts.md#anomalies)). The details panel
   can mute that finding for an hour; mutes are stored on the server and

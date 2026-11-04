@@ -1,8 +1,6 @@
-// netgraph web UI. Tables and the timeline come straight from the JSON API;
-// the graph is fetched, laid out and drawn by the WASM engine in a worker,
-// falling back to the server's SVG if WASM cannot load.
-import { Engine } from "./engine.js";
-import { Diagram } from "./diagram.js";
+// netgraph web UI. Everything comes straight from the JSON API; the map is
+// drawn here, on a canvas (map/map.js).
+import { LivingMap } from "./map/map.js";
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
@@ -51,9 +49,6 @@ const state = {
   filter: "",
   tab: "graph",
   gopts: { collapse: true, dns: true, sites: true, anomalies: true, networks: true, identity: false, top: 15 },
-  // dagre runs inside the WASM engine; d2's ELK needs a host-provided
-  // synchronous ELK in the browser, so "elk" is drawn by the server.
-  layout: "dagre",
   graph: null,
   data: {},
   // Per table: the column it is sorted by ({col, dir}), and how many rows
@@ -78,7 +73,6 @@ function loadHash() {
   state.live = p.get("live") === "1" || !p.has("to");
   state.filter = p.get("q") || "";
   if (p.get("tab") && tables[p.get("tab")]) state.tab = p.get("tab");
-  if (p.get("layout") === "elk" || p.get("layout") === "dagre") state.layout = p.get("layout");
   for (const k of ["collapse", "dns", "sites", "anomalies", "networks", "identity"]) if (p.has(k)) state.gopts[k] = p.get(k) === "1";
   const top = num("top");
   if (top === -1 || (top && top >= 1)) state.gopts.top = Math.min(top, 1000);
@@ -105,7 +99,6 @@ function saveHash() {
   if (state.tab !== "graph") p.set("tab", state.tab);
   for (const k of ["collapse", "dns", "sites", "anomalies", "networks", "identity"]) p.set(k, state.gopts[k] ? "1" : "0");
   p.set("top", state.gopts.top);
-  p.set("layout", state.layout);
   const so = state.sort[state.tab];
   if (so) p.set("sort", `${state.tab}.${so.col}.${so.dir}`);
   if (state.open) p.set("open", state.open);
@@ -258,7 +251,6 @@ function askToken() {
 function saveToken() {
   if (!token) return;
   store.set("netgraph.token", token)
-  engine?.call("configure", { base: location.origin, token }).catch(() => {});
   $("#connect").hidden = true;
 }
 
@@ -333,7 +325,9 @@ async function refresh() {
     const report = await anomaliesP;
     if (seq !== refreshSeq) return;
     lastReport = report;
+    reportSeq = seq;
     renderSummary(summary, report);
+    if (state.tab === "graph" && state.graph) diagram.applyMarks((g) => markGraph(g, report));
   })();
   const spark = track(api("timeseries", { step })).catch(() => null).then((s) => { if (seq === refreshSeq) renderSpark(s); });
   // An empty view offers a way to the data, so it needs to know where that is.
@@ -343,6 +337,7 @@ async function refresh() {
 }
 
 let lastReport = null;
+let reportSeq = 0;
 
 // --- what the server holds --------------------------------------------------------
 
@@ -857,9 +852,14 @@ function tableTools(t, table) {
 
 // --- graph ----------------------------------------------------------------------
 
-let engine = null;
-let engineState = "idle";
-const diagram = new Diagram($("#diagram"), { onSelect: openEntity });
+const diagram = new LivingMap($("#diagram"), {
+  onSelect: (id) => openEntity(id),
+  onEdge: (e) => openEdge(e),
+  onExpand: (id) => toggleExpand(id),
+  onMenu: (target, x, y) => openMapMenu(target, x, y),
+  onPin: (id, x, y) => send("PUT", "map/pins", { pins: [{ id, x, y }] }).catch((e) => setStatus(e.message, true)),
+  onSelection: (ids) => renderSelection(ids),
+});
 
 function theme() {
   const t = document.documentElement.dataset.theme;
@@ -872,91 +872,327 @@ function graphOpts() {
   return { collapse: b("collapse"), dns: b("dns"), sites: b("sites"), anomalies: b("anomalies"), networks: b("networks"), identity: b("identity"), top: String(state.gopts.top) };
 }
 
+// Nodes opened in place on the map: a device's "N more", or a site's names.
+const expanded = new Set();
+
+// expansionQueries says what to ask for to open a node in place.
+function expansionQueries(id) {
+  const b = (k) => ({ top: "-1", anomalies: "0", ...k });
+  if (id.startsWith("other:")) {
+    const clients = id.startsWith("other:clients:");
+    const dev = id.slice(clients ? "other:clients:".length : "other:".length);
+    const [kind, ...rest] = dev.split(":");
+    const key = rest.join(":");
+    const who = kind === "device" ? { device: key } : { ip: key };
+    return [b({ ...who, dir: clients ? "in" : "out" })];
+  }
+  if (id.startsWith("site:")) {
+    const key = id.slice("site:".length);
+    return [b({ domain: key, sites: "0" }), b({ domain: `*.${key}`, sites: "0" })];
+  }
+  return null;
+}
+
+// mergeExpansion replaces a node with what it stands for.
+function mergeExpansion(g, id, parts) {
+  const nodes = new Map(g.nodes.filter((n) => n.id !== id).map((n) => [n.id, n]));
+  const edge = (e) => `${e.from}\u0000${e.to}\u0000${e.rel}`;
+  const edges = new Map(g.edges.filter((e) => e.from !== id && e.to !== id).map((e) => [edge(e), e]));
+  let added = 0;
+  for (const p of parts) {
+    for (const n of p.nodes || []) {
+      if (nodes.has(n.id)) continue;
+      nodes.set(n.id, { ...n, attrs: { ...n.attrs, expanded_from: id } });
+      added++;
+    }
+    for (const e of p.edges || []) if (!edges.has(edge(e))) edges.set(edge(e), e);
+  }
+  // Asking again for the same device can bring back another "N more" for it.
+  for (const k of [...nodes.keys()]) if (k === id) nodes.delete(k);
+  return { ...g, nodes: [...nodes.values()], edges: [...edges.values()].filter((e) => nodes.has(e.from) && nodes.has(e.to)), added };
+}
+
+async function withExpansions(g) {
+  for (const id of expanded) {
+    if (!g.nodes?.some((n) => n.id === id)) continue;
+    const parts = await Promise.all(expansionQueries(id).map((q) => api("graph", { ...graphOpts(), ...q })));
+    g = mergeExpansion(g, id, parts);
+  }
+  return g;
+}
+
+function toggleExpand(id) {
+  const node = state.graph?.nodes?.find((n) => n.id === id);
+  const from = node?.attrs?.expanded_from;
+  if (from) expanded.delete(from);
+  else if (expansionQueries(id)) expanded.add(id);
+  else return;
+  refresh();
+}
+
+// markGraph outlines what medium and high anomalies are about, on a graph
+// already drawn (graph.MarkAnomalies, which the server's own renderers use).
+// A site's names are the names under it: its registrable domain is the suffix.
+function markGraph(g, report) {
+  for (const n of g.nodes || []) { if (n.attrs) { delete n.attrs.anomaly; delete n.attrs.anomalies; } }
+  for (const e of g.edges || []) { if (e.attrs) { delete e.attrs.anomaly; delete e.attrs.anomalies; } }
+  if (!state.gopts.anomalies) return;
+  const rank = { low: 1, medium: 2, high: 3 };
+  const mark = (x, a) => {
+    x.attrs ??= {};
+    if ((rank[a.severity] || 0) > (rank[x.attrs.anomaly] || 0)) x.attrs.anomaly = a.severity;
+    const lines = (x.attrs.anomalies || "").split("\n");
+    if (!lines.includes(a.summary)) x.attrs.anomalies = [...lines.filter(Boolean), a.summary].join("\n");
+  };
+  const about = (n, id) => {
+    if (n.id === id) return true;
+    const i = id.indexOf(":");
+    const kind = id.slice(0, i), key = id.slice(i + 1);
+    if (kind === "site") {
+      if (n.kind === "domain") return n.label === key || n.label.endsWith(`.${key}`);
+      return n.kind === "site" && n.id === id;
+    }
+    if (kind === "ip" && ["domain", "site", "asn"].includes(n.kind)) return (n.attrs?.addresses || "").split(",").includes(key);
+    return false;
+  };
+  const byId = new Map((g.nodes || []).map((n) => [n.id, n]));
+  for (const a of report?.anomalies || []) {
+    if ((rank[a.severity] || 0) < rank.medium) continue;
+    const dev = byId.get(a.device);
+    if (dev) mark(dev, a);
+    const targets = new Set();
+    if (a.entity) for (const n of g.nodes || []) if (about(n, a.entity)) { mark(n, a); targets.add(n.id); }
+    for (const e of g.edges || []) {
+      if ((e.from === a.device && targets.has(e.to)) || (e.to === a.device && targets.has(e.from))) mark(e, a);
+    }
+  }
+}
+
 let lastView = null;
+let pinsLoaded = false;
 async function renderGraph(seq) {
   const note = $("#graph-note");
-  if (state.layout === "dagre" && engineState === "idle") startEngine();
-  if (engineState === "loading") {
-    diagram.message(`Loading the graph engine…<div class="progress"><div id="wasm-progress"></div></div>`);
-    await engineReady;
-  }
-  if (seq !== refreshSeq) return;
-  diagram.loading("Loading graph…");
-  const query = params(graphOpts()).toString();
-  // What is being graphed, apart from Live moving the window forward: a
-  // redraw of the same view keeps the person's pan and zoom.
-  // Stepping or playing the Recorder is the same view at another moment.
+  diagram.setTheme(theme());
+  diagram.loading("Loading map…");
+  // What is being graphed, apart from Live moving the window forward: a redraw
+  // of the same view keeps the person's pan and zoom. Stepping or playing the
+  // Recorder is the same view at another moment.
   const moment = state.live ? state.span : state.rec.on ? ["recorder", state.rec.follow] : [state.to, state.span];
-  const view = JSON.stringify([graphOpts(), state.filter, state.layout, moment]);
-  const serverDraw = async () => {
-    const [g, svg] = await Promise.all([api("graph", graphOpts()), api("graph", { ...graphOpts(), format: "svg", theme: theme(), layout: state.layout }, true)]);
-    return { graph: g, svg, by: `drawn by the server (${state.layout})` };
-  };
-  let out;
+  const view = JSON.stringify([graphOpts(), state.filter, moment]);
+  let g;
   try {
-    if (engineState === "ready" && state.layout === "dagre") {
-      out = await track(engine.call("graph", { query, theme: theme(), layout: state.layout }));
-      out.by = "drawn in your browser (WASM)";
-    } else {
-      out = await track(serverDraw());
+    if (!pinsLoaded) {
+      const pins = await track(api("map/pins"));
+      pinsLoaded = true;
+      diagram.setPins(pins || []);
     }
+    // Anomalies are outlined when their report arrives: their checks can take
+    // far longer than the graph, which must not wait for them.
+    g = await track(api("graph", { ...graphOpts(), anomalies: "0" }).then(withExpansions));
   } catch (e) {
-    if (engineState !== "ready" || state.layout !== "dagre") {
-      diagram.message(esc(e.message));
-      return;
-    }
-    console.warn("WASM drawing failed, asking the server:", e);
-    try {
-      out = await track(serverDraw());
-    } catch (e2) {
-      diagram.message(esc(e2.message));
-      return;
-    }
+    if (seq === refreshSeq) diagram.message(esc(e.message));
+    return;
   }
   if (seq !== refreshSeq) return;
-  state.graph = out.graph;
-  if (!out.graph.nodes?.length) {
+  state.graph = g;
+  if (state.live || reportSeq === seq) markGraph(g, lastReport);
+  if (!g.nodes?.length) {
     diagram.message(`No activity in this window.${emptyAction()}`);
   } else {
-    diagram.show(out.svg, { keepView: view === lastView });
+    diagram.show(g, { keepView: view === lastView, spanMS: state.span });
   }
   lastView = view;
-  const g = out.graph;
+  const hidden = diagram.hiddenCount();
   note.textContent = `${g.nodes?.length || 0} nodes · ${g.edges?.length || 0} edges` +
     (g.truncated ? ` · showing each device's top ${state.gopts.top} destinations and clients` : "") +
     (g.precision === "hour" ? " · hourly precision" : "") +
-    ` · ${out.by}`;
+    (hidden ? ` · ${hidden} hidden` : "");
+  $("#g-unhide").hidden = !hidden;
 }
 
-// The engine is several MB: it starts when a graph is first drawn, so a visit
-// to the tables does not pay for it.
-let engineReady = null;
-function startEngine() {
-  if (engineReady) return engineReady;
-  engineState = "loading";
-  engineReady = new Promise((resolve) => {
-  try {
-    engine = new Engine({
-      onProgress: (loaded, total) => {
-        const bar = document.getElementById("wasm-progress");
-        if (bar) bar.style.width = total && loaded <= total ? `${(loaded / total) * 100}%` : "60%";
-      },
-      onReady: () => {
-        engineState = "ready";
-        engine.call("configure", { base: location.origin, token }).finally(resolve);
-      },
-      onFailed: (err) => {
-        engineState = "failed";
-        console.warn("WASM engine unavailable, using server rendering:", err);
-        resolve();
-      },
-    });
-  } catch (e) {
-    engineState = "failed";
-    resolve();
+// --- on the map --------------------------------------------------------------------
+
+// A filter for one thing on the map, as the filter box's grammar writes it.
+function filterTerm(id) {
+  const i = id.indexOf(":");
+  const kind = id.slice(0, i), key = id.slice(i + 1);
+  if (kind === "device") return `device:${key}`;
+  if (kind === "domain") return `domain:${key}`;
+  if (kind === "site") return `domain:*${key}`;
+  if (kind === "ip") return `ip:${key}`;
+  if (kind === "asn") return `asn:${key}`;
+  return "";
+}
+
+const applyFilter = (f) => { state.filter = f; $("#filter").value = f; refresh(); };
+
+function openEdge(e) {
+  const panel = $("#panel");
+  panel.hidden = false;
+  const name = (id) => state.graph?.nodes?.find((n) => n.id === id)?.label || id;
+  const filter = [filterTerm(e.from), filterTerm(e.to)].filter(Boolean).join(" ");
+  const body = $("#panel-body");
+  const stats = [
+    e.ports?.length ? e.ports.join(", ") : "",
+    e.bytes_out || e.bytes_in ? `up ${bytes(e.bytes_out)} · down ${bytes(e.bytes_in)}` : "",
+    e.count ? `${e.count} ${e.rel === "connects" ? "connections" : "times"}${e.peak ? `, peak ${e.peak} open` : ""}` : "",
+  ].filter(Boolean).map((s) => `<div class="muted">${esc(s)}</div>`).join("");
+  body.innerHTML = `<h2>${esc(name(e.from))} → ${esc(name(e.to))}</h2>${stats}
+    <p><a data-filter="${esc(filter)}">Filter the window to these</a>${e.rel === "connects" ? ` · <a data-whatif="1">What if this were blocked?</a>` : ""}</p>
+    <div id="edge-rows"><p class="muted">Loading…</p></div>`;
+  body.onclick = (ev) => {
+    const a = ev.target.closest("a");
+    if (!a) return;
+    if (a.dataset.id) openEntity(a.dataset.id);
+    if (a.dataset.filter) applyFilter(a.dataset.filter);
+    if (a.dataset.whatif) openWhatIf(blockPolicy(e));
+  };
+  const q = {};
+  for (const id of [e.from, e.to]) {
+    const t = filterTerm(id);
+    if (!t) continue;
+    const i = t.indexOf(":");
+    q[t.slice(0, i)] = t.slice(i + 1);
   }
-  });
-  return engineReady;
+  const box = $("#edge-rows");
+  if (e.rel === "connects") {
+    track(api("flows", { ...q, limit: 200 })).then((rows) => {
+      const link = (id, label) => `<a data-id="${esc(id)}">${esc(label)}</a>`;
+      box.innerHTML = rows?.length ? `<h3>Connections</h3><ul>${rows.map((f) => {
+        const [client, server] = ends(f);
+        return `<li><time>${when(f.first_seen)}</time>${dirBadge(f.direction)} ${client} → ${server} ${f.name ? link(peerID(f), f.name) : ""} ${f.state ? badge(f.state, f.state) : ""}${f.closed ? badge(f.end_reason, "closed") : ""} <span class="muted">sent ${bytes(f.bytes_out)} · received ${bytes(f.bytes_in)}</span></li>`;
+      }).join("")}</ul>` : `<p class="muted">No connections found for this edge.</p>`;
+    }).catch((err) => { box.innerHTML = `<p class="muted">${esc(err.message)}</p>`; });
+  } else if (e.rel === "queried") {
+    track(api("dns", { ...q, limit: 200 })).then((rows) => {
+      box.innerHTML = rows?.length ? `<h3>Lookups</h3><ul>${rows.map((d) => `<li><time>${when(d.ts)}</time>${esc(d.qname)} <span class="muted">${esc(d.qtype)} ${esc(d.rcode)}</span></li>`).join("")}</ul>` : `<p class="muted">No lookups found for this edge.</p>`;
+    }).catch((err) => { box.innerHTML = `<p class="muted">${esc(err.message)}</p>`; });
+  } else {
+    const attrs = Object.entries(e.attrs || {}).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("");
+    box.innerHTML = attrs ? `<dl>${attrs}</dl>` : "";
+  }
+}
+
+// blockPolicy is a what-if starting point: everything as it is, except this.
+function blockPolicy(e) {
+  const selector = (id) => {
+    const i = id.indexOf(":");
+    const kind = id.slice(0, i), key = id.slice(i + 1);
+    return ["site", "domain", "ip", "asn"].includes(kind) ? `${kind}:${key}` : "any";
+  };
+  const device = [e.from, e.to].find((id) => id.startsWith("device:"));
+  const other = device === e.from ? e.to : e.from;
+  const inbound = device === e.to;
+  return {
+    version: 1,
+    zones: device ? [{ name: "this", devices: [device] }] : [],
+    defaults: { egress: "allow", ingress: "allow", intra_zone: "allow", dns: "allow" },
+    rules: [{
+      name: "block this",
+      from: inbound ? selector(other) : device ? "zone:this" : selector(e.from),
+      to: inbound ? "zone:this" : selector(other),
+      ports: e.ports || [],
+      action: "deny",
+    }],
+    dns: { block: [], allow: [] },
+  };
+}
+
+function closeMapMenu() { $("#map-menu")?.remove(); }
+
+function openMapMenu(target, x, y) {
+  closeMapMenu();
+  const items = [];
+  const n = target.node, e = target.edge;
+  if (n) {
+    const term = filterTerm(n.id);
+    items.push(["Details", () => openEntity(n.id)]);
+    if (n.kind === "device") items.push(["Rename…", () => openEntity(n.id).then(() => $("#panel-body form.rename input")?.focus())]);
+    if (term) items.push([`Filter to this ${n.kind}`, () => applyFilter(term)]);
+    if (["device", "domain", "site", "ip", "asn"].includes(n.kind)) items.push(["Follow in Recorder", () => follow(n.id)]);
+    items.push(["Add a note…", () => openNote(n.id)]);
+    if (expansionQueries(n.id)) items.push([n.id.startsWith("site:") ? "Open into its names" : "Show all of them here", () => toggleExpand(n.id)]);
+    if (n.attrs?.expanded_from) items.push(["Close back up", () => toggleExpand(n.id)]);
+    items.push(target.pinned
+      ? ["Unpin", () => unpin([n.id])]
+      : ["Hide from the map", () => hideNodes([n.id])]);
+    const findings = (lastReport?.anomalies || []).filter((a) => a.device === n.id || a.entity === n.id);
+    for (const a of findings.slice(0, 3)) {
+      items.push([`Mute “${a.kind.replaceAll("_", " ")}” for 1 hour`, () => muteFinding(a)]);
+    }
+  } else if (e) {
+    items.push(["Show its connections", () => openEdge(e)]);
+    const f = [filterTerm(e.from), filterTerm(e.to)].filter(Boolean).join(" ");
+    if (f) items.push(["Filter to these", () => applyFilter(f)]);
+    if (e.rel === "connects") items.push(["What if this were blocked?", () => openWhatIf(blockPolicy(e))]);
+  } else {
+    items.push(["Fit to view", () => diagram.fit()], ["Re-arrange", () => diagram.rearrange()]);
+  }
+  const menu = document.createElement("div");
+  menu.id = "map-menu";
+  menu.className = "map-menu";
+  menu.setAttribute("role", "menu");
+  for (const [label, run] of items) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.setAttribute("role", "menuitem");
+    b.textContent = label;
+    b.onclick = () => { closeMapMenu(); run(); };
+    menu.append(b);
+  }
+  document.body.append(menu);
+  const r = menu.getBoundingClientRect();
+  menu.style.left = `${Math.min(x, innerWidth - r.width - 6)}px`;
+  menu.style.top = `${Math.min(y, innerHeight - r.height - 6)}px`;
+  menu.querySelector("button")?.focus();
+  menu.onkeydown = (ev) => {
+    const bs = [...menu.querySelectorAll("button")];
+    const i = bs.indexOf(document.activeElement);
+    if (ev.key === "ArrowDown") { ev.preventDefault(); bs[(i + 1) % bs.length].focus(); }
+    else if (ev.key === "ArrowUp") { ev.preventDefault(); bs[(i - 1 + bs.length) % bs.length].focus(); }
+    else if (ev.key === "Escape") { ev.stopPropagation(); closeMapMenu(); diagram.canvas.focus(); }
+  };
+}
+
+async function muteFinding(a) {
+  try {
+    await send("POST", "anomalies/mute", { kind: a.kind, device: a.device || "", entity: a.entity || "", until: Date.now() + 3600_000, note: "muted from the map" });
+    setStatus("muted for 1 hour");
+    refresh();
+  } catch (err) {
+    setStatus(err.message, true);
+  }
+}
+
+function hideNodes(ids) {
+  diagram.hide(ids);
+  diagram.selected.clear();
+  renderSelection([]);
+  refresh();
+}
+
+async function unpin(ids) {
+  try {
+    await send("DELETE", "map/pins", { ids });
+    pinsLoaded = false;
+    for (const id of ids) {
+      diagram.pins.delete(id);
+      const d = diagram.nodes.get(id);
+      if (d) d.pinned = false;
+    }
+    diagram.wake();
+  } catch (err) {
+    setStatus(err.message, true);
+  }
+}
+
+function renderSelection(ids) {
+  const bar = $("#map-selection");
+  bar.hidden = !ids.length;
+  $("#map-selection-count").textContent = `${ids.length} selected`;
+  $("#map-selection-hide").onclick = () => hideNodes(ids);
+  $("#map-selection-unpin").onclick = () => unpin(ids);
+  $("#map-selection-clear").onclick = () => { diagram.selected.clear(); diagram.wake(); renderSelection([]); };
 }
 
 function download(name, text, type) {
@@ -1157,11 +1393,13 @@ function openRest(id) {
     <h2>${esc(n?.label || "More " + what)}</h2>
     <div class="muted">${clients ? "connecting to" : "of"} ${esc(name)}</div>
     <p>Top ${esc(state.gopts.top)} draws each device's busiest ${what}; these ${esc(n?.attrs?.[what] || "")} are left out: ${traffic}.</p>
+    <p><a data-expand="${esc(id)}">Show all of them here</a> (or double-click the node)</p>
     <p><a data-id="${esc(dev)}">Details of ${esc(name)}</a></p>
     <p><a data-filter="${esc(devFilter + (clients ? " dir:in" : " dir:out"))}">Filter the window to these ${what}</a>, or raise Top N.</p>`;
   $("#panel-body").onclick = (e) => {
     const a = e.target.closest("a");
     if (!a) return;
+    if (a.dataset.expand) toggleExpand(a.dataset.expand);
     if (a.dataset.id) openEntity(a.dataset.id);
     if (a.dataset.follow) { follow(a.dataset.follow); }
     if (a.dataset.filter) { state.filter = a.dataset.filter; $("#filter").value = state.filter; refresh(); }
@@ -1250,10 +1488,10 @@ function setLive(on) {
 
 // --- notes and bookmarks --------------------------------------------------------------
 
-function openNote() {
+function openNote(entity = "") {
   const dlg = $("#note-dialog");
   $("#note-text").value = "";
-  $("#note-entity").value = state.rec.follow || state.open || "";
+  $("#note-entity").value = entity || state.rec.follow || state.open || "";
   $("#note-status").textContent = stamp(state.to);
   if (!dlg.open) dlg.showModal();
   setTimeout(() => $("#note-text").focus(), 0);
@@ -1337,9 +1575,9 @@ const whatifExample = {
   dns: { block: [], allow: [] },
 };
 
-function openWhatIf() {
+function openWhatIf(policy = whatifExample) {
   const dlg = $("#whatif-dialog");
-  $("#whatif-policy").value = JSON.stringify(whatifExample, null, 2);
+  $("#whatif-policy").value = JSON.stringify(policy, null, 2);
   $("#whatif-result").innerHTML = "";
   $("#whatif-status").textContent = "";
   if (!dlg.open) dlg.showModal();
@@ -1797,7 +2035,6 @@ function init() {
   $("#g-networks").checked = state.gopts.networks;
   $("#g-identity").checked = state.gopts.identity;
   $("#g-top").value = state.gopts.top;
-  $("#g-layout").value = state.layout;
 
   $("#back").onclick = () => setWindow(state.to - state.span / 2, state.span);
   $("#fwd").onclick = () => setWindow(state.to + state.span / 2, state.span);
@@ -1808,7 +2045,7 @@ function init() {
   $("#rec-back").onclick = () => setRecAt(state.rec.at - Math.max(1000, state.rec.lookback / 5));
   $("#rec-fwd").onclick = () => setRecAt(Math.min(Date.now(), state.rec.at + Math.max(1000, state.rec.lookback / 5)));
   $("#rec-now").onclick = () => setRecAt(Date.now());
-  $("#rec-note").onclick = openNote;
+  $("#rec-note").onclick = () => openNote();
   $("#rec-bookmark").onclick = saveBookmark;
   $("#rec-capsule").onclick = exportCapsule;
   $("#note-save").onclick = saveNote;
@@ -1851,7 +2088,6 @@ function init() {
     $(id).onchange = () => { state.gopts[k] = $(id).checked; refresh(); };
   }
   $("#g-top").onchange = () => { state.gopts.top = Number($("#g-top").value) || 15; refresh(); };
-  $("#g-layout").onchange = () => { state.layout = $("#g-layout").value; refresh(); };
   $("#connect").onclick = () => askToken().then((t) => { if (t) refresh(); });
   const sev = $("#anomaly-sev");
   if (sev) sev.onchange = () => refresh();
@@ -1860,24 +2096,24 @@ function init() {
   const inc = $("#incident-status");
   if (inc) inc.onchange = () => refresh();
   $("#g-fit").onclick = () => diagram.fit();
-  $("#g-svg").onclick = () => {
-    const svg = $("#diagram svg");
-    if (!svg) return;
-    // The root carries the current pan/zoom transform; exporting it as-is
-    // opens the diagram translated off-screen.
-    const clone = svg.cloneNode(true);
-    clone.removeAttribute("style");
-    download(`netgraph-${fileStamp()}.svg`, clone.outerHTML, "image/svg+xml");
+  $("#g-arrange").onclick = () => diagram.rearrange();
+  $("#g-unhide").onclick = () => { diagram.showHidden(); refresh(); };
+  // Exports are the server's d2 drawing of the same graph: a file for other
+  // tools, laid out for paper rather than for this map.
+  $("#g-svg").onclick = () => track(api("graph", { ...graphOpts(), format: "svg", theme: theme() }, true))
+    .then((svg) => download(`netgraph-${fileStamp()}.svg`, svg, "image/svg+xml")).catch(() => {});
+  $("#g-d2").onclick = () => track(api("graph", { ...graphOpts(), format: "d2" }, true))
+    .then((d2) => download(`netgraph-${fileStamp()}.d2`, d2, "text/plain")).catch(() => {});
+  $("#g-png").onclick = () => {
+    const a = document.createElement("a");
+    a.href = diagram.toPNG();
+    a.download = `netgraph-${fileStamp()}.png`;
+    a.click();
   };
-  $("#g-d2").onclick = async () => {
-    if (!state.graph) return;
-    const script = engineState === "ready"
-      ? (await engine.call("d2", { graph: state.graph, theme: theme() })).script
-      : await api("graph", { ...graphOpts(), format: "d2" }, true);
-    download(`netgraph-${fileStamp()}.d2`, script, "text/plain");
-  };
+  document.addEventListener("pointerdown", (e) => { if (!e.target.closest("#map-menu")) closeMapMenu(); });
+  matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { diagram.setTheme(theme()); });
   $("#ask-open").onclick = openAsk;
-  $("#whatif-open").onclick = openWhatIf;
+  $("#whatif-open").onclick = () => openWhatIf();
   $("#whatif-run").onclick = runWhatIf;
   $("#ask-form").onsubmit = async (e) => {
     e.preventDefault();
@@ -1895,7 +2131,8 @@ function init() {
   $("#theme").onclick = () => {
     const next = theme() === "dark" ? "light" : "dark";
     document.documentElement.dataset.theme = next;
-    store.set("netgraph.theme", next)
+    store.set("netgraph.theme", next);
+    diagram.setTheme(next);
     refresh();
   };
   document.addEventListener("keydown", (e) => {
@@ -1925,7 +2162,6 @@ function init() {
       $(id).checked = state.gopts[k];
     }
     $("#g-top").value = state.gopts.top;
-    $("#g-layout").value = state.layout;
     const changed = state.live !== wasLive;
     if (changed) setLive(state.live);
     if (!changed || !state.live) selectTab(state.tab);

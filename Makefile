@@ -49,15 +49,12 @@ build-server:
 build-sensor:
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/netgraph-sensor ./cmd/netgraph-sensor
 
-## web.build: assemble the web UI (static files + WASM) into web/dist
+## web.build: assemble the web UI into web/dist
 .PHONY: web.build
 web.build:
 	rm -rf web/dist && mkdir -p web/dist
 	cp -r web/src/. web/dist/
-	GOOS=js GOARCH=wasm $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o web/dist/web.wasm ./cmd/web
-	cp "$$($(GO) env GOROOT)/lib/wasm/wasm_exec.js" web/dist/js/wasm_exec.js
-	gzip -9 -f web/dist/web.wasm
-	@echo "web/dist: $$(du -sh web/dist | cut -f1) ($$(du -h web/dist/web.wasm.gz | cut -f1) compressed wasm)"
+	@echo "web/dist: $$(du -sh web/dist | cut -f1)"
 
 ## build-full: build netgraph with the web UI and the ASN table embedded
 .PHONY: build-full

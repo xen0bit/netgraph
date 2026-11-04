@@ -111,6 +111,12 @@ func (s *Store) ForgetDeviceWithOptions(ctx context.Context, mac string, opts Fo
 	res.Groups = count(`DELETE FROM wifi_group_keys WHERE bssid = ? OR sta = ?`, m, m)
 	devID := model.EntityID(model.KindDevice, m)
 	res.Mutes = count(`DELETE FROM anomaly_mutes WHERE device = ?`, devID)
+	// A pin names the device, or an address only it used, even in its ID.
+	count(`DELETE FROM map_pins WHERE instr(lower(id), ?) > 0`, m)
+	if len(related) > 0 {
+		count(`DELETE FROM map_pins WHERE id IN (SELECT 'ip:' || key FROM entities WHERE kind = 'ip' AND id IN (` + idList(related) + `)
+			AND NOT EXISTS (SELECT 1 FROM facts f WHERE f.src = entities.id OR f.dst = entities.id))`)
+	}
 	res.Notes = count(`DELETE FROM annotations WHERE entity = ? OR instr(lower(text), ?) > 0`, devID, m) +
 		count(`DELETE FROM bookmarks WHERE entity = ? OR instr(lower(name), ?) > 0`, devID, m)
 	// A rail title can name the device whoever the event is about, and an
@@ -210,6 +216,7 @@ func (s *Store) PurgeBeforeWithOptions(ctx context.Context, before time.Time, op
 	r.Handshakes = count(`DELETE FROM wifi_handshakes WHERE ts < ?`, cut) +
 		count(`DELETE FROM wifi_group_keys WHERE ts < ?`, cut)
 	r.Mutes = count(`DELETE FROM anomaly_mutes WHERE until < ?`, cut)
+	count(`DELETE FROM map_pins WHERE updated < ?`, cut)
 	// A purge is for a period that must not remain in the history, so unlike
 	// retention it takes notes, bookmarks and finished incidents with it.
 	r.Timeline = count(`DELETE FROM timeline_events WHERE ts < ?`, cut)

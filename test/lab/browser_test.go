@@ -15,7 +15,7 @@ import (
 )
 
 // checkWebUI drives the web UI in a headless Chrome (remote, at devtools)
-// against the server at ui: it waits for the WASM engine to draw the graph,
+// against the server at ui: it waits for the map to be drawn,
 // opens a node's details, visits each table, and saves screenshots to
 // shotDir for a person to look at.
 func checkWebUI(t *testing.T, devtools, ui, token, shotDir string, expect []string) {
@@ -71,11 +71,11 @@ func checkWebUI(t *testing.T, devtools, ui, token, shotDir string, expect []stri
 	defer gcancel()
 	err = chromedp.Run(gctx,
 		chromedp.Navigate(fmt.Sprintf("%s/#from=%d&to=%d", ui, now-2*3600*1000, now+60*1000)),
-		chromedp.WaitVisible(`#diagram svg`, chromedp.ByQuery),
+		chromedp.Poll(`Number(document.querySelector("#diagram canvas")?.dataset.nodes) > 0`, nil, chromedp.WithPollingTimeout(60*time.Second)),
 		chromedp.Text(`#graph-note`, &note, chromedp.ByQuery),
-		chromedp.Evaluate(`document.querySelector("#diagram svg").textContent`, &svgText),
+		chromedp.Evaluate(`document.querySelector(".map-list").textContent`, &svgText),
 		shot("graph"),
-		chromedp.Evaluate(`(() => { const el = document.querySelector("#diagram"); const r = el.getBoundingClientRect();
+		chromedp.Evaluate(`(() => { const el = document.querySelector("#diagram canvas"); const r = el.getBoundingClientRect();
 			for (let i = 0; i < 6; i++) el.dispatchEvent(new WheelEvent("wheel", {deltaY: -120, clientX: r.left + r.width / 2, clientY: r.top + r.height / 2, bubbles: true})); })()`, nil),
 		shot("graph-zoom"),
 		chromedp.Click(`#g-fit`, chromedp.ByQuery),
@@ -85,8 +85,8 @@ func checkWebUI(t *testing.T, devtools, ui, token, shotDir string, expect []stri
 		_ = chromedp.Run(ctx, chromedp.Text(`#status`, &status, chromedp.ByQuery), chromedp.Text(`#diagram`, &diag, chromedp.ByQuery), shot("failed"))
 		t.Fatalf("graph did not render: %v\nstatus: %q\ndiagram: %q\nexceptions: %v\nconsole: %v", err, status, diag, consoleErrors, console)
 	}
-	if !strings.Contains(note, "WASM") {
-		t.Errorf("graph was not drawn by WASM: %q", note)
+	if !strings.Contains(note, "nodes") {
+		t.Errorf("graph note: %q", note)
 	}
 	for _, want := range expect {
 		if !strings.Contains(svgText, want) {
@@ -98,13 +98,7 @@ func checkWebUI(t *testing.T, devtools, ui, token, shotDir string, expect []stri
 	// Click the first device node and check the detail panel.
 	var panel string
 	err = chromedp.Run(ctx,
-		chromedp.Evaluate(`(() => {
-			for (const g of document.querySelectorAll("#diagram svg g[class]")) {
-				const c = g.classList[0];
-				try { if (atob(c).includes("device:")) { g.querySelector(".shape, rect, path")?.dispatchEvent(new PointerEvent("pointerdown", {bubbles: true, button: 0}));
-					g.querySelector(".shape, rect, path")?.dispatchEvent(new PointerEvent("pointerup", {bubbles: true, button: 0})); return true; } } catch {}
-			}
-			return false })()`, nil),
+		chromedp.Evaluate(`document.querySelector('.map-list button[data-id^="device:"]').click()`, nil),
 		chromedp.WaitVisible(`#panel h2`, chromedp.ByQuery),
 		chromedp.Sleep(500*time.Millisecond),
 		chromedp.Text(`#panel`, &panel, chromedp.ByQuery),
@@ -237,7 +231,7 @@ func checkWebUI(t *testing.T, devtools, ui, token, shotDir string, expect []stri
 			chromedp.WaitVisible(`#token-dialog[open]`, chromedp.ByQuery),
 			chromedp.SendKeys(`#token-input`, token, chromedp.ByQuery),
 			chromedp.Click(`#token-dialog button[value="ok"]`, chromedp.ByQuery),
-			chromedp.WaitVisible(`#diagram svg`, chromedp.ByQuery),
+			chromedp.Poll(`Number(document.querySelector("#diagram canvas")?.dataset.nodes) > 0`, nil, chromedp.WithPollingTimeout(30*time.Second)),
 			chromedp.Poll(`document.querySelector("#connect").hidden`, nil, chromedp.WithPollingTimeout(20*time.Second)),
 			shot("token-recovered"),
 		)
@@ -312,9 +306,11 @@ func checkWebUI(t *testing.T, devtools, ui, token, shotDir string, expect []stri
 // so counting its mutations tells when a redraw has landed.
 func checkKeepsView(t *testing.T, ctx context.Context) {
 	t.Helper()
-	const transform = `document.querySelector("#diagram svg").style.transform`
-	const pan = `(() => { const el = document.querySelector("#diagram"); const r = el.getBoundingClientRect();
-		const at = (type, d) => el.dispatchEvent(new PointerEvent(type, {bubbles: true, button: 0, pointerId: 1, clientX: r.left + 200 + d, clientY: r.top + 200 + d}));
+	const transform = `document.querySelector("#diagram canvas").dataset.view`
+	const pan = `(() => { const el = document.querySelector("#diagram canvas"); const r = el.getBoundingClientRect();
+		const m = document.querySelector("#diagram").__map; const free = (px, py) => !m.nodeAt((px - m.x) / m.scale, (py - m.y) / m.scale);
+		let ox = 8; while (ox < r.width && !free(ox, 8)) ox += 8;
+		const at = (type, d) => el.dispatchEvent(new PointerEvent(type, {bubbles: true, button: 0, pointerId: 1, clientX: r.left + ox + d, clientY: r.top + 8 + d}));
 		at("pointerdown", 0); at("pointermove", 60); at("pointerup", 60); })()`
 	var draws int
 	drawn := func(after *int) chromedp.Action {
