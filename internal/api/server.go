@@ -123,6 +123,7 @@ func New(cfg Config) *Server {
 	s.mux.HandleFunc("GET /api/v1/version", s.version)
 	s.mux.HandleFunc("GET /healthz", s.version)
 	read := func(p string, h http.HandlerFunc) { s.mux.Handle("GET "+p, s.requireRead(h)) }
+	read("/api/v1/range", s.dataRange)
 	read("/api/v1/summary", s.summary)
 	read("/api/v1/devices", s.devices)
 	read("/api/v1/flows", s.flows)
@@ -541,6 +542,15 @@ func (s *Server) sensors(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) wifi(w http.ResponseWriter, r *http.Request) {
 	answer(s, w, r, s.cfg.Store.WiFi)
+}
+
+func (s *Server) dataRange(w http.ResponseWriter, r *http.Request) {
+	rng, err := s.cfg.Store.DataRange(r.Context())
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, rng)
 }
 
 func (s *Server) anomalies(w http.ResponseWriter, r *http.Request) {

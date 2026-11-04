@@ -44,7 +44,10 @@
     <button id="rec-play" class="icon" title="Play or pause">▶</button>
     <button id="rec-back" class="icon" title="Step back">◀</button>
     <button id="rec-fwd" class="icon" title="Step forward">▶</button>
-    <input type="range" id="rec-head" min="0" max="100" step="1" aria-label="Recorded moment">
+    <div class="rec-track">
+      <canvas id="rec-density" aria-hidden="true"></canvas>
+      <input type="range" id="rec-head" min="0" max="100" step="1" aria-label="Recorded moment">
+    </div>
     <span id="rec-time" class="mono"></span>
     <select id="rec-speed" aria-label="Playback speed"><option value="1">1×</option><option value="10">10×</option><option value="60">60×</option></select>
     <select id="rec-lookback" aria-label="Frame lookback"><option value="300000">5m</option><option value="900000">15m</option><option value="3600000">1h</option></select>
@@ -147,7 +150,7 @@
     <form method="dialog"><button class="icon close" title="Close" aria-label="Close">✕</button></form>
     <h2>Ask netgraph</h2>
     <form id="ask-form" autocomplete="off">
-      <input id="ask-q" type="text" aria-label="Question" placeholder="What did the printer do yesterday?" required>
+      <input id="ask-q" type="text" aria-label="Question" placeholder="What did alice-iphone do? What changed? Any anomalies?" required>
       <button type="submit">Ask</button>
     </form>
     <div id="ask-answer" aria-live="polite"></div>
@@ -158,6 +161,15 @@
     <h2 id="autopsy-title">Incident autopsy</h2>
     <p id="autopsy-meta" class="muted"></p>
     <div id="autopsy-body"></div>
+  </dialog>
+
+  <dialog id="input-dialog">
+    <form method="dialog" id="input-dialog-form">
+      <h2 id="input-dialog-title"></h2>
+      <p id="input-dialog-text" class="muted"></p>
+      <input id="input-dialog-value" type="text" maxlength="200" autocomplete="off" aria-labelledby="input-dialog-title">
+      <menu><button id="input-dialog-ok" value="ok"></button><button value="cancel" formnovalidate>Cancel</button></menu>
+    </form>
   </dialog>
 
   <dialog id="token-dialog">

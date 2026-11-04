@@ -30,6 +30,16 @@ const bytes = (n) => {
 const pad2 = (n) => String(n).padStart(2, "0");
 const clock = (ms) => { const d = new Date(ms); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`; };
 const stamp = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${clock(ms)}`; };
+// when is a time in a row or a list: the time of day when the window makes the
+// date obvious, else with it. A carried connection opened yesterday, or any
+// row of a window several days long, would otherwise read as today.
+const dayOf = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}`; };
+function when(ms) {
+  const end = dayOf(state.to);
+  if (dayOf(state.to - state.span) === end && dayOf(ms) === end) return clock(ms);
+  const d = new Date(ms);
+  return `${d.getFullYear() === new Date(state.to).getFullYear() ? "" : `${d.getFullYear()}-`}${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${clock(ms)}`;
+}
 const toLocalInput = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${clock(ms)}`; };
 
 // --- state ------------------------------------------------------------------
@@ -82,7 +92,9 @@ function loadHash() {
   if (recAt && recAt > 0) state.rec.at = recAt;
   const recLook = num("rec_lookback");
   if (recLook && recLook >= 10_000) state.rec.lookback = recLook;
-  state.rec.follow = p.get("follow") || "";
+  // Following is a Recorder mode: it filters every view, and only the Recorder
+  // bar shows it and can end it.
+  state.rec.follow = state.rec.on ? p.get("follow") || "" : "";
   if (state.rec.on) state.to = state.rec.at;
 }
 
@@ -306,17 +318,80 @@ async function refresh() {
   const seq = ++refreshSeq;
   const cols = Math.max(Math.floor($("#spark").clientWidth / 3), 30);
   const step = Math.max(Math.floor(state.span / cols / 1000), 1) + "s";
-  const [summary, series, anomalies] = await Promise.all([
-    track(api("summary")).catch(() => null),
-    track(api("timeseries", { step })).catch(() => null),
-    track(api("anomalies")).catch(() => null),
-  ]);
-  if (seq !== refreshSeq) return;
-  renderSummary(summary, anomalies);
-  renderSpark(series);
   renderRecorder();
-  await renderTab(seq);
-  if (state.rec.on) await renderRail(seq);
+  // Each part draws when its answer arrives: the anomaly checks can take far
+  // longer than a graph, which must not wait for them.
+  const live = state.live;
+  const headline = (async () => {
+    const summaryP = track(api("summary")).catch(() => null);
+    const anomaliesP = track(api("anomalies")).catch(() => null);
+    const summary = await summaryP;
+    if (seq !== refreshSeq) return;
+    // Until this window's report arrives, Live keeps showing the last one
+    // rather than flickering; any other window has no report yet.
+    renderSummary(summary, live ? lastReport : null);
+    const report = await anomaliesP;
+    if (seq !== refreshSeq) return;
+    lastReport = report;
+    renderSummary(summary, report);
+  })();
+  const spark = track(api("timeseries", { step })).catch(() => null).then((s) => { if (seq === refreshSeq) renderSpark(s); });
+  // An empty view offers a way to the data, so it needs to know where that is.
+  const view = loadRange().then(() => (seq === refreshSeq ? renderTab(seq) : null));
+  await Promise.all([headline, spark, view, state.rec.on ? renderRail(seq) : null]);
+  if (seq === refreshSeq) renderRecorder();
+}
+
+let lastReport = null;
+
+// --- what the server holds --------------------------------------------------------
+
+// dataRange is GET /api/v1/range: where the Recorder's slider can go, and
+// where to send someone looking at an empty window. A minute old is fresh
+// enough for both.
+let dataRange = null;
+let dataRangeAt = 0;
+let dataRangeReq = null;
+function loadRange() {
+  if (Date.now() - dataRangeAt < 60_000) return Promise.resolve(dataRange);
+  if (dataRangeReq) return dataRangeReq;
+  dataRangeReq = track(api("range")).then((r) => {
+    dataRange = r;
+    dataRangeAt = Date.now();
+    return r;
+  }).catch(() => dataRange).finally(() => { dataRangeReq = null; });
+  return dataRangeReq;
+}
+
+const ago = (ms) => {
+  if (ms < units.m) return "moments ago";
+  for (const [n, v] of [["day", units.d], ["hour", units.h], ["minute", units.m]]) {
+    if (ms >= v) { const c = Math.floor(ms / v); return `${c} ${n}${c === 1 ? "" : "s"} ago`; }
+  }
+  return "moments ago";
+};
+
+// emptyAction is what an empty window offers instead of a dead end: the way
+// to data the server holds elsewhere, or the filter hiding it. All of it is
+// our own text and numbers.
+function emptyAction() {
+  const r = dataRange;
+  if (r && !r.last_ms) return ` No sensor has reported yet.`;
+  const from = state.to - state.span;
+  if (r && (r.last_ms < from || r.first_ms >= state.to)) {
+    return ` <button type="button" class="empty-action" data-jump-latest>Latest data: ${esc(ago(Date.now() - r.last_ms))} →</button>`;
+  }
+  if (state.filter || state.rec.follow) return ` <button type="button" class="empty-action" data-clear-filter>Clear ${state.filter ? "filter" : "follow"}</button>`;
+  return "";
+}
+
+// jumpToLatest moves the window, keeping its length, to end at the newest data.
+function jumpToLatest() {
+  if (!dataRange?.last_ms) return;
+  const end = dataRange.last_ms + 1000;
+  if (state.live) setLive(false);
+  if (state.rec.on) setRecAt(end);
+  else setWindow(end, state.span);
 }
 
 const tablePath = { devices: "devices", flows: "flows", destinations: "destinations", dns: "dns", facts: "facts", wifi: "wifi", sensors: "sensors", anomalies: "anomalies", incidents: "incidents" };
@@ -356,7 +431,7 @@ function renderSummary(s, rep) {
     as.length ? `<a class="badge sev-${top}" data-tab="anomalies" title="Most severe: ${esc(top)}">${as.length} ${as.length === 1 ? "anomaly" : "anomalies"}</a>`
       : rep?.learning ? `<span class="hour" title="Checks that compare with history start a day after the first sensor reported">learning the network</span>` : "",
     `<span><b>${s.devices}</b> devices</span>`,
-    `<span title="Connections in the window; inbound ones were opened from outside to a device here"><b>${s.flows}</b> connections${s.inbound ? ` (<b>${s.inbound}</b> inbound)` : ""}, peak <b>${s.peak_connections}</b> open</span>`,
+    `<span title="Connections in the window; inbound ones were opened from outside to a device here"><b>${s.flows}</b> connections${s.inbound ? ` (<b>${s.inbound}</b> inbound)` : ""}${s.precision === "hour" ? "" : `, peak <b>${s.peak_connections}</b> open`}</span>`,
     `<span><b>${s.dns_queries}</b> lookups of <b>${s.domains}</b> names</span>`,
     `<span title="Bytes sent and received by the devices here">sent <b>${bytes(s.bytes_out)}</b> · received <b>${bytes(s.bytes_in)}</b></span>`,
     s.precision === "hour" ? `<span class="hour" title="Older than raw retention: answered from hourly rollups">hourly precision</span>` : "",
@@ -472,7 +547,7 @@ const tables = {
       (d.serves?.length ? `<span class="badge dir-in" title="Ports clients connected to">serves ${esc(d.serves.join(", "))}</span>` : "") +
         [...(d.hostnames || []), ...(d.services || [])].map((x) => badge(x)).join(""),
       d.flows + (d.inbound ? `<div class="sub">${d.inbound} in</div>` : ""), d.dns_queries, bytes(d.bytes_out), bytes(d.bytes_in),
-      `${clock(d.active_from)}–${clock(d.active_to)}`,
+      `${when(d.active_from)}–${when(d.active_to)}`,
     ],
     keys: [(d) => d.label, (d) => (d.randomized ? "private MAC" : d.vendor_short || d.vendor), (d) => addrKey(d.ips?.[0]),
       (d) => [...(d.hostnames || []), ...(d.services || [])].join(" "), (d) => d.flows, (d) => d.dns_queries, (d) => d.bytes_out,
@@ -501,13 +576,13 @@ const tables = {
     row: (f) => {
       const [client, server] = ends(f);
       return [
-        clock(f.first_seen),
+        when(f.first_seen),
         dirBadge(f.direction),
         client, `<span class="muted">→</span>`, server,
         esc(f.name) + (f.sni && f.qname && f.sni !== f.qname ? `<div class="sub">dns: ${esc(f.qname)}</div>` : ""),
         esc(f.app),
-        badge(f.state, f.state) + (f.closed ? badge(f.truncated ? "truncated" : f.end_reason || "closed", "closed") : ""),
-        bytes(f.bytes_out), bytes(f.bytes_in), clock(f.last_seen),
+        (f.state ? badge(f.state, f.state) : "") + (f.closed ? badge(f.truncated ? "truncated" : f.end_reason || "closed", "closed") : ""),
+        bytes(f.bytes_out), bytes(f.bytes_in), when(f.last_seen),
       ];
     },
     keys: [(f) => f.first_seen, (f) => f.direction,
@@ -520,7 +595,7 @@ const tables = {
     cols: ["Time", "Device", "Type", "Name", "Result", "ms", "Answers (TTL)"],
     num: [5],
     row: (q) => [
-      clock(q.ts), esc(q.device_name || q.client_ip), esc(q.qtype),
+      when(q.ts), esc(q.device_name || q.client_ip), esc(q.qtype),
       esc(q.qname) + (q.count > 1 ? ` <span class="muted">×${q.count}</span>` : ""),
       q.rcode === "NOERROR" ? esc(q.rcode) : badge(q.rcode, "err"),
       q.latency_ms ? q.latency_ms.toFixed(1) : "",
@@ -699,6 +774,10 @@ function exportAll(t) {
   }).catch(() => {});
 }
 
+// Incidents and sensors are not answers about the window: an empty list of
+// them is not cured by moving it.
+const windowed = (t) => t !== "incidents" && t !== "sensors";
+
 function renderTable(t) {
   const spec = tables[t];
   const all = state.data[t] || [];
@@ -744,7 +823,7 @@ function renderTable(t) {
     if (b) sortBy(t, Number(b.dataset.col));
   };
   if (!rows.length) {
-    el.innerHTML = head + `<tbody><tr><td class="empty" colspan="${spec.cols.length}">Nothing in this window.</td></tr></tbody>`;
+    el.innerHTML = head + `<tbody><tr><td class="empty" colspan="${spec.cols.length}">Nothing in this window.${windowed(t) ? emptyAction() : ""}</td></tr></tbody>`;
     return;
   }
   el.innerHTML = head + "<tbody>" + rows.map((r, i) =>
@@ -779,7 +858,7 @@ function tableTools(t, table) {
 // --- graph ----------------------------------------------------------------------
 
 let engine = null;
-let engineState = "loading";
+let engineState = "idle";
 const diagram = new Diagram($("#diagram"), { onSelect: openEntity });
 
 function theme() {
@@ -796,6 +875,7 @@ function graphOpts() {
 let lastView = null;
 async function renderGraph(seq) {
   const note = $("#graph-note");
+  if (state.layout === "dagre" && engineState === "idle") startEngine();
   if (engineState === "loading") {
     diagram.message(`Loading the graph engine…<div class="progress"><div id="wasm-progress"></div></div>`);
     await engineReady;
@@ -805,7 +885,9 @@ async function renderGraph(seq) {
   const query = params(graphOpts()).toString();
   // What is being graphed, apart from Live moving the window forward: a
   // redraw of the same view keeps the person's pan and zoom.
-  const view = JSON.stringify([graphOpts(), state.filter, state.layout, state.live ? state.span : [state.to, state.span]]);
+  // Stepping or playing the Recorder is the same view at another moment.
+  const moment = state.live ? state.span : state.rec.on ? ["recorder", state.rec.follow] : [state.to, state.span];
+  const view = JSON.stringify([graphOpts(), state.filter, state.layout, moment]);
   const serverDraw = async () => {
     const [g, svg] = await Promise.all([api("graph", graphOpts()), api("graph", { ...graphOpts(), format: "svg", theme: theme(), layout: state.layout }, true)]);
     return { graph: g, svg, by: `drawn by the server (${state.layout})` };
@@ -834,7 +916,7 @@ async function renderGraph(seq) {
   if (seq !== refreshSeq) return;
   state.graph = out.graph;
   if (!out.graph.nodes?.length) {
-    diagram.message("No activity in this window.");
+    diagram.message(`No activity in this window.${emptyAction()}`);
   } else {
     diagram.show(out.svg, { keepView: view === lastView });
   }
@@ -846,16 +928,21 @@ async function renderGraph(seq) {
     ` · ${out.by}`;
 }
 
-const engineReady = new Promise((resolve) => {
+// The engine is several MB: it starts when a graph is first drawn, so a visit
+// to the tables does not pay for it.
+let engineReady = null;
+function startEngine() {
+  if (engineReady) return engineReady;
+  engineState = "loading";
+  engineReady = new Promise((resolve) => {
   try {
     engine = new Engine({
       onProgress: (loaded, total) => {
         const bar = document.getElementById("wasm-progress");
         if (bar) bar.style.width = total && loaded <= total ? `${(loaded / total) * 100}%` : "60%";
       },
-      onReady: (v) => {
+      onReady: () => {
         engineState = "ready";
-        $("#version").textContent = `netgraph ${v}`;
         engine.call("configure", { base: location.origin, token }).finally(resolve);
       },
       onFailed: (err) => {
@@ -868,7 +955,9 @@ const engineReady = new Promise((resolve) => {
     engineState = "failed";
     resolve();
   }
-});
+  });
+  return engineReady;
+}
 
 function download(name, text, type) {
   const a = document.createElement("a");
@@ -956,7 +1045,7 @@ async function openEntity(id, { anomaly } = {}) {
   const link = (eid, label) => `<a data-id="${esc(eid)}">${esc(label || eid)}</a>`;
   const facts = (d.facts || []).map((f) => {
     const out = f.src === d.id;
-    return `<li><time>${clock(f.first_seen)}–${clock(f.last_seen)}</time>${badge(f.rel)} ${out ? "→" : "←"} ${out ? link(f.dst, f.dst_label) : link(f.src, f.src_label)} <span class="muted">×${f.count} ${esc(f.source)}</span></li>`;
+    return `<li><time>${when(f.first_seen)}–${when(f.last_seen)}</time>${badge(f.rel)} ${out ? "→" : "←"} ${out ? link(f.dst, f.dst_label) : link(f.src, f.src_label)} <span class="muted">×${f.count} ${esc(f.source)}</span></li>`;
   }).join("");
   // Each connection as client → server; the peer (what the device talked
   // to, or the client that reached it) links to its details.
@@ -965,9 +1054,9 @@ async function openEntity(id, { anomaly } = {}) {
     const line = f.direction === "in"
       ? `${link(peerID(f), hostPort(f.client_ip, f.client_port))} → ${dev}:${f.server_port}/${esc(f.proto)}${f.name ? ` <span class="muted">for ${esc(f.name)}</span>` : ""}`
       : `${dev} → ${link(peerID(f), f.name || f.server_ip)}:${f.server_port}/${esc(f.proto)}`;
-    return `<li><time>${clock(f.first_seen)}</time>${dirBadge(f.direction)} ${line} ${badge(f.state, f.state)}${f.closed ? badge(f.end_reason, "closed") : ""} <span class="muted">sent ${bytes(f.bytes_out)} · received ${bytes(f.bytes_in)}</span></li>`;
+    return `<li><time>${when(f.first_seen)}</time>${dirBadge(f.direction)} ${line} ${f.state ? badge(f.state, f.state) : ""}${f.closed ? badge(f.end_reason, "closed") : ""} <span class="muted">sent ${bytes(f.bytes_out)} · received ${bytes(f.bytes_in)}</span></li>`;
   }).join("");
-  const timeline = (d.timeline || []).slice(-300).map((e) => `<li><time>${clock(e.ts)}</time>${badge(e.type)} ${esc(e.detail)}</li>`).join("");
+  const timeline = (d.timeline || []).slice(-300).map((e) => `<li><time>${when(e.ts)}</time>${badge(e.type)} ${esc(e.detail)}</li>`).join("");
   const flagged = anomaly
     ? [anomaly.summary, ...Object.entries(anomaly.evidence || {}).map(([k, v]) => `${k}: ${v}`)]
     : state.graph?.nodes?.find((n) => n.id === id)?.attrs?.anomalies?.split("\n");
@@ -1081,28 +1170,70 @@ function openRest(id) {
 
 // --- live ---------------------------------------------------------------------------
 
-let source = null;
+let liveFeed = null;
 let liveTimer = null;
 let pending = null;
-function openLive() {
-  source?.close();
-  source = new EventSource(`/api/v1/live?token=${encodeURIComponent(token)}`);
-  source.addEventListener("ingest", () => {
-    // Batches arrive every couple of seconds; refresh at most that often.
-    if (!pending) pending = setTimeout(() => { pending = null; refresh(); }, 2000);
-  });
+
+// Batches arrive every couple of seconds; refresh at most that often.
+function onIngest() {
+  if (!pending) pending = setTimeout(() => { pending = null; refresh(); }, 2000);
 }
+
+function closeLive() {
+  liveFeed?.abort();
+  liveFeed = null;
+}
+
+function openLive() {
+  closeLive();
+  liveFeed = new AbortController();
+  followLive(liveFeed.signal);
+}
+
+// followLive reads the server-sent events with fetch rather than EventSource,
+// which cannot set a header and would put the token in a URL, where proxies
+// log it. Like EventSource it reconnects, backing off while the server is away.
+async function followLive(signal) {
+  let delay = 1000;
+  while (!signal.aborted) {
+    try {
+      const headers = { Accept: "text/event-stream" };
+      if (token) headers.Authorization = `Bearer ${token}`;
+      const resp = await fetch("/api/v1/live", { headers, signal, cache: "no-store" });
+      if (resp.status === 401) { needAuth(); return; }
+      if (!resp.ok || !resp.body) throw new Error(`live: ${resp.status}`);
+      delay = 1000;
+      const reader = resp.body.pipeThrough(new TextDecoderStream()).getReader();
+      let buf = "";
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += value;
+        for (let i = buf.indexOf("\n\n"); i >= 0; i = buf.indexOf("\n\n")) {
+          if (/^event: ingest$/m.test(buf.slice(0, i))) onIngest();
+          buf = buf.slice(i + 2);
+        }
+        // Only ever a partial frame: a server sending no frame end is not one.
+        if (buf.length > 4 << 20) throw new Error("live: oversized event");
+      }
+    } catch { /* reconnect below, unless this was closed */ }
+    if (signal.aborted) return;
+    await new Promise((r) => setTimeout(r, delay));
+    delay = Math.min(delay * 2, 30_000);
+  }
+}
+
 function setLive(on) {
   state.live = on;
   if (on && state.rec.on) {
     state.rec.on = false;
+    state.rec.follow = "";
     stopPlay();
     $("#recorder-bar").hidden = true;
     $("#event-rail").hidden = true;
     $("#recorder").setAttribute("aria-pressed", "false");
   }
-  source?.close();
-  source = null;
+  closeLive();
   clearInterval(liveTimer);
   clearTimeout(pending);
   pending = null;
@@ -1151,11 +1282,41 @@ async function exportCapsule() {
   }
 }
 
+// inputDialog is the app's own prompt or confirm: it does not block the page,
+// and works where browsers suppress native dialogs. Without `input` it only
+// confirms. It resolves to the text (or true), or null if cancelled.
+let inputDialogBusy = null;
+function inputDialog({ title, text = "", input = false, placeholder = "", ok = "OK", danger = false }) {
+  if (inputDialogBusy) return inputDialogBusy;
+  const dlg = $("#input-dialog"), field = $("#input-dialog-value"), okBtn = $("#input-dialog-ok");
+  $("#input-dialog-title").textContent = title;
+  $("#input-dialog-text").textContent = text;
+  $("#input-dialog-text").hidden = !text;
+  field.hidden = !input;
+  field.required = input;
+  field.value = "";
+  field.placeholder = placeholder;
+  okBtn.textContent = ok;
+  okBtn.classList.toggle("danger", danger);
+  dlg.returnValue = "";
+  inputDialogBusy = new Promise((resolve) => {
+    dlg.addEventListener("close", () => {
+      inputDialogBusy = null;
+      if (dlg.returnValue !== "ok") return resolve(null);
+      resolve(input ? field.value.trim() || null : true);
+    }, { once: true });
+    dlg.showModal();
+    if (input) field.focus(); else okBtn.focus();
+  });
+  return inputDialogBusy;
+}
+
 async function saveBookmark() {
-  const name = prompt("Bookmark this moment as:");
+  const at = state.to;
+  const name = await inputDialog({ title: "Bookmark this moment", text: stamp(at), input: true, placeholder: "What is this moment?", ok: "Save bookmark" });
   if (!name) return;
   try {
-    await send("POST", "bookmarks", { ts: state.to, entity: state.rec.follow || state.open || "", name });
+    await send("POST", "bookmarks", { ts: at, entity: state.rec.follow || state.open || "", name });
     setStatus("bookmark saved");
     refresh();
   } catch (e) {
@@ -1292,7 +1453,7 @@ function wireIncidentTools(d) {
     }
   };
   $("#incident-delete").onclick = async () => {
-    if (!confirm(`Delete incident #${d.id}?`)) return;
+    if (!await inputDialog({ title: `Delete incident #${d.id}?`, text: "Its notes and pinned evidence go with it.", ok: "Delete", danger: true })) return;
     try {
       await send("DELETE", `incidents/${d.id}`);
       $("#autopsy-dialog").close();
@@ -1339,10 +1500,15 @@ function renderRecorder() {
   if (!state.rec.on) return;
   const now = Date.now();
   const head = $("#rec-head");
-  head.min = String(now - 30 * units.d);
-  head.max = String(now);
+  // What the server holds, always including where the Recorder is now. With
+  // nothing known yet it is the last day, not a guess at retention.
+  const lo = Math.min(dataRange?.first_ms || now - units.d, state.to);
+  const hi = Math.max(now, state.to);
+  head.min = String(lo);
+  head.max = String(hi);
   head.step = "1000";
   head.value = String(state.to);
+  renderDensity(lo, hi);
   $("#rec-time").textContent = stamp(state.to);
   $("#rec-play").textContent = state.rec.playing ? "❚❚" : "▶";
   $("#rec-lookback").value = String(state.rec.lookback);
@@ -1354,35 +1520,88 @@ function renderRecorder() {
   if (state.live) $("#rec-time").textContent += " · live edge";
 }
 
+// renderDensity draws where the traffic is behind the slider, so the eye can
+// find the moments worth seeking to. It is drawn from a series fetched at most
+// once a minute for a given range: the shape does not change as the head moves.
+let density = { key: "", at: 0, series: null, loading: false };
+function renderDensity(lo, hi) {
+  const c = $("#rec-density");
+  if (!c) return;
+  const key = `${lo}|${state.filter}|${state.rec.follow}`;
+  const stale = density.key !== key || Date.now() - density.at > 60_000;
+  if (stale && !density.loading && c.clientWidth > 0) {
+    density.loading = true;
+    const buckets = Math.max(Math.floor(c.clientWidth / 3), 30);
+    const step = Math.max(Math.ceil((hi - lo) / buckets / 1000), 60);
+    api("timeseries", { from: lo, to: hi, step: `${step}s` })
+      .then((s) => { density = { key, at: Date.now(), series: s, loading: false }; })
+      .catch(() => { density = { ...density, key, at: Date.now(), loading: false }; })
+      .then(() => renderDensity(lo, hi));
+  }
+  const dpr = window.devicePixelRatio || 1;
+  const W = c.clientWidth, H = c.clientHeight;
+  c.width = W * dpr;
+  c.height = H * dpr;
+  const g = c.getContext("2d");
+  g.scale(dpr, dpr);
+  const bs = density.series?.buckets;
+  if (!bs?.length || hi <= lo) return;
+  const peak = Math.max(1, ...bs.map((b) => b.bytes_in + b.bytes_out));
+  g.fillStyle = getComputedStyle(document.documentElement).getPropertyValue("--accent").trim() || "#2563eb";
+  const step = density.series.step || density.series.step_ms || 0;
+  for (const b of bs) {
+    const v = b.bytes_in + b.bytes_out;
+    if (!v) continue;
+    // Square-rooted: one huge transfer must not flatten every other moment.
+    const h = Math.max(2, Math.sqrt(v / peak) * H);
+    const x0 = ((b.ts - lo) / (hi - lo)) * W, x1 = ((b.ts + step - lo) / (hi - lo)) * W;
+    g.fillRect(x0, H - h, Math.max(x1 - x0, 1), h);
+  }
+}
+
 function setRecAt(ts) {
   state.rec.at = Math.max(0, Math.round(ts));
   state.to = state.rec.at;
   state.span = state.rec.lookback;
   state.live = false;
-  refresh();
+  return refresh();
 }
 
+let playRun = 0;
 function stopPlay() {
   state.rec.playing = false;
-  clearInterval(recTimer);
+  playRun++;
+  clearTimeout(recTimer);
   recTimer = null;
   renderRecorder();
 }
 
+// togglePlay starts a loop that waits for each moment to be drawn before asking
+// for the next, so a slow server gets fewer frames rather than a pile of
+// requests. The head advances by the time that really passed, so the speed
+// stays true however few frames there are.
 function togglePlay() {
   if (state.rec.playing) return stopPlay();
   state.rec.playing = true;
   state.rec.at = Math.min(state.rec.at, Date.now());
-  const speed = Number($("#rec-speed").value) || 1;
-  recTimer = setInterval(() => {
-    const next = state.rec.at + 1000 * speed;
+  const run = ++playRun;
+  let last = performance.now();
+  const tick = async () => {
+    if (run !== playRun) return;
+    const started = performance.now();
+    const speed = Number($("#rec-speed").value) || 1;
+    const next = state.rec.at + (started - last) * speed;
+    last = started;
     if (next >= Date.now()) {
       setRecAt(Date.now());
       stopPlay();
       return;
     }
-    setRecAt(next);
-  }, 1000);
+    await setRecAt(next);
+    if (run !== playRun) return;
+    recTimer = setTimeout(tick, Math.max(0, 1000 - (performance.now() - started)));
+  };
+  recTimer = setTimeout(tick, 1000);
   renderRecorder();
 }
 
@@ -1392,9 +1611,15 @@ function toggleRecorder(on = !state.rec.on) {
     // Start from the moment on screen, not wherever the recorder last was.
     state.rec.at = Math.min(state.to, Date.now());
     state.to = state.rec.at;
+    // The smallest frame that still holds the window on screen: narrowing an
+    // hour with data in it to its last five minutes could show nothing.
+    state.rec.lookback = [5, 15, 60].map((m) => m * units.m).find((v) => v >= state.span) ?? units.h;
     state.span = state.rec.lookback;
+    if (state.live) setLive(false);
     state.live = false;
   } else {
+    // Following filters every view, and its controls are leaving with the bar.
+    state.rec.follow = "";
     stopPlay();
   }
   renderRecorder();
@@ -1436,7 +1661,7 @@ async function renderRail(seq) {
   }
   box.innerHTML = `<div class="rail-head"><b>Events</b><span class="muted">last day · click to jump</span></div>
     <ul class="rail-list">${events.map((e) => `<li><button class="rail-event" data-ts="${e.ts}" data-entity="${esc(e.entity || "")}">
-      <time>${clock(e.ts)}</time> ${badge(e.kind)} ${esc(e.title)}</button></li>`).join("")}</ul>`;
+      <time>${when(e.ts)}</time> ${badge(e.kind)} ${esc(e.title)}</button></li>`).join("")}</ul>`;
   box.querySelectorAll(".rail-event").forEach((b) => {
     b.onclick = () => {
       const ts = Number(b.dataset.ts);
@@ -1551,6 +1776,16 @@ function search() {
 }
 
 function init() {
+  fetch("/api/v1/version").then((r) => r.json()).then((v) => { $("#version").textContent = `netgraph ${v.version}`; }).catch(() => {});
+  document.addEventListener("click", (e) => {
+    if (e.target.closest("[data-jump-latest]")) jumpToLatest();
+    else if (e.target.closest("[data-clear-filter]")) {
+      state.filter = "";
+      $("#filter").value = "";
+      state.rec.follow = "";
+      refresh();
+    }
+  });
   const saved = store.get("netgraph.theme");
   if (saved) document.documentElement.dataset.theme = saved;
   loadHash();

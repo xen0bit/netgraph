@@ -60,6 +60,44 @@ func (s *Store) window(f model.Filter) (from, to int64) {
 	return ms(fr), ms(t)
 }
 
+// DataRange reports the span of what the store holds. Each bound comes from
+// its own query: SQLite reads a lone min() or max() from an index, but asking
+// for both at once scans the table. flows are bounded by t_end, the indexed
+// column: a record starts at most store.MaxRecordSpan earlier, which is close
+// enough to place a slider.
+func (s *Store) DataRange(ctx context.Context) (*model.DataRange, error) {
+	now := s.cfg.Now()
+	out := &model.DataRange{
+		RawFromMS:    ms(now.Add(-s.cfg.RawRetention)),
+		RollupFromMS: ms(now.Add(-s.cfg.RollupRetention)),
+		NowMS:        ms(now),
+	}
+	for _, q := range []struct {
+		sql  string
+		last bool
+	}{
+		{`SELECT min(t_end) FROM flows`, false},
+		{`SELECT max(t_end) FROM flows`, true},
+		{`SELECT min(ts) FROM dns`, false},
+		{`SELECT max(ts) FROM dns`, true},
+		{`SELECT min(bucket) FROM traffic_hourly`, false},
+		{`SELECT max(bucket) FROM traffic_hourly`, true},
+	} {
+		var v sql.NullInt64
+		if err := s.r.QueryRowContext(ctx, q.sql).Scan(&v); err != nil {
+			return nil, err
+		}
+		switch {
+		case !v.Valid:
+		case q.last:
+			out.LastMS = max(out.LastMS, v.Int64)
+		case out.FirstMS == 0 || v.Int64 < out.FirstMS:
+			out.FirstMS = v.Int64
+		}
+	}
+	return out, nil
+}
+
 // precision reports how a window is answered: from raw records when they
 // still cover its start and it is no longer than ExactMax, else from the
 // hourly rollups.
@@ -577,8 +615,9 @@ func (s *Store) flowsHourly(ctx context.Context, f model.Filter, from, to int64)
 		}
 		fl.Key = hourlyFlowKey(dev, localIP, fl.RemoteIP, port, proto, fl.Name, fl.Direction)
 		fl.Proto = ProtoName(proto)
-		fl.FirstSeen, fl.LastSeen = first, last+hourMS
-		fl.State = model.StateOpened
+		// A rollup knows its hour, not when in it: the current hour has not
+		// ended, and rollups do not record connection states.
+		fl.FirstSeen, fl.LastSeen = first, min(last+hourMS, ms(s.cfg.Now()))
 		// Rollups keep only the server's port, which is the device's own
 		// when the connection came in.
 		if fl.Direction != model.DirIn {

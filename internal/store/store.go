@@ -21,6 +21,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite" // registers the "sqlite" driver
@@ -108,6 +109,11 @@ type Store struct {
 	anomKey string
 	anomAt  time.Time
 	anomRep *model.AnomalyReport
+	// anomFlight holds the report being computed per cache key, so requests
+	// that arrive together (a refresh's anomaly list and its graph) share one
+	// run of the checks.
+	anomFlight map[string]*anomalyRun
+	anomRuns   atomic.Int64 // how many times the checks ran; for tests
 }
 
 // dsn opens path in WAL mode; queryOnly refuses writes. A backup source is
@@ -367,13 +373,18 @@ func (s *Store) Backup(ctx context.Context, path string, opts ...BackupOptions) 
 // seconds. A live report may be up to ten seconds stale; recomputing every
 // check on every batch would make every graph refresh wait for all of them.
 func (s *Store) invalidateAnomaliesThrottled() {
+	//
+	// It drops an old report but leaves the generation alone: bumping it would
+	// stop a running report being cached, and checks slower than the gap
+	// between batches would then never be cached at all. That report is stale
+	// by its own run time, like any other within this allowance.
 	s.anomMu.Lock()
+	defer s.anomMu.Unlock()
 	if s.anomRep != nil && s.cfg.Now().Sub(s.anomAt) < 10*time.Second {
-		s.anomMu.Unlock()
 		return
 	}
-	s.anomMu.Unlock()
-	s.invalidateAnomalies()
+	s.anomRep = nil
+	s.anomKey = ""
 }
 
 func (s *Store) invalidateAnomalies() {

@@ -225,9 +225,10 @@ Checks that need no history:
 | `wifi_deauth_flood` | one access point sends 10 or more deauthentication or disassociation frames within five seconds: knocking clients off, often to capture a handshake for an offline attack | medium; high from 50 in the burst |
 | `sensor_silent` | a sensor has not reported for two minutes while the window ends near now (a stopped, disconnected or wedged sensor) | medium; high from ten minutes |
 
-Checks that compare with history need a day of it: until the first sensor
-has reported for 24 hours the report says `learning` and they are skipped. The report also includes `history_ms` and `baseline_ms`, so the UI can show that some checks compare against a seven-day baseline.
-since everything is new to a network just met. They look back 7 days.
+Checks that compare with history need a day of it, since everything is new
+to a network just met: until the first sensor has reported for 24 hours the
+report says `learning` and they are skipped. They look back 7 days. The report
+includes `history_ms` and `baseline_ms`, so a UI can say so.
 
 | Kind | Fires when | Severity |
 |---|---|---|

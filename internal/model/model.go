@@ -87,6 +87,17 @@ const (
 	PrecisionHour  = "hour"  // from hourly rollups: windows are widened to whole hours
 )
 
+// DataRange says what a server holds, so a UI can offer real times: unix
+// milliseconds, zero when it holds nothing. Raw records answer exactly from
+// RawFromMS on; rollups answer by the hour from RollupFromMS on.
+type DataRange struct {
+	FirstMS      int64 `json:"first_ms"`
+	LastMS       int64 `json:"last_ms"`
+	RawFromMS    int64 `json:"raw_from_ms"`
+	RollupFromMS int64 `json:"rollup_from_ms"`
+	NowMS        int64 `json:"now_ms"`
+}
+
 // Summary is a window's headline numbers.
 type Summary struct {
 	FromMS     int64  `json:"from"`
@@ -1219,4 +1230,16 @@ func FormatBytesWhole(n uint64) string {
 		exp++
 	}
 	return fmt.Sprintf("%.0f%cB", float64(n)/float64(div), "kMGTPE"[exp])
+}
+
+// At returns the report as the answer for the window [from, to). A live view's
+// window moves between runs of the checks, and its response names the window
+// asked for; the report itself is shared and never changed.
+func (r *AnomalyReport) At(from, to int64) *AnomalyReport {
+	if r == nil || (r.FromMS == from && r.ToMS == to) {
+		return r
+	}
+	c := *r
+	c.FromMS, c.ToMS = from, to
+	return &c
 }
