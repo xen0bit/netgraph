@@ -87,6 +87,39 @@ const (
 	PrecisionHour  = "hour"  // from hourly rollups: windows are widened to whole hours
 )
 
+// Reel is a window's graph with each edge's traffic per step: everything a
+// client needs to scrub through the window without asking again. Precision
+// says what the steps were read from ("exact", "minute" or "hour").
+// Unassigned counts bytes of traffic no drawn edge stands for.
+type Reel struct {
+	FromMS     int64        `json:"from"`
+	ToMS       int64        `json:"to"`
+	StepMS     int64        `json:"step"`
+	Steps      int          `json:"steps"`
+	Precision  string       `json:"precision"`
+	Graph      *Graph       `json:"graph"`
+	Series     []ReelSeries `json:"series"`
+	Markers    []ReelMarker `json:"markers"`
+	Unassigned uint64       `json:"unassigned,omitempty"`
+}
+
+// ReelSeries is one edge's traffic: Edge indexes Graph.Edges, and each point
+// is [step index, client to server bytes, server to client bytes], in order,
+// with empty steps left out.
+type ReelSeries struct {
+	Edge   int         `json:"edge"`
+	Points [][3]uint64 `json:"points"`
+}
+
+// ReelMarker is a moment worth seeking to.
+type ReelMarker struct {
+	TS       int64  `json:"ts"`
+	Kind     string `json:"kind"`
+	Severity string `json:"severity,omitempty"`
+	Title    string `json:"title"`
+	Entity   string `json:"entity,omitempty"`
+}
+
 // MapPin is where a person put a node on the map, in the map's own units.
 type MapPin struct {
 	ID      string  `json:"id"`

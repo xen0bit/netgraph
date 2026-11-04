@@ -42,6 +42,8 @@ type Config struct {
 	// RollupRetention keeps hourly rollups and facts this long (default
 	// 180 days).
 	RollupRetention time.Duration
+	// MinuteRetention keeps per-minute traffic this long (default 30 days).
+	MinuteRetention time.Duration
 	// ExactMax is the longest window answered from raw records; longer
 	// windows use the hourly rollups (default 48h), which keeps a week's
 	// or a month's view as cheap as a day's.
@@ -72,6 +74,9 @@ func (c *Config) defaults() {
 	}
 	if c.ExactMax <= 0 {
 		c.ExactMax = 48 * time.Hour
+	}
+	if c.MinuteRetention <= 0 {
+		c.MinuteRetention = 30 * 24 * time.Hour
 	}
 	if c.FactGap <= 0 {
 		c.FactGap = time.Hour

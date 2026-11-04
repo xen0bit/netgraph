@@ -56,6 +56,7 @@ they must not depend on the resolver of the machine replaying them.
 | `timeline_events` | the Flight Recorder's compact event rail: device joins, DNS, flow open/close, observations, sensor stats, notes and bookmarks | raw retention; the rail events of notes and bookmarks live as long as the note |
 | `annotations`, `bookmarks` | human notes and marked moments on the rail | until deleted, or erased by `db forget`/`db purge` |
 | `incidents`, `incident_*` | saved investigations | until deleted, or erased by `db forget`/`db purge` |
+| `traffic_minute` | per-minute traffic per device and destination, for scrubbing and long timelines | minute retention (30 d) |
 | `map_pins` | where a person placed a node on the map | until unpinned, or erased by `db forget`/`db purge` |
 
 A fact's rows are its **periods**. Seeing a relationship again within
@@ -85,6 +86,11 @@ A window is half-open: `[from, to)`.
 record arrives, at most `-active-timeout` plus the shipping interval
 (about 30 s) after the fact. Lookups and identity events arrive within a
 couple of seconds.
+
+**Timelines and reels** can also read per-minute traffic: a timeline longer than
+6 hours, and a reel longer than 2 hours. Their edges round to the minute and they
+say `precision: minute`. A database from before this table has its existing
+records converted once at upgrade, which can take a while on a large one.
 
 **Precision.** Windows older than raw retention, or longer than
 `-exact-max`, are answered from hourly rollups: edges round to whole hours,

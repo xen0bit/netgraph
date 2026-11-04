@@ -52,6 +52,7 @@ func (s *Store) Retain(ctx context.Context) (RetentionResult, error) {
 		// The rollups are WITHOUT ROWID. Delete a few hours at a time:
 		// one unbounded DELETE can hold the ingest lock for a long time
 		// after a long capture or a missed retention run.
+		{&r.Rollups, `DELETE FROM traffic_minute WHERE bucket IN (SELECT bucket FROM traffic_minute WHERE bucket < ? ORDER BY bucket LIMIT 60)`, ms(now.Add(-s.cfg.MinuteRetention)), true},
 		{&r.Rollups, `DELETE FROM traffic_hourly WHERE bucket IN (SELECT bucket FROM traffic_hourly WHERE bucket < ? ORDER BY bucket LIMIT 6)`, roll, true},
 		{&r.Rollups, `DELETE FROM dns_hourly WHERE bucket IN (SELECT bucket FROM dns_hourly WHERE bucket < ? ORDER BY bucket LIMIT 24)`, roll, true},
 		// A handshake's key stays valid while the client stays associated,

@@ -238,6 +238,15 @@ page asks for it once and keeps it in the browser.
   server draws with the same d2 code as the CLI. While the next window is
   fetched, the current map stays visible under a small spinner. Anomalies
   outline the map when their checks finish, so it never waits for them.
+- **Recorder:** moves through time on the map. Drag the head and the map
+  answers at once, because the timeline's whole stretch was fetched ahead of
+  time; nodes keep their places, and what was quiet at that moment is ghosted.
+  Tables and the summary catch up when the head stops. The track shows where the
+  traffic is, marks new devices, notes, bookmarks and anomalies, and shades what
+  only hourly rollups can answer. Scroll on it to zoom. **⏮ ⏭** jump between
+  marks, **Loop** repeats a stretch, and **Diff A**, then **Diff B**, colours the
+  map by what was added, removed or much busier between two moments. **Capsule**
+  downloads one HTML file that replays the window offline, with no server.
 - **Anomalies:** what stands out in the window, most severe first, with the
   evidence ([what is checked](concepts.md#anomalies)). The details panel
   can mute that finding for an hour; mutes are stored on the server and

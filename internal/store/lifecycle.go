@@ -106,6 +106,7 @@ func (s *Store) ForgetDeviceWithOptions(ctx context.Context, mac string, opts Fo
 	res.Observations = count(`DELETE FROM observations WHERE device = ?`, id)
 	res.Facts = count(`DELETE FROM facts WHERE src = ? OR dst = ?`, id, id)
 	res.Rollups = count(`DELETE FROM traffic_hourly WHERE client_device = ?`, id) +
+		count(`DELETE FROM traffic_minute WHERE client_device = ?`, id) +
 		count(`DELETE FROM dns_hourly WHERE client_device = ?`, id)
 	res.Handshakes = count(`DELETE FROM wifi_handshakes WHERE bssid = ? OR sta = ?`, m, m)
 	res.Groups = count(`DELETE FROM wifi_group_keys WHERE bssid = ? OR sta = ?`, m, m)
@@ -212,6 +213,7 @@ func (s *Store) PurgeBeforeWithOptions(ctx context.Context, before time.Time, op
 	r.Observations = count(`DELETE FROM observations WHERE ts < ?`, cut)
 	r.Facts = count(`DELETE FROM facts WHERE last_seen < ?`, cut)
 	r.Rollups = count(`DELETE FROM traffic_hourly WHERE bucket < ?`, cut) +
+		count(`DELETE FROM traffic_minute WHERE bucket < ?`, cut) +
 		count(`DELETE FROM dns_hourly WHERE bucket < ?`, cut)
 	r.Handshakes = count(`DELETE FROM wifi_handshakes WHERE ts < ?`, cut) +
 		count(`DELETE FROM wifi_group_keys WHERE ts < ?`, cut)
@@ -233,6 +235,7 @@ func (s *Store) PurgeBeforeWithOptions(ctx context.Context, before time.Time, op
 			AND NOT EXISTS (SELECT 1 FROM dns d WHERE d.client_device = e.id)
 			AND NOT EXISTS (SELECT 1 FROM observations o WHERE o.device = e.id)
 			AND NOT EXISTS (SELECT 1 FROM traffic_hourly t WHERE t.client_device = e.id)
+			AND NOT EXISTS (SELECT 1 FROM traffic_minute m WHERE m.client_device = e.id)
 			AND NOT EXISTS (SELECT 1 FROM dns_hourly h WHERE h.client_device = e.id))`, cut)
 	}
 	if err != nil {

@@ -39,6 +39,8 @@ func (s *Store) EnrichASN(ctx context.Context) (int64, error) {
 			`UPDATE connections SET remote_asn = ?, remote_cc = ? WHERE flow_key = ?`, 1},
 		{`SELECT bucket, flow_key, remote_ip, bucket + 3600000 FROM traffic_hourly WHERE remote_asn IS NULL LIMIT ?`,
 			`UPDATE traffic_hourly SET remote_asn = ?, remote_cc = ? WHERE bucket = ? AND flow_key = ?`, 2},
+		{`SELECT bucket, client_device, client_ip, remote_ip, remote_port, proto, name, direction, app, remote_ip, bucket + 60000 FROM traffic_minute WHERE remote_asn IS NULL LIMIT ?`,
+			`UPDATE traffic_minute SET remote_asn = ?, remote_cc = ? WHERE bucket = ? AND client_device = ? AND client_ip = ? AND remote_ip = ? AND remote_port = ? AND proto = ? AND name = ? AND direction = ? AND app = ?`, 9},
 	} {
 		for {
 			n, err := s.enrichStep(ctx, db, t.sel, t.upd, t.keys)

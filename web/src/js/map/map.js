@@ -13,6 +13,7 @@ const FONT_SMALL = '10px system-ui, -apple-system, "Segoe UI", sans-serif';
 
 const PALETTES = {
   light: {
+    added: "#16a34a", removed: "#dc2626", changed: "#d97706",
     bg: "#ffffff", grid: "#eef1f5", text: "#111827", sub: "#6b7280", edge: "#94a3b8", dns: "#16a34a", cname: "#9ca3af",
     up: "#2563eb", down: "#7c3aed", high: "#dc2626", medium: "#ea580c", sel: "#2563eb", halo: "rgba(37,99,235,.14)", lasso: "rgba(37,99,235,.12)",
     kinds: {
@@ -21,6 +22,7 @@ const PALETTES = {
     },
   },
   dark: {
+    added: "#4ade80", removed: "#f87171", changed: "#fbbf24",
     bg: "#0f1419", grid: "#1a2129", text: "#e5e7eb", sub: "#9ca3af", edge: "#475569", dns: "#22c55e", cname: "#6b7280",
     up: "#60a5fa", down: "#c084fc", high: "#f87171", medium: "#fb923c", sel: "#60a5fa", halo: "rgba(96,165,250,.18)", lasso: "rgba(96,165,250,.16)",
     kinds: {
@@ -217,6 +219,7 @@ export class LivingMap {
     for (const [k, d] of this.edges) if (!keys.has(k) && !d.dying) d.dying = now;
 
     this.assignParticles();
+    if (this.frame) this.applyFrame(this.frame, this.frameLookback);
     this.renderList();
     this.canvas.dataset.nodes = String(nodes.length);
     this.canvas.dataset.edges = String(edges.length);
@@ -232,6 +235,56 @@ export class LivingMap {
     apply(this.graph);
     for (const d of this.edges.values()) d.mark = d.data?.attrs?.anomaly || "";
     this.dirty = true;
+    this.wake();
+  }
+
+  // applyFrame shows one moment of a reel: frame is Map(edge key -> {up, down}),
+  // bytes in the lookback. What was quiet then stays in its place, ghosted, so
+  // the eye sees activity move across a map that holds still.
+  applyFrame(frame, lookbackMS = 300_000) {
+    this.frame = frame;
+    this.frameLookback = lookbackMS;
+    const seconds = Math.max(lookbackMS / 1000, 1);
+    this.activeNodes = new Set();
+    let budget = MAX_PARTICLES;
+    for (const d of this.edges.values()) {
+      if (d.dying) continue;
+      const v = frame?.get(d.key);
+      d.frameOn = Boolean(v);
+      if (!frame) { continue; }
+      if (v) {
+        this.activeNodes.add(d.from);
+        this.activeNodes.add(d.to);
+        const rate = (x) => (x > 0 ? clamp(Math.round(Math.log10(x / seconds + 10)), 1, 6) : 0);
+        d.nUp = Math.min(rate(v.up), budget); budget -= d.nUp;
+        d.nDown = Math.min(rate(v.down), budget); budget -= d.nDown;
+        d.speed = clamp(0.06 + Math.log10((v.up + v.down) / seconds + 1) * 0.035, 0.05, 0.3);
+        d.frameWidth = clamp(0.8 + Math.log10(v.up + v.down + 1) * 0.55, 1, 7);
+      } else {
+        d.nUp = 0; d.nDown = 0;
+      }
+    }
+    if (!frame) this.assignParticles();
+    this.canvas.dataset.active = String(this.activeNodes.size);
+    this.wake();
+  }
+
+  // setDiff colours edges by what changed between two moments:
+  // Map(edge key -> "added" | "removed" | "changed"), or null to stop.
+  setDiff(diff) {
+    this.diff = diff;
+    this.diffNodes = null;
+    if (diff) {
+      this.diffNodes = new Map();
+      const rank = { changed: 1, removed: 2, added: 3 };
+      for (const d of this.edges.values()) {
+        const st = diff.get(d.key);
+        if (!st) continue;
+        for (const id of [d.from, d.to]) {
+          if ((rank[st] || 0) > (rank[this.diffNodes.get(id)] || 0)) this.diffNodes.set(id, st);
+        }
+      }
+    }
     this.wake();
   }
 
@@ -348,6 +401,7 @@ export class LivingMap {
   }
 
   assignParticles() {
+    if (this.frame) return;
     const live = [...this.edges.values()].filter((d) => !d.dying && !d.dashed);
     const seconds = this.spanMS / 1000;
     let budget = MAX_PARTICLES;
@@ -659,11 +713,11 @@ export class LivingMap {
     this.dirty = true;
     if (!this.running) {
       this.running = true;
-      requestAnimationFrame((t) => this.frame(t));
+      requestAnimationFrame((t) => this.tick(t));
     }
   }
 
-  frame(t) {
+  tick(t) {
     const started = performance.now();
     const animating = this.step(t);
     this.draw(t);
@@ -671,7 +725,7 @@ export class LivingMap {
     if (this.frames.length > 240) this.frames.shift();
     this.canvas.dataset.frameMs = (this.frames.reduce((a, b) => a + b, 0) / this.frames.length).toFixed(2);
     const particles = !this.reduced.matches && !document.hidden && this.el.offsetParent !== null && [...this.edges.values()].some((d) => d.nUp || d.nDown);
-    if (animating || particles) requestAnimationFrame((n) => this.frame(n));
+    if (animating || particles) requestAnimationFrame((n) => this.tick(n));
     else this.running = false;
   }
 
@@ -751,10 +805,14 @@ export class LivingMap {
       if (Math.max(c.ax, c.bx, c.cx) < view.x0 || Math.min(c.ax, c.bx, c.cx) > view.x1 || Math.max(c.ay, c.by, c.cy) < view.y0 || Math.min(c.ay, c.by, c.cy) > view.y1) continue;
       const dim = this.neighbours && (this.dimmed(d.from) || this.dimmed(d.to));
       const hot = d === hoverEdge || (this.hover?.node && !dim);
-      g.globalAlpha = (d.alpha ?? 1) * (dim ? 0.12 : hot ? 1 : 0.62);
-      const color = d.mark === "high" ? p.high : d.mark === "medium" ? p.medium : d.data?.rel === "queried" ? p.dns : d.dashed ? p.cname : p.edge;
-      g.strokeStyle = hot && !d.mark ? p.sel : color;
-      g.lineWidth = Math.max((d.width || 1) + (d === hoverEdge ? 1.5 : 0), 0.7 / s);
+      const quiet = this.frame && !d.frameOn;
+      const st = this.diff?.get(d.key);
+      g.globalAlpha = (d.alpha ?? 1) * (dim ? 0.12 : hot ? 1 : st ? 1 : quiet ? 0.1 : 0.62);
+      const color = st === "added" ? p.added : st === "removed" ? p.removed : st === "changed" ? p.changed
+        : d.mark === "high" ? p.high : d.mark === "medium" ? p.medium : d.data?.rel === "queried" ? p.dns : d.dashed ? p.cname : p.edge;
+      g.strokeStyle = hot && !d.mark && !st ? p.sel : color;
+      const base = this.frame && d.frameOn ? d.frameWidth : quiet ? 1 : d.width || 1;
+      g.lineWidth = Math.max(base + (d === hoverEdge ? 1.5 : 0) + (st ? 1 : 0), 0.7 / s);
       g.setLineDash(d.dashed ? [5, 5] : []);
       g.beginPath();
       g.moveTo(c.ax, c.ay);
@@ -762,7 +820,7 @@ export class LivingMap {
       g.stroke();
       g.setLineDash([]);
       if (s > 0.25) arrow(g, c, Math.max(6, (d.width || 1) * 2.2), g.strokeStyle);
-      if (!dim && !this.reduced.matches && s > 0.15 && !d.dying) dots.push(d);
+      if (!dim && !quiet && !this.reduced.matches && s > 0.15 && !d.dying) dots.push(d);
       // A label only when there is room to read it.
       if ((s > 1.15 || d === hoverEdge) && d.data && !d.dashed && d.data.ports?.length) {
         const mx = 0.25 * c.ax + 0.5 * c.cx + 0.25 * c.bx, my = 0.25 * c.ay + 0.5 * c.cy + 0.25 * c.by;
@@ -813,7 +871,8 @@ export class LivingMap {
       const rest = d.id.startsWith("other:");
       const [fill, stroke] = rest ? p.kinds.rest : p.kinds[n.kind] || p.kinds.ip;
       const dim = this.dimmed(d.id);
-      g.globalAlpha = (d.alpha ?? 1) * (dim ? 0.2 : 1);
+      const quiet = this.frame && !this.activeNodes?.has(d.id) && !this.diffNodes?.has(d.id);
+      g.globalAlpha = (d.alpha ?? 1) * (dim ? 0.2 : quiet ? 0.3 : 1);
       const sel = this.selected.has(d.id), foc = this.focus === d.id, hov = this.hover?.node === d;
       if (sel || foc || hov) {
         g.fillStyle = p.halo;
@@ -821,8 +880,9 @@ export class LivingMap {
         g.fill();
       }
       g.fillStyle = fill;
-      g.strokeStyle = a.anomaly === "high" ? p.high : a.anomaly === "medium" ? p.medium : foc || sel ? p.sel : stroke;
-      g.lineWidth = a.anomaly ? 2.5 : foc || sel ? 2 : 1.2;
+      const changed = this.diffNodes?.get(d.id);
+      g.strokeStyle = changed ? p[changed] : a.anomaly === "high" ? p.high : a.anomaly === "medium" ? p.medium : foc || sel ? p.sel : stroke;
+      g.lineWidth = changed ? 2.5 : a.anomaly ? 2.5 : foc || sel ? 2 : 1.2;
       g.setLineDash(rest ? [4, 4] : []);
       shape(g, d, 0);
       g.fill();

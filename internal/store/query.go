@@ -1247,6 +1247,14 @@ func (s *Store) Timeseries(ctx context.Context, f model.Filter, step time.Durati
 	if st%hourMS == 0 && from%hourMS == 0 {
 		prec = model.PrecisionHour
 	}
+	// A long window at steps of a minute or more reads per-minute traffic: a
+	// scan of its records is what makes week-long timelines slow. Its edges
+	// round to the minute, so a short window, where that shows, stays exact.
+	useMinutes := st >= minuteMS && st%hourMS != 0 && time.Duration(to-from)*time.Millisecond > minuteTierSpan &&
+		from >= ms(s.cfg.Now().Add(-s.cfg.MinuteRetention))
+	if useMinutes {
+		prec = precisionMinute
+	}
 	start := from - ((from%st)+st)%st
 	n := int((to - start + st - 1) / st)
 	if n <= 0 {
@@ -1267,6 +1275,9 @@ func (s *Store) Timeseries(ctx context.Context, f model.Filter, step time.Durati
 		return i
 	}
 	w := &where{}
+	if useMinutes {
+		return s.timeseriesMinutes(ctx, f, ts, from, to, idx)
+	}
 	if prec == model.PrecisionExact {
 		flowsWindow(w, from, to)
 		if err := s.flowWhere(ctx, f, w, recordCols); err != nil {
@@ -1375,6 +1386,94 @@ func (s *Store) Timeseries(ctx context.Context, f model.Filter, step time.Durati
 
 // spreadBytes adds a record's bytes to the buckets its interval covers,
 // in proportion to the overlap.
+// minuteTierSpan is the window beyond which Timeseries reads traffic_minute.
+const minuteTierSpan = 6 * time.Hour
+
+// timeseriesMinutes fills buckets from per-minute traffic and lookups.
+func (s *Store) timeseriesMinutes(ctx context.Context, f model.Filter, ts *model.Timeseries, from, to int64, idx func(int64) int) (*model.Timeseries, error) {
+	w := &where{}
+	w.add("bucket < ? AND bucket >= ?", to, from-from%minuteMS)
+	if err := s.flowWhere(ctx, f, w, hourlyCols); err != nil {
+		return nil, err
+	}
+	rows, err := s.r.QueryContext(ctx, `SELECT bucket, client_device, sum(flows), sum(bytes_out), sum(bytes_in) FROM traffic_minute WHERE `+w.sql()+` GROUP BY bucket, client_device`, w.args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	devs := make([]map[int64]bool, len(ts.Buckets))
+	for rows.Next() {
+		var b, dev int64
+		var nf int
+		var bo, bi uint64
+		if err := rows.Scan(&b, &dev, &nf, &bo, &bi); err != nil {
+			return nil, err
+		}
+		i := idx(b)
+		if i < 0 {
+			continue
+		}
+		ts.Buckets[i].FlowsNew += nf
+		ts.Buckets[i].BytesOut += bo
+		ts.Buckets[i].BytesIn += bi
+		if dev != 0 {
+			if devs[i] == nil {
+				devs[i] = map[int64]bool{}
+			}
+			devs[i][dev] = true
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	rows.Close()
+	for i := range devs {
+		ts.Buckets[i].Devices = len(devs[i])
+	}
+	// Lookups: the records while they last, then the hour they fell in.
+	if from >= ms(s.cfg.Now().Add(-s.cfg.RawRetention)) {
+		dw, err := s.dnsWhere(ctx, f, from, to)
+		if err != nil {
+			return nil, err
+		}
+		dr, err := s.r.QueryContext(ctx, `SELECT ts FROM dns WHERE `+dw.sql(), dw.args...)
+		if err != nil {
+			return nil, err
+		}
+		defer dr.Close()
+		for dr.Next() {
+			var t int64
+			if err := dr.Scan(&t); err != nil {
+				return nil, err
+			}
+			if i := idx(t); i >= 0 {
+				ts.Buckets[i].DNSQueries++
+			}
+		}
+		return ts, dr.Err()
+	}
+	dw, err := s.dnsHourlyWhere(ctx, f, from, to)
+	if err != nil {
+		return nil, err
+	}
+	dr, err := s.r.QueryContext(ctx, `SELECT bucket, sum(count) FROM dns_hourly WHERE `+dw.sql()+` GROUP BY bucket`, dw.args...)
+	if err != nil {
+		return nil, err
+	}
+	defer dr.Close()
+	for dr.Next() {
+		var b int64
+		var n int
+		if err := dr.Scan(&b, &n); err != nil {
+			return nil, err
+		}
+		if i := idx(max(b, from)); i >= 0 {
+			ts.Buckets[i].DNSQueries += n
+		}
+	}
+	return ts, dr.Err()
+}
+
 func spreadBytes(bs []model.Bucket, start, step, from, to, a, b int64, bo, bi uint64) {
 	if b <= a {
 		if a >= from && a < to {

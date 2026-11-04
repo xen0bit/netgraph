@@ -729,3 +729,124 @@ func TestMapPerformanceBudget(t *testing.T) {
 		t.Errorf("show took %.0f ms", res.LayoutMS)
 	}
 }
+
+// Moving through time asks the server for no new graph: the reel holds it.
+func TestScrubbingDrawsFromTheReel(t *testing.T) {
+	s := open(t, window(), "")
+	s.waitFor("the map", nodesDrawn)
+	s.settle()
+	s.run(chromedp.Click(`#recorder`, chromedp.ByQuery))
+	s.waitFor("the reel", `Number(document.querySelector("#diagram canvas").dataset.active) >= 0 && !document.querySelector("#recorder-bar").hidden`)
+	s.settle()
+	if len(s.seen("/api/v1/reel?")) == 0 {
+		t.Fatal("the Recorder fetched no reel")
+	}
+	var active string
+	s.eval(`document.querySelector("#diagram canvas").dataset.active`, &active)
+	if active == "0" || active == "" {
+		t.Errorf("no active nodes at the moment on screen: %q", active)
+	}
+	s.clearRequests()
+	// Seek to before the scenario: nothing is active, with nothing asked.
+	s.eval(`(() => { const h = document.querySelector("#rec-head"); h.value = String(Number(h.min)); h.dispatchEvent(new Event("input")); return document.querySelector("#diagram canvas").dataset.active; })()`, &active)
+	if active != "0" {
+		t.Errorf("%s nodes active before anything happened", active)
+	}
+	if got := append(s.seen("/api/v1/graph"), s.seen("/api/v1/reel?")...); len(got) > 0 {
+		t.Errorf("scrubbing asked for %v", got)
+	}
+	s.waitFor("the tables to catch up", `document.querySelector("#status").textContent.startsWith("updated")`)
+	time.Sleep(600 * time.Millisecond)
+	s.settle()
+	if got := append(s.seen("/api/v1/graph"), s.seen("/api/v1/reel?")...); len(got) > 0 {
+		t.Errorf("settling asked for %v", got)
+	}
+}
+
+// Playing draws frames without asking the server anything.
+func TestPlayingOnTheMapMakesNoRequests(t *testing.T) {
+	s := open(t, window(), "")
+	s.waitFor("the map", nodesDrawn)
+	s.settle()
+	s.run(chromedp.Click(`#recorder`, chromedp.ByQuery))
+	s.waitFor("the bar", `!document.querySelector("#recorder-bar").hidden`)
+	s.settle()
+	s.eval(`(() => { const h = document.querySelector("#rec-head"); h.value = h.min; h.dispatchEvent(new Event("input")); return 1; })()`, nil)
+	time.Sleep(600 * time.Millisecond)
+	s.settle()
+	s.clearRequests()
+	var before, after string
+	s.eval(`document.querySelector("#rec-time").textContent`, &before)
+	s.run(chromedp.Click(`#rec-play`, chromedp.ByQuery))
+	time.Sleep(1200 * time.Millisecond)
+	s.eval(`document.querySelector("#rec-time").textContent`, &after)
+	if before == after {
+		t.Errorf("the head did not move from %s", before)
+	}
+	if got := s.seen("/api/v1/"); len(got) > 0 {
+		t.Errorf("playing asked for %v", got)
+	}
+	s.run(chromedp.Click(`#rec-play`, chromedp.ByQuery))
+	s.waitFor("a refresh on stopping", `document.querySelector("#rec-play").textContent === "▶"`)
+}
+
+// Two moments compared colour the map, and it can be cleared.
+func TestDiffColoursTheMap(t *testing.T) {
+	s := open(t, window(), "")
+	s.waitFor("the map", nodesDrawn)
+	s.settle()
+	s.run(chromedp.Click(`#recorder`, chromedp.ByQuery))
+	s.waitFor("the bar", `!document.querySelector("#recorder-bar").hidden`)
+	s.settle()
+	s.eval(`(() => { const h = document.querySelector("#rec-head"); h.value = h.min; h.dispatchEvent(new Event("input")); return 1; })()`, nil)
+	time.Sleep(500 * time.Millisecond)
+	s.settle()
+	s.run(chromedp.Click(`#rec-diff`, chromedp.ByQuery))
+	s.waitFor("A", `document.querySelector("#rec-diff").textContent === "Diff B"`)
+	s.eval(`(() => { const h = document.querySelector("#rec-head"); h.value = h.max; h.dispatchEvent(new Event("input")); return 1; })()`, nil)
+	time.Sleep(500 * time.Millisecond)
+	s.settle()
+	s.run(chromedp.Click(`#rec-diff`, chromedp.ByQuery))
+	s.waitFor("edges marked added", `(() => { const m = document.querySelector("#diagram").__map; return m.diff && [...m.diff.values()].includes("added"); })()`)
+	s.waitFor("the legend", `!document.querySelector("#diff-legend").hidden`)
+	s.waitFor("the clear button", `!!document.querySelector("#diff-clear")`)
+	s.run(chromedp.Click(`#diff-clear`, chromedp.ByQuery))
+	s.waitFor("no marks", `!document.querySelector("#diagram").__map.diff`)
+}
+
+// A capsule is one file that replays offline, with no server to ask.
+func TestCapsuleReplaysOffline(t *testing.T) {
+	req, _ := http.NewRequest("GET", fmt.Sprintf("%s/api/v1/capsule?%s", baseURL, window()), nil)
+	req.Header.Set("Authorization", "Bearer "+readToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if !strings.Contains(string(body), `id="reel-data"`) {
+		t.Fatalf("capsule has no reel: %.300s", body)
+	}
+	s := open(t, window()+"&tab=devices", "")
+	s.settle()
+	// A page with no origin and no server: a file someone was sent.
+	s.run(chromedp.Navigate("about:blank"))
+	s.clearRequests()
+	s.run(chromedp.ActionFunc(func(ctx context.Context) error {
+		tree, err := page.GetFrameTree().Do(ctx)
+		if err != nil {
+			return err
+		}
+		return page.SetDocumentContent(tree.Frame.ID, string(body)).Do(ctx)
+	}))
+	s.waitFor("the replay", `!document.querySelector("#player").hidden && Number(document.querySelector("#player-map canvas").dataset.nodes) > 0`)
+	var at0, at1 string
+	s.eval(`document.querySelector("#player-map canvas").dataset.active`, &at1)
+	s.eval(`(() => { const h = document.querySelector("#player-head"); h.value = h.min; h.dispatchEvent(new Event("input")); return document.querySelector("#player-map canvas").dataset.active; })()`, &at0)
+	if at1 == "0" || at0 != "0" {
+		t.Errorf("active nodes: %s at the end, %s at the start", at1, at0)
+	}
+	if got := s.seen("http"); len(got) > 0 {
+		t.Errorf("the capsule reached for %v", got)
+	}
+}

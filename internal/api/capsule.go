@@ -2,8 +2,14 @@ package api
 
 import (
 	"bytes"
+	"context"
+	"encoding/json"
 	"html/template"
+	"io/fs"
+	"log/slog"
 	"net/http"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/xen0bit/netgraph/internal/model"
@@ -119,7 +125,81 @@ func (s *Server) capsule(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
+	s.addCapsulePlayer(r.Context(), &buf, f)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Content-Disposition", "attachment; filename=netgraph-capsule.html")
 	_, _ = w.Write(buf.Bytes())
+}
+
+// The player's sources, in order: later files use the earlier ones' names.
+var capsuleScripts = []string{"js/map/layout.js", "js/map/icons.js", "js/map/map.js", "js/reel.js", "js/capsule-player.js"}
+
+var moduleLine = regexp.MustCompile(`(?m)^import .*;\n|^export (?:default )?`)
+
+const capsulePlayerHTML = `<section id="player" hidden style="margin:18px 0">
+<h2>Replay</h2>
+<div id="player-map" style="position:relative;height:460px;border:1px solid #ddd;border-radius:8px;overflow:hidden;touch-action:none"></div>
+<p style="display:flex;gap:10px;align-items:center;margin:8px 0">
+<button id="player-play" type="button">▶</button>
+<input id="player-head" type="range" style="flex:1" aria-label="Moment">
+<select id="player-speed" aria-label="Speed"><option value="60">60×</option><option value="600">600×</option><option value="10">10×</option></select>
+<span id="player-when" class="mono"></span></p>
+<p id="player-info" class="muted"></p>
+<style>
+.map-tooltip{position:absolute;z-index:3;max-width:340px;padding:6px 10px;pointer-events:none;font-size:12px;background:#fff;color:#111;border:1px solid #ddd;border-radius:8px;white-space:pre-line}
+.tip-title{font-weight:600}.tip-sub{color:#666}.tip-alert{color:#b45309}
+#player-map canvas{position:absolute;inset:0;width:100%;height:100%}
+#player-map [hidden]{display:none!important}
+.sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip-path:inset(50%)}
+</style>
+</section>`
+
+// addCapsulePlayer makes the capsule replayable: it embeds the window's reel
+// and the map's own code, so one file scrubs offline. It needs the web UI's
+// files; a capsule from a server without them stays a report, which is still
+// complete. JSON from encoding/json escapes "<", so text off the network cannot
+// close the script element.
+func (s *Server) addCapsulePlayer(ctx context.Context, buf *bytes.Buffer, f model.Filter) {
+	if s.cfg.Web == nil {
+		return
+	}
+	var js strings.Builder
+	for _, name := range capsuleScripts {
+		src, err := fs.ReadFile(s.cfg.Web, name)
+		if err != nil {
+			slog.Debug("capsule player", "file", name, "err", err)
+			return
+		}
+		js.Write(moduleLine.ReplaceAll(src, nil))
+		js.WriteByte('\n')
+	}
+	f.Limit = 0
+	reel, err := s.cfg.Store.Reel(ctx, f, model.DefaultGraphOptions, 0)
+	if err != nil {
+		slog.Warn("capsule reel", "err", err)
+		return
+	}
+	data, err := json.Marshal(reel)
+	if err != nil {
+		slog.Warn("capsule reel", "err", err)
+		return
+	}
+	page := buf.String()
+	cut := strings.LastIndex(page, "</body>")
+	head := strings.Index(page, "<h2>")
+	if cut < 0 || head < 0 {
+		return
+	}
+	var out strings.Builder
+	out.WriteString(page[:head])
+	out.WriteString(capsulePlayerHTML)
+	out.WriteString(page[head:cut])
+	out.WriteString(`<script type="application/json" id="reel-data">`)
+	out.Write(data)
+	out.WriteString("</script>\n<script>(() => {\n")
+	out.WriteString(strings.ReplaceAll(js.String(), "</script", `<\/script`))
+	out.WriteString("\n})();</script>\n")
+	out.WriteString(page[cut:])
+	buf.Reset()
+	buf.WriteString(out.String())
 }

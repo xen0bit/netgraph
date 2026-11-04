@@ -97,6 +97,7 @@ type ingester struct {
 	deviceKeys map[int64]string
 
 	traffic map[trafficKey]*trafficAgg
+	minutes map[minuteKey]*trafficAgg
 	dnsAgg  map[dnsKey]int
 
 	live   []LiveEvent
@@ -156,6 +157,15 @@ type binding struct {
 	ts     int64
 }
 
+// minuteKey is a row of traffic_minute: a trafficKey without the connection.
+type minuteKey struct {
+	bucket, device int64
+	client, remote string
+	port, proto    int
+	name, app, dir string
+	multicast      bool
+}
+
 type trafficKey struct {
 	bucket      int64
 	flowKey     string
@@ -194,6 +204,7 @@ func newIngester(s *Store) *ingester {
 		flowName:   map[string]string{},
 		deviceKeys: map[int64]string{},
 		traffic:    map[trafficKey]*trafficAgg{},
+		minutes:    map[minuteKey]*trafficAgg{},
 		dnsAgg:     map[dnsKey]int{},
 	}
 }
@@ -1784,6 +1795,41 @@ func (g *ingester) addTraffic(k trafficKey, start, end, first, bout, bin int64, 
 	if start == first {
 		add(hourOf(first), 1, 0, 0)
 	}
+	g.addMinutes(k, start, end, first, bout, bin, rasn, cc)
+}
+
+// addMinutes spreads a record's bytes over its minutes, as addTraffic does its
+// hours. A record spans at most store.MaxRecordSpan, so this is a few minutes.
+func (g *ingester) addMinutes(k trafficKey, start, end, first, bout, bin int64, rasn any, cc string) {
+	add := func(bucket, flows, bo, bi int64) {
+		mk := minuteKey{bucket: bucket, device: k.device, client: k.client, remote: k.remote, port: k.port, proto: k.proto, name: k.name, app: k.app, dir: k.dir, multicast: k.multicast}
+		a := g.minutes[mk]
+		if a == nil {
+			a = &trafficAgg{asn: rasn, cc: cc}
+			g.minutes[mk] = a
+		}
+		a.flows += flows
+		a.bout += bo
+		a.bin += bi
+	}
+	floor := func(t int64) int64 { return t - t%minuteMS }
+	if span := end - start; span <= 0 {
+		add(floor(start), 0, bout, bin)
+	} else {
+		var doneOut, doneIn int64
+		for b := floor(start); b < end; b += minuteMS {
+			overlap := min(end, b+minuteMS) - max(start, b)
+			bo, bi := bout*overlap/span, bin*overlap/span
+			if b+minuteMS >= end {
+				bo, bi = bout-doneOut, bin-doneIn
+			}
+			add(b, 0, bo, bi)
+			doneOut, doneIn = doneOut+bo, doneIn+bi
+		}
+	}
+	if start == first {
+		add(floor(first), 1, 0, 0)
+	}
 }
 
 func (g *ingester) flushRollupsTx(ctx context.Context) error {
@@ -1807,6 +1853,18 @@ func (g *ingester) flushRollupsTx(ctx context.Context) error {
 			return err
 		}
 	}
+	for k, a := range g.minutes {
+		if _, err := g.tx.ExecContext(ctx, `INSERT INTO traffic_minute (bucket, client_device, client_ip, remote_ip, remote_port, proto, name, direction, app, multicast, flows, bytes_out, bytes_in, remote_asn, remote_cc)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT (bucket, client_device, client_ip, remote_ip, remote_port, proto, name, direction, app) DO UPDATE SET
+			flows = flows + excluded.flows, bytes_out = bytes_out + excluded.bytes_out, bytes_in = bytes_in + excluded.bytes_in,
+			remote_cc = CASE WHEN remote_asn IS NULL THEN excluded.remote_cc ELSE remote_cc END,
+			remote_asn = coalesce(remote_asn, excluded.remote_asn)`,
+			k.bucket, k.device, k.client, k.remote, k.port, k.proto, k.name, k.dir, k.app, boolInt(k.multicast), a.flows, a.bout, a.bin, a.asn, a.cc); err != nil {
+			return err
+		}
+	}
+	clear(g.minutes)
 	clear(g.traffic)
 	clear(g.dnsAgg)
 	return nil
