@@ -205,3 +205,38 @@ dialog menu { padding: 0; margin: 12px 0 0; display: flex; justify-content: flex
 }
 .anomaly-box button { margin-top: 8px; }
 .status button { font-size: 12px; padding: 1px 8px; }
+
+/* Flight Recorder strip. */
+.recorder { display: flex; align-items: center; gap: 8px; padding: 8px 16px; border-bottom: 1px solid var(--line); background: var(--bg-1); }
+.recorder[hidden] { display: none; }
+.recorder input[type="range"] { flex: 1; min-width: 120px; accent-color: var(--accent); }
+.recorder select, .recorder button { font: inherit; }
+.recorder #rec-time { min-width: 150px; }
+.event-rail { padding: 8px 16px 12px; border-bottom: 1px solid var(--line); max-height: 220px; overflow: auto; }
+.event-rail[hidden] { display: none; }
+.rail-head { display: flex; gap: 10px; align-items: baseline; margin-bottom: 6px; }
+.rail-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.rail-event { display: block; width: 100%; text-align: left; border: 0; background: transparent; padding: 3px 4px; border-radius: 4px; color: inherit; cursor: pointer; }
+.rail-event:hover, .rail-event:focus-visible { background: var(--bg-2); outline: none; }
+.rail-event time { display: inline-block; min-width: 64px; color: var(--fg-2); font-variant-numeric: tabular-nums; }
+@media (max-width: 760px) { .recorder { flex-wrap: wrap; } .recorder #rec-time { min-width: 0; } }
+
+/* Autopsy reel. */
+dialog.autopsy { max-width: 860px; width: min(860px, 94vw); max-height: 88vh; }
+dialog.autopsy .close { position: sticky; float: right; top: 0; }
+dialog.autopsy .scene { border-top: 1px solid var(--line); padding: 10px 0; }
+dialog.autopsy .scene h3 { margin: 0 0 4px; text-transform: capitalize; }
+dialog.autopsy .evidence { margin: 6px 0 8px 18px; padding: 0; }
+dialog.autopsy .evidence li { margin: 2px 0; }
+
+/* Ask dialog. */
+dialog.ask { max-width: 760px; width: min(760px, 94vw); max-height: 84vh; overflow: auto; }
+dialog.ask #ask-form { display: flex; gap: 8px; margin: 8px 0; }
+dialog.ask #ask-form input { flex: 1; }
+dialog.ask .cite { font-size: 11px; padding: 1px 6px; border-radius: 999px; border: 1px solid var(--line); background: var(--bg-2); color: inherit; cursor: pointer; }
+dialog.ask details { margin-top: 8px; }
+
+/* What-if dialog. */
+dialog.whatif { max-width: 900px; width: min(900px, 94vw); max-height: 86vh; overflow: auto; }
+dialog.whatif textarea { width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+dialog.whatif .actions { display: flex; gap: 10px; align-items: center; margin: 8px 0; }

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/xen0bit/netgraph/internal/model"
+	"github.com/xen0bit/netgraph/internal/policy"
 )
 
 // Client queries a netgraph server.
@@ -214,4 +215,95 @@ func (c *Client) Version(ctx context.Context) (string, error) {
 	var v struct{ Version string }
 	err := c.getJSON(ctx, "/api/v1/version", nil, &v)
 	return v.Version, err
+}
+
+func (c *Client) Frame(ctx context.Context, f model.Filter) (*model.Frame, error) {
+	q := f.Values()
+	if d := f.To.Sub(f.From); d > 0 {
+		q.Set("lookback", d.String())
+	}
+	var v model.Frame
+	err := c.getJSON(ctx, "/api/v1/frame", q, &v)
+	return &v, err
+}
+
+func (c *Client) Story(ctx context.Context, id string, f model.Filter) (*model.Story, error) {
+	q := f.Values()
+	q.Set("entity", id)
+	var v model.Story
+	err := c.getJSON(ctx, "/api/v1/story", q, &v)
+	return &v, err
+}
+
+func (c *Client) Timeline(ctx context.Context, f model.Filter, tq model.TimelineQuery) (*model.TimelinePage, error) {
+	q := f.Values()
+	if tq.Entity != "" {
+		q.Set("entity", tq.Entity)
+	}
+	if len(tq.Kinds) > 0 {
+		q.Set("kinds", strings.Join(tq.Kinds, ","))
+	}
+	if tq.Cursor != "" {
+		q.Set("cursor", tq.Cursor)
+	}
+	if tq.Limit > 0 {
+		q.Set("limit", strconv.Itoa(tq.Limit))
+	}
+	var v model.TimelinePage
+	err := c.getJSON(ctx, "/api/v1/timeline", q, &v)
+	return &v, err
+}
+
+func (c *Client) Diff(ctx context.Context, a, b model.Filter, scope string) (*model.Diff, error) {
+	q := url.Values{}
+	q.Set("at_a", strconv.FormatInt(a.To.UnixMilli(), 10))
+	q.Set("at_b", strconv.FormatInt(b.To.UnixMilli(), 10))
+	lb := a.To.Sub(a.From)
+	if lb > 0 {
+		q.Set("lookback", lb.String())
+	}
+	if scope != "" {
+		q.Set("scope", scope)
+	}
+	var v model.Diff
+	err := c.getJSON(ctx, "/api/v1/diff", q, &v)
+	return &v, err
+}
+
+// WhatIf sends a proposed policy for a read-only blast-radius simulation.
+func (c *Client) WhatIf(ctx context.Context, p *policy.Policy, f model.Filter, scope string) (*model.WhatIfResult, error) {
+	body, err := json.Marshal(map[string]any{"policy": p, "from": f.From, "to": f.To})
+	if err != nil {
+		return nil, err
+	}
+	q := url.Values{}
+	if scope != "" {
+		q.Set("scope", scope)
+	}
+	b, err := c.do(ctx, http.MethodPost, "/api/v1/whatif", q, body)
+	if err != nil {
+		return nil, err
+	}
+	var v model.WhatIfResult
+	if err := json.Unmarshal(b, &v); err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
+// Ask sends a question to the server's grounded intent engine.
+func (c *Client) Ask(ctx context.Context, question string, f model.Filter) (*model.Answer, error) {
+	body, err := json.Marshal(map[string]any{"q": question, "from": f.From, "to": f.To})
+	if err != nil {
+		return nil, err
+	}
+	b, err := c.do(ctx, http.MethodPost, "/api/v1/ask", nil, body)
+	if err != nil {
+		return nil, err
+	}
+	var v model.Answer
+	if err := json.Unmarshal(b, &v); err != nil {
+		return nil, err
+	}
+	return &v, nil
 }

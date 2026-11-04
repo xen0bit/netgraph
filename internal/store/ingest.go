@@ -351,8 +351,10 @@ func (g *ingester) event(ctx context.Context, sid int64, sensor, boot string, ev
 	case wire.TypeStats:
 		if ev.Stats != nil {
 			b, _ := json.Marshal(ev.Stats)
-			_, err := g.tx.ExecContext(ctx, `UPDATE sensors SET stats = ? WHERE id = ?`, string(b), sid)
-			return err
+			if _, err := g.tx.ExecContext(ctx, `UPDATE sensors SET stats = ? WHERE id = ?`, string(b), sid); err != nil {
+				return err
+			}
+			return g.timeline(ctx, ts, "sensor", 0, "sensor:"+sensor, 0, "", "", "stats", "sensors", strconv.FormatInt(sid, 10)+":"+strconv.FormatInt(ts, 10), map[string]string{"sensor": sensor})
 		}
 	case wire.TypeFlow:
 		if ev.Flow != nil {
@@ -406,6 +408,18 @@ func (g *ingester) event(ctx context.Context, sid int64, sensor, boot string, ev
 
 // entity returns the ID of (kind, key), creating it, and records it as seen
 // at ts.
+// timeline appends one Flight Recorder rail event. The index is derived
+// data: callers pass the authoritative table/key so the UI can open the
+// record. INSERT OR IGNORE makes a retried batch harmless.
+func (g *ingester) timeline(ctx context.Context, ts int64, kind string, entityID int64, entityKey string, relatedID int64, relatedKey, severity, title, refTable, refKey string, attrs map[string]string) error {
+	b, _ := json.Marshal(attrs)
+	_, err := g.tx.ExecContext(ctx, `INSERT OR IGNORE INTO timeline_events
+		(ts, kind, entity_id, entity_key, related_id, related_key, severity, title, ref_table, ref_key, attrs)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		ts, kind, entityID, entityKey, relatedID, relatedKey, severity, title, refTable, refKey, string(b))
+	return err
+}
+
 func (g *ingester) entity(ctx context.Context, kind, key string, ts int64, init func(*entRow)) (int64, error) {
 	k := entKey{kind, key}
 	if e, ok := g.entities[k]; ok {
@@ -439,6 +453,15 @@ func (g *ingester) entity(ctx context.Context, kind, key string, ts int64, init 
 		}
 		e.lastSeen = ts
 		e.dirty = false
+		if kind == model.KindDevice {
+			title := "new device " + key
+			if e.label != "" {
+				title = "new device " + e.label
+			}
+			if err := g.timeline(ctx, ts, "device_new", e.id, model.EntityID(kind, key), 0, "", "", title, "entities", strconv.FormatInt(e.id, 10), map[string]string{"mac": key}); err != nil {
+				return 0, err
+			}
+		}
 	default:
 		return 0, err
 	}
@@ -752,8 +775,25 @@ func (g *ingester) observation(ctx context.Context, sid, ts int64, typ string, d
 	if ip.IsValid() {
 		ipStr = ip.String()
 	}
-	_, err = g.tx.ExecContext(ctx, `INSERT INTO observations (sensor_id, ts, type, device, ip, data) VALUES (?, ?, ?, ?, ?, ?)`, sid, ts, typ, device, ipStr, string(b))
-	return err
+	var id int64
+	err = g.tx.QueryRowContext(ctx, `INSERT INTO observations (sensor_id, ts, type, device, ip, data) VALUES (?, ?, ?, ?, ?, ?) RETURNING id`, sid, ts, typ, device, ipStr, string(b)).Scan(&id)
+	if err != nil {
+		return err
+	}
+	key, related := "", ""
+	if device != 0 {
+		if mac, merr := g.macOf(ctx, device); merr == nil {
+			key = model.EntityID(model.KindDevice, mac)
+		}
+	}
+	if ip.IsValid() {
+		related = model.EntityID(model.KindIP, ip.String())
+	}
+	title := typ
+	if ipStr != "" {
+		title += " " + ipStr
+	}
+	return g.timeline(ctx, ts, "observation", device, key, 0, related, "", title, "observations", strconv.FormatInt(id, 10), map[string]string{"type": typ})
 }
 
 // MaxRecordSpan is the longest interval one stored flow record covers.
@@ -850,7 +890,8 @@ func (g *ingester) flowRecord(ctx context.Context, sid int64, sensor, boot strin
 			return err
 		}
 	}
-	if _, err := g.ipEntity(ctx, remote, end); err != nil {
+	remoteID, err := g.ipEntity(ctx, remote, end)
+	if err != nil {
 		return err
 	}
 
@@ -908,6 +949,18 @@ func (g *ingester) flowRecord(ctx context.Context, sid int64, sensor, boot strin
 		first, end, boolInt(f.Final), f.EndReason, f.App, f.SNI, f.ALPN, f.JA4, f.HTTPHost, f.UserAgent, qname,
 		f.BytesOut, f.BytesIn, f.PktsOut, f.PktsIn, rasn, rcc); err != nil {
 		return err
+	}
+	devKey := model.EntityID(model.KindDevice, devMAC)
+	flowTitle := firstNonEmpty(name, remote.String())
+	if !seen {
+		if err := g.timeline(ctx, first, "flow_open", dev, devKey, remoteID, model.EntityID(model.KindIP, remote.String()), "", "opened "+flowTitle, "connections", key, map[string]string{"direction": dir}); err != nil {
+			return err
+		}
+	}
+	if f.Final {
+		if err := g.timeline(ctx, end, "flow_close", dev, devKey, remoteID, model.EntityID(model.KindIP, remote.String()), "", "closed "+flowTitle, "connections", key+":close", map[string]string{"direction": dir, "reason": f.EndReason}); err != nil {
+			return err
+		}
 	}
 
 	// What the flow reveals about its endpoints. The SNI and Host name the
@@ -1121,6 +1174,15 @@ func (g *ingester) dns(ctx context.Context, sid, ts int64, d *wire.DNS) error {
 	}
 	qdom, err := g.entity(ctx, model.KindDomain, d.QName, ts, nil)
 	if err != nil {
+		return err
+	}
+	devKey := ""
+	if dev != 0 {
+		if mac, merr := g.macOf(ctx, dev); merr == nil {
+			devKey = model.EntityID(model.KindDevice, mac)
+		}
+	}
+	if err := g.timeline(ctx, ts, "dns", dev, devKey, qdom, model.EntityID(model.KindDomain, d.QName), "", d.QName, "dns", strconv.FormatInt(id, 10), map[string]string{"qtype": d.QType, "rcode": d.RCode}); err != nil {
 		return err
 	}
 	for _, a := range d.Answers {

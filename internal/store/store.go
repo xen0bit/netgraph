@@ -86,6 +86,9 @@ func (c *Config) defaults() {
 	}
 }
 
+// Now returns the store's clock. Tests set it; production uses time.Now.
+func (s *Store) Now() time.Time { return s.cfg.Now() }
+
 // Store is an open database.
 type Store struct {
 	cfg  Config

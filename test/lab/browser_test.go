@@ -246,6 +246,49 @@ func checkWebUI(t *testing.T, devtools, ui, token, shotDir string, expect []stri
 		}
 	}
 
+	// The Incidents tab must at least render, even when no one has saved one.
+	err = chromedp.Run(ctx,
+		chromedp.Click(`.tabs button[data-tab="incidents"]`, chromedp.ByQuery),
+		chromedp.WaitVisible(`#t-incidents`, chromedp.ByQuery),
+	)
+	if err != nil {
+		t.Errorf("incidents tab: %v", err)
+	}
+
+	// Flight Recorder, Ask and What-if: the three new front doors.
+	var recTime, answer, whatif string
+	err = chromedp.Run(ctx,
+		chromedp.Click(`#recorder`, chromedp.ByQuery),
+		chromedp.WaitVisible(`#recorder-bar`, chromedp.ByQuery),
+		chromedp.Text(`#rec-time`, &recTime, chromedp.ByQuery),
+		chromedp.Click(`#ask-open`, chromedp.ByQuery),
+		chromedp.WaitVisible(`#ask-q`, chromedp.ByQuery),
+		chromedp.SendKeys(`#ask-q`, "what did lab-laptop do?", chromedp.ByQuery),
+		chromedp.Click(`#ask-form button`, chromedp.ByQuery),
+		chromedp.WaitVisible(`#ask-answer b`, chromedp.ByQuery),
+		chromedp.Text(`#ask-answer`, &answer, chromedp.ByQuery),
+		chromedp.Evaluate(`document.querySelector("#ask-dialog").close()`, nil),
+		chromedp.Click(`#whatif-open`, chromedp.ByQuery),
+		chromedp.WaitVisible(`#whatif-run`, chromedp.ByQuery),
+		chromedp.Click(`#whatif-run`, chromedp.ByQuery),
+		chromedp.WaitVisible(`#whatif-result p`, chromedp.ByQuery),
+		chromedp.Text(`#whatif-result`, &whatif, chromedp.ByQuery),
+		chromedp.Evaluate(`document.querySelector("#whatif-dialog").close()`, nil),
+		shot("recorder-ask-whatif"),
+	)
+	if err != nil {
+		t.Errorf("recorder, ask, what-if: %v", err)
+	}
+	if strings.TrimSpace(recTime) == "" {
+		t.Errorf("recorder time is empty")
+	}
+	if !strings.Contains(strings.ToLower(answer), "lab-laptop") {
+		t.Errorf("ask did not find the laptop: %.300s", answer)
+	}
+	if !strings.Contains(whatif, "blocked") {
+		t.Errorf("what-if result: %.300s", whatif)
+	}
+
 	if len(consoleErrors) > 0 {
 		t.Errorf("page threw: %v", consoleErrors)
 	}

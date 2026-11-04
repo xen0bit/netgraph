@@ -10,6 +10,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -596,5 +597,98 @@ func TestTokenRotation(t *testing.T) {
 	}
 	if code := get("new"); code != http.StatusOK {
 		t.Fatalf("new token after rotation: %d", code)
+	}
+}
+
+func TestRecorderEndpoints(t *testing.T) {
+	srv, st := serve(t, nil)
+	c := apiclient.NewClient(srv.URL, "rd-tok")
+	ctx := context.Background()
+	fr, err := c.Frame(ctx, window)
+	if err != nil || fr.Summary == nil || len(fr.Devices) == 0 {
+		t.Fatalf("frame: %+v %v", fr, err)
+	}
+	if _, err := c.Story(ctx, model.EntityID(model.KindDevice, "3c:22:fb:01:02:03"), window); err != nil {
+		t.Fatalf("story: %v", err)
+	}
+	if page, err := c.Timeline(ctx, window, model.TimelineQuery{Limit: 5}); err != nil || len(page.Events) == 0 {
+		t.Fatalf("timeline: %+v %v", page, err)
+	}
+	if _, err := c.Diff(ctx, window, window, ""); err != nil {
+		t.Fatalf("diff: %v", err)
+	}
+
+	post := func(path string, body any) *http.Response {
+		t.Helper()
+		b, _ := json.Marshal(body)
+		req, _ := http.NewRequest(http.MethodPost, srv.URL+path, bytes.NewReader(b))
+		req.Header.Set("Authorization", "Bearer rd-tok")
+		req.Header.Set("Content-Type", "application/json")
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return resp
+	}
+	rep, err := st.Anomalies(ctx, window)
+	if err != nil || len(rep.Anomalies) == 0 {
+		t.Skip("no anomaly in capture")
+	}
+	a := rep.Anomalies[0]
+
+	q := url.Values{"kind": {a.Kind}, "ts": {strconv.FormatInt(a.TS, 10)}, "device": {a.Device}, "entity": {a.Entity}, "summary": {a.Summary}, "severity": {a.Severity}}
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/api/v1/autopsy?"+q.Encode(), nil)
+	req.Header.Set("Authorization", "Bearer rd-tok")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("autopsy: %v %v", err, resp)
+	}
+	var aut model.Autopsy
+	_ = json.NewDecoder(resp.Body).Decode(&aut)
+	resp.Body.Close()
+	if len(aut.Scenes) == 0 {
+		t.Fatal("empty autopsy")
+	}
+
+	resp = post("/api/v1/incidents", map[string]any{"anomaly": a, "title": "api test"})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("create incident: %s", resp.Status)
+	}
+	var inc model.Incident
+	_ = json.NewDecoder(resp.Body).Decode(&inc)
+	resp.Body.Close()
+	if inc.ID == 0 {
+		t.Fatal("incident has no id")
+	}
+	req, _ = http.NewRequest(http.MethodGet, srv.URL+"/api/v1/incidents/"+strconv.FormatInt(inc.ID, 10)+"/autopsy", nil)
+	req.Header.Set("Authorization", "Bearer rd-tok")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil || resp.StatusCode != http.StatusOK {
+		t.Fatalf("incident autopsy: %v %v", err, resp)
+	}
+	resp.Body.Close()
+
+	resp = post("/api/v1/ask", map[string]any{"q": "what did alice-iphone do?", "from": strconv.FormatInt(window.From.UnixMilli(), 10), "to": strconv.FormatInt(window.To.UnixMilli(), 10)})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("ask: %s", resp.Status)
+	}
+	var ans model.Answer
+	_ = json.NewDecoder(resp.Body).Decode(&ans)
+	resp.Body.Close()
+	if ans.Answer == "" {
+		t.Fatal("empty answer")
+	}
+
+	policy := map[string]any{"version": 1, "zones": []any{map[string]any{"name": "all", "devices": []string{"any"}}},
+		"defaults": map[string]any{"egress": "deny", "ingress": "deny", "intra_zone": "allow", "dns": "allow"}}
+	resp = post("/api/v1/whatif", map[string]any{"policy": policy, "from": strconv.FormatInt(window.From.UnixMilli(), 10), "to": strconv.FormatInt(window.To.UnixMilli(), 10)})
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("whatif: %s", resp.Status)
+	}
+	var wi model.WhatIfResult
+	_ = json.NewDecoder(resp.Body).Decode(&wi)
+	resp.Body.Close()
+	if wi.Summary.Connections == 0 {
+		t.Fatalf("whatif: %+v", wi)
 	}
 }

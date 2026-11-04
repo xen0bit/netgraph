@@ -31,6 +31,10 @@ type Backend interface {
 	WiFi(ctx context.Context, f Filter) ([]WiFiNetwork, error)
 	Anomalies(ctx context.Context, f Filter) (*AnomalyReport, error)
 	Search(ctx context.Context, q string, limit int) ([]SearchResult, error)
+	Frame(ctx context.Context, f Filter) (*Frame, error)
+	Story(ctx context.Context, id string, f Filter) (*Story, error)
+	Timeline(ctx context.Context, f Filter, q TimelineQuery) (*TimelinePage, error)
+	Diff(ctx context.Context, a, b Filter, scope string) (*Diff, error)
 }
 
 // SearchResult is an entity whose key or name matches a search: a device by
@@ -584,6 +588,251 @@ type AnomalyReport struct {
 	BaselineMS int64     `json:"baseline_ms,omitempty"`
 	Learning   bool      `json:"learning,omitempty"`
 	Anomalies  []Anomaly `json:"anomalies"`
+}
+
+// Frame is a recorded moment: a short lookback ending at AtMS, rendered as
+// the network the user would have seen then.
+type Frame struct {
+	AtMS         int64         `json:"at"`
+	FromMS       int64         `json:"from"`
+	ToMS         int64         `json:"to"`
+	LookbackMS   int64         `json:"lookback_ms"`
+	Precision    string        `json:"precision"`
+	Scope        string        `json:"scope,omitempty"`
+	Summary      *Summary      `json:"summary,omitempty"`
+	Devices      []Device      `json:"devices,omitempty"`
+	Destinations []Destination `json:"destinations,omitempty"`
+	Flows        []Flow        `json:"flows,omitempty"`
+	DNS          []DNSQuery    `json:"dns,omitempty"`
+	WiFi         []WiFiNetwork `json:"wifi,omitempty"`
+	Sensors      []Sensor      `json:"sensors,omitempty"`
+	Anomalies    []Anomaly     `json:"anomalies,omitempty"`
+	Graph        *Graph        `json:"graph,omitempty"`
+	Truncated    []string      `json:"truncated,omitempty"`
+}
+
+// TimelineQuery selects timeline entries. Cursor is opaque and replaces
+// Offset for stable paging while ingest is running.
+type TimelineQuery struct {
+	Entity string
+	Kinds  []string
+	Cursor string
+	Limit  int
+}
+
+// TimelineEntry is one rail event. Ref is "table:key", for opening the
+// authoritative record.
+type TimelineEntry struct {
+	ID       int64             `json:"id"`
+	TS       int64             `json:"ts"`
+	Kind     string            `json:"kind"`
+	Entity   string            `json:"entity,omitempty"`
+	Related  string            `json:"related,omitempty"`
+	Severity string            `json:"severity,omitempty"`
+	Title    string            `json:"title"`
+	Ref      string            `json:"ref,omitempty"`
+	Attrs    map[string]string `json:"attrs,omitempty"`
+}
+
+// TimelinePage is one page of the event rail.
+type TimelinePage struct {
+	Events    []TimelineEntry `json:"events"`
+	Next      string          `json:"next,omitempty"`
+	Precision string          `json:"precision"`
+}
+
+// EvidenceRef points at the record behind a claim, segment or scene.
+type EvidenceRef struct {
+	Kind string `json:"kind"` // timeline, flow, dns, observation, fact, anomaly, sensor, note
+	ID   string `json:"id"`
+	TS   int64  `json:"ts,omitempty"`
+	Text string `json:"text,omitempty"`
+}
+
+// StorySegment is one dated interval in an entity's story.
+type StorySegment struct {
+	Kind     string        `json:"kind"` // presence, fact relation, connection, incident
+	FromMS   int64         `json:"from"`
+	ToMS     int64         `json:"to"`
+	Entity   string        `json:"entity,omitempty"`
+	Label    string        `json:"label,omitempty"`
+	Count    int           `json:"count,omitempty"`
+	BytesOut uint64        `json:"bytes_out,omitempty"`
+	BytesIn  uint64        `json:"bytes_in,omitempty"`
+	Evidence []EvidenceRef `json:"evidence,omitempty"`
+}
+
+// Story is an entity's recorded life over a window.
+type Story struct {
+	Entity     string          `json:"entity"`
+	Label      string          `json:"label,omitempty"`
+	FromMS     int64           `json:"from"`
+	ToMS       int64           `json:"to"`
+	Segments   []StorySegment  `json:"segments"`
+	Milestones []TimelineEntry `json:"milestones,omitempty"`
+	Evidence   []EvidenceRef   `json:"evidence,omitempty"`
+	Gaps       []string        `json:"gaps,omitempty"`
+}
+
+// DiffItem is one added, removed or changed thing between two frames.
+type DiffItem struct {
+	Kind     string        `json:"kind"`
+	Key      string        `json:"key"`
+	Label    string        `json:"label,omitempty"`
+	Before   string        `json:"before,omitempty"`
+	After    string        `json:"after,omitempty"`
+	Evidence []EvidenceRef `json:"evidence,omitempty"`
+}
+
+// Diff compares two recorded moments.
+type Diff struct {
+	FromMS  int64      `json:"from"`
+	ToMS    int64      `json:"to"`
+	Added   []DiffItem `json:"added,omitempty"`
+	Removed []DiffItem `json:"removed,omitempty"`
+	Changed []DiffItem `json:"changed,omitempty"`
+	Gaps    []string   `json:"gaps,omitempty"`
+}
+
+// Camera asks the Flight Recorder where to look in a scene.
+type Camera struct {
+	Focus    string   `json:"focus,omitempty"`
+	Entities []string `json:"entities,omitempty"`
+	Layer    string   `json:"layer,omitempty"`
+}
+
+// Scene is one step of an autopsy reel.
+type Scene struct {
+	ID        string        `json:"id"`
+	AtMS      int64         `json:"at"`
+	DurMS     int64         `json:"duration,omitempty"`
+	Title     string        `json:"title"`
+	Narrative string        `json:"narrative"`
+	Camera    Camera        `json:"camera"`
+	Evidence  []EvidenceRef `json:"evidence,omitempty"`
+	Severity  string        `json:"severity,omitempty"`
+}
+
+// Autopsy is a deterministic reconstruction of an anomaly or incident.
+type Autopsy struct {
+	Anomaly   *Anomaly `json:"anomaly,omitempty"`
+	Incident  int64    `json:"incident,omitempty"`
+	FromMS    int64    `json:"from"`
+	ToMS      int64    `json:"to"`
+	Generated int64    `json:"generated"`
+	Scenes    []Scene  `json:"scenes"`
+	Entities  []string `json:"entities,omitempty"`
+	Gaps      []string `json:"gaps,omitempty"`
+}
+
+// Incident is a saved investigation. Anomalies are ephemeral; an incident
+// pins the window and evidence a person wants to keep.
+type Incident struct {
+	ID        int64    `json:"id"`
+	OpenedMS  int64    `json:"opened"`
+	UpdatedMS int64    `json:"updated"`
+	StartMS   int64    `json:"start"`
+	EndMS     int64    `json:"end"`
+	Kind      string   `json:"kind"`
+	Severity  string   `json:"severity"`
+	Status    string   `json:"status"`
+	Title     string   `json:"title"`
+	Summary   string   `json:"summary,omitempty"`
+	Entities  []string `json:"entities,omitempty"`
+}
+
+// IncidentNote is a timestamped human note on an incident.
+type IncidentNote struct {
+	ID         int64  `json:"id"`
+	IncidentID int64  `json:"incident"`
+	TS         int64  `json:"ts"`
+	Author     string `json:"author,omitempty"`
+	Body       string `json:"body"`
+}
+
+// IncidentDetail is an incident with its notes and pinned evidence.
+type IncidentDetail struct {
+	Incident
+	Notes    []IncidentNote `json:"notes,omitempty"`
+	Evidence []EvidenceRef  `json:"evidence,omitempty"`
+	Autopsy  *Autopsy       `json:"autopsy,omitempty"`
+}
+
+// Impact is one connection or lookup affected by a proposed policy.
+type Impact struct {
+	Kind        string        `json:"kind"` // connection, dns
+	Device      string        `json:"device,omitempty"`
+	DeviceName  string        `json:"device_name,omitempty"`
+	Zone        string        `json:"zone,omitempty"`
+	Destination string        `json:"destination,omitempty"`
+	Port        string        `json:"port,omitempty"`
+	Direction   string        `json:"direction,omitempty"`
+	BytesOut    uint64        `json:"bytes_out,omitempty"`
+	BytesIn     uint64        `json:"bytes_in,omitempty"`
+	Connections int           `json:"connections,omitempty"`
+	Rule        string        `json:"rule,omitempty"`
+	Reason      string        `json:"reason,omitempty"`
+	Critical    bool          `json:"critical,omitempty"`
+	Evidence    []EvidenceRef `json:"evidence,omitempty"`
+}
+
+// ImpactGroup aggregates impacts for the blast-radius tables.
+type ImpactGroup struct {
+	Key         string `json:"key"`
+	Label       string `json:"label,omitempty"`
+	Connections int    `json:"connections,omitempty"`
+	BytesOut    uint64 `json:"bytes_out,omitempty"`
+	BytesIn     uint64 `json:"bytes_in,omitempty"`
+}
+
+// WhatIfSummary is the headline result of a policy simulation.
+type WhatIfSummary struct {
+	Connections int `json:"connections"`
+	Blocked     int `json:"blocked"`
+	Essential   int `json:"essential"`
+	Unknown     int `json:"unknown"`
+	OutOfScope  int `json:"out_of_scope"`
+	Unchanged   int `json:"unchanged"`
+}
+
+// WhatIfResult is a proposed policy evaluated against observed traffic.
+type WhatIfResult struct {
+	FromMS        int64         `json:"from"`
+	ToMS          int64         `json:"to"`
+	PolicyHash    string        `json:"policy_hash,omitempty"`
+	Summary       WhatIfSummary `json:"summary"`
+	Blocked       []Impact      `json:"blocked,omitempty"`
+	Essential     []Impact      `json:"essential,omitempty"`
+	Unknown       []Impact      `json:"unknown,omitempty"`
+	ByDevice      []ImpactGroup `json:"by_device,omitempty"`
+	ByDestination []ImpactGroup `json:"by_destination,omitempty"`
+	ByRule        []ImpactGroup `json:"by_rule,omitempty"`
+	Gaps          []string      `json:"gaps,omitempty"`
+}
+
+// Claim is one factual sentence in an answer, with the records behind it.
+type Claim struct {
+	Text     string        `json:"text"`
+	Evidence []EvidenceRef `json:"evidence"`
+}
+
+// ToolCall records what an answer looked at.
+type ToolCall struct {
+	Tool string            `json:"tool"`
+	Args map[string]string `json:"args,omitempty"`
+}
+
+// Answer is a grounded response to a question. A claim without evidence is
+// never allowed to survive validation.
+type Answer struct {
+	Question   string        `json:"question"`
+	Answer     string        `json:"answer"`
+	Confidence string        `json:"confidence"`
+	Claims     []Claim       `json:"claims,omitempty"`
+	Evidence   []EvidenceRef `json:"evidence,omitempty"`
+	Plan       []ToolCall    `json:"plan,omitempty"`
+	Followups  []string      `json:"followups,omitempty"`
+	Gaps       []string      `json:"gaps,omitempty"`
 }
 
 // AnomalyMute suppresses matching findings until Until (ms). Empty Kind,

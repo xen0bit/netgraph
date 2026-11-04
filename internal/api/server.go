@@ -31,6 +31,7 @@ import (
 	"github.com/xen0bit/netgraph/internal/graph"
 	"github.com/xen0bit/netgraph/internal/graph/d2render"
 	"github.com/xen0bit/netgraph/internal/model"
+	"github.com/xen0bit/netgraph/internal/policy"
 	"github.com/xen0bit/netgraph/internal/store"
 	"github.com/xen0bit/netgraph/internal/wifi"
 	"github.com/xen0bit/netgraph/internal/wire"
@@ -136,11 +137,26 @@ func New(cfg Config) *Server {
 	read("/api/v1/anomalies", s.anomalies)
 	read("/api/v1/anomalies/mutes", s.anomalyMutes)
 	read("/api/v1/search", s.search)
+	read("/api/v1/frame", s.frame)
+	read("/api/v1/timeline", s.timeline)
+	read("/api/v1/story", s.story)
+	read("/api/v1/diff", s.diff)
+	read("/api/v1/autopsy", s.autopsyPreview)
+	read("/api/v1/incidents", s.incidents)
+	read("/api/v1/incidents/{id}", s.incident)
+	read("/api/v1/incidents/{id}/autopsy", s.incidentAutopsy)
+	read("/api/v1/incidents/{id}/export", s.exportIncident)
 	read("/api/v1/export", s.export)
 	s.mux.Handle("GET /api/v1/live", s.requireLive(http.HandlerFunc(s.live)))
 	read("/metrics", s.metrics)
 	s.mux.Handle("PUT /api/v1/devices/{mac}/label", s.requireRead(http.HandlerFunc(s.setLabel)))
 	s.mux.Handle("POST /api/v1/anomalies/mute", s.requireRead(http.HandlerFunc(s.muteAnomaly)))
+	s.mux.Handle("POST /api/v1/whatif", s.requireRead(http.HandlerFunc(s.whatif)))
+	s.mux.Handle("POST /api/v1/ask", s.requireRead(http.HandlerFunc(s.ask)))
+	s.mux.Handle("POST /api/v1/incidents", s.requireRead(http.HandlerFunc(s.createIncident)))
+	s.mux.Handle("PATCH /api/v1/incidents/{id}", s.requireRead(http.HandlerFunc(s.updateIncident)))
+	s.mux.Handle("DELETE /api/v1/incidents/{id}", s.requireRead(http.HandlerFunc(s.deleteIncident)))
+	s.mux.Handle("POST /api/v1/incidents/{id}/pin", s.requireRead(http.HandlerFunc(s.pinEvidence)))
 	s.mux.Handle("DELETE /api/v1/anomalies/mute", s.requireRead(http.HandlerFunc(s.unmuteAnomaly)))
 	s.mux.HandleFunc("GET /", s.web)
 	return s
@@ -665,6 +681,493 @@ func (s *Server) search(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, res)
+}
+
+func parseLookback(q map[string][]string, def time.Duration) (time.Duration, error) {
+	raw := ""
+	if v, ok := q["lookback"]; ok && len(v) > 0 {
+		raw = v[0]
+	}
+	if raw == "" {
+		return def, nil
+	}
+	d, err := model.ParseDuration(raw)
+	if err != nil || d <= 0 || d > 90*24*time.Hour {
+		return 0, fmt.Errorf("lookback must be a positive duration up to 90d")
+	}
+	return d, nil
+}
+
+func (s *Server) frame(w http.ResponseWriter, r *http.Request) {
+	f, ok := s.filter(w, r)
+	if !ok {
+		return
+	}
+	q := r.URL.Query()
+	lb := 5 * time.Minute
+	if q.Get("lookback") != "" {
+		var err error
+		lb, err = parseLookback(r.URL.Query(), lb)
+		if err != nil {
+			httpError(w, http.StatusBadRequest, err)
+			return
+		}
+	} else if q.Get("from") != "" || q.Get("to") != "" {
+		if d := f.To.Sub(f.From); d > 0 && d <= 90*24*time.Hour {
+			lb = d
+		}
+	}
+	if raw := q.Get("at"); raw != "" {
+		t, err := model.ParseTime(raw, s.cfg.Store.Now())
+		if err != nil {
+			httpError(w, http.StatusBadRequest, err)
+			return
+		}
+		f.To, f.From = t, t.Add(-lb)
+	} else if f.To.Sub(f.From) > 0 {
+		f.From = f.To.Add(-lb)
+	}
+	scope := q.Get("scope")
+	if scope != "" {
+		kind, key, _ := strings.Cut(scope, ":")
+		switch kind {
+		case "device":
+			f.Device = key
+		case "domain":
+			f.DomainExact = key
+		case "ip":
+			f.IP = key
+		default:
+			httpError(w, http.StatusBadRequest, fmt.Errorf("unknown scope %q", scope))
+			return
+		}
+	}
+	if q.Get("limit") == "" {
+		f.Limit = 1000
+	}
+	out, err := s.cfg.Store.Frame(r.Context(), f)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	out.Scope = scope
+	writeJSON(w, out)
+}
+
+func (s *Server) timeline(w http.ResponseWriter, r *http.Request) {
+	f, ok := s.filter(w, r)
+	if !ok {
+		return
+	}
+	q := r.URL.Query()
+	limit := 500
+	if raw := q.Get("limit"); raw != "" {
+		v, err := strconv.Atoi(raw)
+		if err != nil || v < 1 {
+			httpError(w, http.StatusBadRequest, errors.New("limit must be a positive integer"))
+			return
+		}
+		limit = min(v, 5000)
+	}
+	kinds := []string{}
+	for _, k := range strings.Split(q.Get("kinds"), ",") {
+		if k = strings.TrimSpace(k); k != "" {
+			kinds = append(kinds, k)
+		}
+	}
+	page, err := s.cfg.Store.Timeline(r.Context(), f, model.TimelineQuery{
+		Entity: q.Get("entity"), Kinds: kinds, Cursor: q.Get("cursor"), Limit: limit,
+	})
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, page)
+}
+
+func (s *Server) story(w http.ResponseWriter, r *http.Request) {
+	f, ok := s.filter(w, r)
+	if !ok {
+		return
+	}
+	id := r.URL.Query().Get("entity")
+	if id == "" {
+		httpError(w, http.StatusBadRequest, errors.New("entity is required"))
+		return
+	}
+	out, err := s.cfg.Store.Story(r.Context(), id, f)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, out)
+}
+
+func (s *Server) diff(w http.ResponseWriter, r *http.Request) {
+	f, ok := s.filter(w, r)
+	if !ok {
+		return
+	}
+	q := r.URL.Query()
+	lb, err := parseLookback(q, 5*time.Minute)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	parse := func(name string) (time.Time, bool, error) {
+		raw := q.Get(name)
+		if raw == "" {
+			return time.Time{}, false, nil
+		}
+		t, err := model.ParseTime(raw, s.cfg.Store.Now())
+		return t, true, err
+	}
+	aTo, aSet, err := parse("at_a")
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	bTo, bSet, err := parse("at_b")
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	if !aSet && !bSet {
+		aTo, bTo = f.From, f.To
+		aSet, bSet = true, true
+	}
+	if !aSet {
+		aTo = bTo
+	}
+	if !bSet {
+		bTo = aTo
+	}
+	fa, fb := f, f
+	fa.To, fa.From = aTo, aTo.Add(-lb)
+	fb.To, fb.From = bTo, bTo.Add(-lb)
+	out, err := s.cfg.Store.Diff(r.Context(), fa, fb, q.Get("scope"))
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, out)
+}
+
+func parseIncidentID(r *http.Request) (int64, error) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil || id <= 0 {
+		return 0, errors.New("incident id must be a positive integer")
+	}
+	return id, nil
+}
+
+func (s *Server) ask(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Q    string `json:"q"`
+		From string `json:"from"`
+		To   string `json:"to"`
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in); err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	now := s.cfg.Store.Now()
+	f, err := model.ParseFilter(r.URL.Query(), now)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	if in.From != "" {
+		if f.From, err = model.ParseTime(in.From, now); err != nil {
+			httpError(w, http.StatusBadRequest, err)
+			return
+		}
+	}
+	if in.To != "" {
+		if f.To, err = model.ParseTime(in.To, now); err != nil {
+			httpError(w, http.StatusBadRequest, err)
+			return
+		}
+	}
+	if f.To.IsZero() {
+		f.To = now
+	}
+	if f.From.IsZero() {
+		f.From = f.To.Add(-24 * time.Hour)
+	}
+	if !f.From.Before(f.To) {
+		httpError(w, http.StatusBadRequest, errors.New("from must be before to"))
+		return
+	}
+	out, err := s.cfg.Store.Ask(r.Context(), in.Q, f)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, out)
+}
+
+func (s *Server) whatif(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Policy json.RawMessage "json:\"policy\""
+		From   string          "json:\"from\""
+		To     string          "json:\"to\""
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in); err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	p, err := policy.Parse(bytes.NewReader(in.Policy))
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	now := s.cfg.Store.Now()
+	f, err := model.ParseFilter(r.URL.Query(), now)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	if in.From != "" {
+		if f.From, err = model.ParseTime(in.From, now); err != nil {
+			httpError(w, http.StatusBadRequest, err)
+			return
+		}
+	}
+	if in.To != "" {
+		if f.To, err = model.ParseTime(in.To, now); err != nil {
+			httpError(w, http.StatusBadRequest, err)
+			return
+		}
+	}
+	if f.To.IsZero() {
+		f.To = now
+	}
+	if f.From.IsZero() {
+		f.From = f.To.Add(-7 * 24 * time.Hour)
+	}
+	if !f.From.Before(f.To) {
+		httpError(w, http.StatusBadRequest, errors.New("from must be before to"))
+		return
+	}
+	out, err := s.cfg.Store.WhatIf(r.Context(), p, f, r.URL.Query().Get("scope"))
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, out)
+}
+
+func (s *Server) autopsyPreview(w http.ResponseWriter, r *http.Request) {
+	f, ok := s.filter(w, r)
+	if !ok {
+		return
+	}
+	q := r.URL.Query()
+	ts := f.To.UnixMilli()
+	if raw := q.Get("ts"); raw != "" {
+		t, err := model.ParseTime(raw, s.cfg.Store.Now())
+		if err != nil {
+			httpError(w, http.StatusBadRequest, err)
+			return
+		}
+		ts = t.UnixMilli()
+		if q.Get("from") == "" && q.Get("to") == "" {
+			f.From, f.To = t.Add(-10*time.Minute), t.Add(10*time.Minute)
+		}
+	}
+	a := model.Anomaly{
+		Kind: q.Get("kind"), Severity: q.Get("severity"), TS: ts,
+		Device: q.Get("device"), DeviceName: q.Get("device_name"),
+		Entity: q.Get("entity"), Summary: q.Get("summary"),
+	}
+	if a.Kind == "" {
+		httpError(w, http.StatusBadRequest, errors.New("kind is required"))
+		return
+	}
+	out, err := s.cfg.Store.Autopsy(r.Context(), a, f)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, out)
+}
+
+func (s *Server) incidents(w http.ResponseWriter, r *http.Request) {
+	limit := 200
+	if raw := r.URL.Query().Get("limit"); raw != "" {
+		v, err := strconv.Atoi(raw)
+		if err != nil || v < 1 || v > 1000 {
+			httpError(w, http.StatusBadRequest, errors.New("limit must be 1..1000"))
+			return
+		}
+		limit = v
+	}
+	out, err := s.cfg.Store.Incidents(r.Context(), r.URL.Query().Get("status"), limit)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, out)
+}
+
+func (s *Server) incident(w http.ResponseWriter, r *http.Request) {
+	id, err := parseIncidentID(r)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	out, err := s.cfg.Store.IncidentDetail(r.Context(), id)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, out)
+}
+
+func (s *Server) incidentAutopsy(w http.ResponseWriter, r *http.Request) {
+	id, err := parseIncidentID(r)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	out, err := s.cfg.Store.IncidentAutopsy(r.Context(), id)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, out)
+}
+
+func (s *Server) createIncident(w http.ResponseWriter, r *http.Request) {
+	var in struct {
+		Anomaly model.Anomaly "json:\"anomaly\""
+		Title   string        "json:\"title\""
+		From    string        "json:\"from\""
+		To      string        "json:\"to\""
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in); err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	if in.Anomaly.Kind == "" {
+		httpError(w, http.StatusBadRequest, errors.New("anomaly.kind is required"))
+		return
+	}
+	from, to := time.Time{}, time.Time{}
+	if in.From != "" {
+		var perr error
+		if from, perr = model.ParseTime(in.From, s.cfg.Store.Now()); perr != nil {
+			httpError(w, http.StatusBadRequest, perr)
+			return
+		}
+	}
+	if in.To != "" {
+		var perr error
+		if to, perr = model.ParseTime(in.To, s.cfg.Store.Now()); perr != nil {
+			httpError(w, http.StatusBadRequest, perr)
+			return
+		}
+	}
+	out, err := s.cfg.Store.CreateIncident(r.Context(), in.Anomaly, in.Title, from, to)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, out)
+}
+
+func (s *Server) updateIncident(w http.ResponseWriter, r *http.Request) {
+	id, err := parseIncidentID(r)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	var in struct {
+		Status  string "json:\"status\""
+		Title   string "json:\"title\""
+		Summary string "json:\"summary\""
+		Note    string "json:\"note\""
+		Author  string "json:\"author\""
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in); err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	out, err := s.cfg.Store.UpdateIncident(r.Context(), id, in.Status, in.Title, in.Summary, in.Note, in.Author)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, out)
+}
+
+func (s *Server) deleteIncident(w http.ResponseWriter, r *http.Request) {
+	id, err := parseIncidentID(r)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.cfg.Store.DeleteIncident(r.Context(), id); err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) pinEvidence(w http.ResponseWriter, r *http.Request) {
+	id, err := parseIncidentID(r)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	var in struct {
+		Evidence string "json:\"evidence\""
+	}
+	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in); err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := s.cfg.Store.PinEvidence(r.Context(), id, in.Evidence); err != nil {
+		s.fail(w, err)
+		return
+	}
+	out, err := s.cfg.Store.IncidentDetail(r.Context(), id)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, out)
+}
+
+func (s *Server) exportIncident(w http.ResponseWriter, r *http.Request) {
+	id, err := parseIncidentID(r)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, err)
+		return
+	}
+	d, err := s.cfg.Store.IncidentDetail(r.Context(), id)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	a, err := s.cfg.Store.IncidentAutopsy(r.Context(), id)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	bundle := map[string]any{
+		"schema": "netgraph.incident.v1", "incident": d, "autopsy": a,
+		"generated": time.Now().UTC().Format(time.RFC3339),
+	}
+	b, err := json.MarshalIndent(bundle, "", "  ")
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=netgraph-incident-%d.json", id))
+	_, _ = w.Write(b)
 }
 
 func (s *Server) graph(w http.ResponseWriter, r *http.Request) {
