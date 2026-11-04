@@ -41,6 +41,8 @@ are unix milliseconds.
 | `PATCH /api/v1/findings/{id}` | `{"status": "new"\|"seen"\|"acknowledged"\|"resolved", "note": "..."}` (`204`). JSON required. Read token |
 | `POST /api/v1/findings/{id}/fine` | `{"note": "..."}`: dismisses it and mutes its kind, device and entity with no practical end (`204`). JSON required. Read token |
 | `POST /api/v1/findings/seen` | Marks every new finding seen (`204`). JSON required. Read token |
+| `GET /api/v1/notify` | `{channels: [{name, min, kinds, quiet}]}`: where alerts go, with no secrets |
+| `POST /api/v1/notify/test` | `{"name": "..."}`: sends a test, past filters and quiet hours. `{ok, error}`, or `404` for no such channel. JSON required. Read token |
 | `GET /api/v1/summary` | `{devices, flows, inbound, peak_connections, dns_queries, domains, remote_ips, bytes_out, bytes_in, precision, ...}`; bytes are what devices here sent and received |
 | `GET /api/v1/devices` | `[{id, mac, label, user_label, auto_label, vendor, vendor_short, randomized, role, ips, hostnames, services, serves, fingerprints, user_agents, flows, inbound, dns_queries, bytes_out, bytes_in, remotes, active_from, active_to, first_seen, last_seen, type, type_confidence, user_type, owner, groups, same_as}]`; `device=` also takes `type:printer`, `owner:alice` or `group:iot`; `serves` lists the ports clients connected to (`443/tcp`), `inbound` how many connections came in from outside |
 | `GET /api/v1/destinations` | `[{key, kind, label, connections, devices, bytes_out, bytes_in, first_seen, last_seen, ports, remote_ips}]`: remote ends aggregated by name, or by address when no name is known, busiest first. One name with several addresses is one row; `ports` is `443/tcp` style and `remote_ips` lists the addresses. Uses the window and filters. |

@@ -21,6 +21,7 @@ import (
 	"github.com/xen0bit/netgraph/internal/api"
 	"github.com/xen0bit/netgraph/internal/asn"
 	"github.com/xen0bit/netgraph/internal/buildinfo"
+	"github.com/xen0bit/netgraph/internal/hass"
 	"github.com/xen0bit/netgraph/internal/model"
 	"github.com/xen0bit/netgraph/internal/store"
 	"github.com/xen0bit/netgraph/internal/wifi"
@@ -39,6 +40,8 @@ func runServe(args []string) error {
 	wifiKeyFile := fs.String("wifi-key-file", envOr("NETGRAPH_WIFI_KEY_FILE", etcCredential("wifi.keys")), "WPA/WPA2 passphrases, PMKs and WEP keys served to sensors for Wi-Fi decryption; $NETGRAPH_WIFI_KEY_FILE; under the systemd unit, /etc/netgraph/wifi.keys")
 	alertURL := fs.String("alert-webhook", envOr("NETGRAPH_ALERT_WEBHOOK", ""), "POST a JSON alert here when a new device joins the network; $NETGRAPH_ALERT_WEBHOOK")
 	alertLearn := fs.String("alert-learn", "24h", "after the first sensor connects, learn the network this long before alerting on new devices")
+	notifyFile := fs.String("notify-file", "", "file of notification channels, one URL a line: ntfy://, gotify://, telegram://, smtp://, https://; or $NETGRAPH_NOTIFY")
+	mqttFile := fs.String("mqtt-file", "", "file holding an MQTT broker's URL, to publish to Home Assistant: mqtt://user:pass@host:1883/prefix; or $NETGRAPH_MQTT")
 	alertAnomalies := fs.String("alert-anomalies", "", "also POST anomalies at or above this severity: low, medium or high (default off)")
 	alertKinds := fs.String("alert-anomaly-kinds", "", "comma-separated anomaly kinds to alert on (default: all kinds at the chosen severity)")
 	reportEvery := fs.String("report-every", envOr("NETGRAPH_REPORT_EVERY", ""), "POST a summary report at this interval, e.g. 24h (needs -alert-webhook); $NETGRAPH_REPORT_EVERY")
@@ -117,15 +120,23 @@ func runServe(args []string) error {
 		}
 	}
 	if reportD > 0 && *alertURL == "" {
-		return errors.New("-report-every needs -alert-webhook")
+		return errors.New("-report-every needs -alert-webhook or -notify-file")
 	}
 	var notifier *alert.Notifier
 	var onNew func(store.NewDevice)
 	if *alertAnomalies != "" && model.SeverityRank(*alertAnomalies) == 0 {
 		return fmt.Errorf("-alert-anomalies: want low, medium or high")
 	}
-	if *alertAnomalies != "" && *alertURL == "" {
-		return errors.New("-alert-anomalies needs -alert-webhook")
+	routes, err := readChannels(*notifyFile)
+	if err != nil {
+		return err
+	}
+	if *alertAnomalies != "" && *alertURL == "" && len(routes) == 0 {
+		return errors.New("-alert-anomalies needs -alert-webhook or -notify-file")
+	}
+	bridge, err := readBridge(*mqttFile, log)
+	if err != nil {
+		return err
 	}
 	if *trimRollups && *maxDB <= 0 {
 		return errors.New("-trim-rollups needs -max-db-mb")
@@ -133,9 +144,11 @@ func runServe(args []string) error {
 	if *maxDB < 0 {
 		return errors.New("-max-db-mb must not be negative")
 	}
-	if *alertURL != "" {
-		if u, err := url.Parse(*alertURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-			return fmt.Errorf("-alert-webhook: want an http(s) URL")
+	if *alertURL != "" || len(routes) > 0 {
+		if *alertURL != "" {
+			if u, err := url.Parse(*alertURL); err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+				return fmt.Errorf("-alert-webhook: want an http(s) URL")
+			}
 		}
 		var kinds []string
 		for _, k := range strings.Split(*alertKinds, ",") {
@@ -143,7 +156,7 @@ func runServe(args []string) error {
 				kinds = append(kinds, k)
 			}
 		}
-		notifier = alert.New(alert.Config{URL: *alertURL, Learn: learnD, AnomalyMin: *alertAnomalies, AnomalyKinds: kinds, Logger: log})
+		notifier = alert.New(alert.Config{URL: *alertURL, Learn: learnD, AnomalyMin: *alertAnomalies, AnomalyKinds: kinds, Routes: routes, Logger: log})
 		onNew = notifier.Notify
 	}
 	// The ASN table: a file given (reloaded when it changes), else the one
@@ -181,6 +194,9 @@ func runServe(args []string) error {
 	defer st.Close()
 
 	cfg := api.Config{Store: st, IngestToken: ingestTok, ReadToken: readTok, WiFi: wifiKeys, Web: web.FS, Logger: log}
+	if notifier != nil { // not a nil pointer in an interface
+		cfg.Notify = notifier
+	}
 	if notifier != nil {
 		cfg.Alerts = notifier.Stats
 	}
@@ -210,7 +226,14 @@ func runServe(args []string) error {
 	if notifier != nil && *alertAnomalies != "" {
 		anomalyAlerts = notifier
 	}
-	go scanFindings(ctx, st, anomalyAlerts, log)
+	if bridge != nil {
+		b := hass.New(*bridge, st)
+		go b.Run(ctx)
+		go scanFindings(ctx, st, anomalyAlerts, b, log)
+		log.Info("publishing to Home Assistant over MQTT", "addr", bridge.Options.Addr)
+	} else {
+		go scanFindings(ctx, st, anomalyAlerts, nil, log)
+	}
 	if notifier != nil {
 		notifier.SetSince(st.FirstSensorSeen)
 		go notifier.Run(ctx)
@@ -364,7 +387,7 @@ func reportLoop(ctx context.Context, st *store.Store, n *alert.Notifier, every t
 // scanFindings records what the checks find, now and every five minutes, so that a
 // finding has a history whether or not anyone is looking. Alerts follow from it: a
 // finding pages when it's new and when it comes back, not while it simply continues.
-func scanFindings(ctx context.Context, st *store.Store, n *alert.Notifier, log *slog.Logger) {
+func scanFindings(ctx context.Context, st *store.Store, n *alert.Notifier, b *hass.Bridge, log *slog.Logger) {
 	scan := func() {
 		events, err := st.ScanFindings(ctx)
 		if err != nil {
@@ -373,12 +396,7 @@ func scanFindings(ctx context.Context, st *store.Store, n *alert.Notifier, log *
 			}
 			return
 		}
-		if n == nil {
-			return
-		}
-		for _, e := range events {
-			n.NotifyAnomaly(e.Finding.Anomaly)
-		}
+		announceFindings(events, n, b)
 	}
 	scan()
 	t := time.NewTicker(5 * time.Minute)
@@ -391,6 +409,72 @@ func scanFindings(ctx context.Context, st *store.Store, n *alert.Notifier, log *
 			scan()
 		}
 	}
+}
+
+// announceFindings tells whoever's listening what a scan changed.
+func announceFindings(events []store.FindingEvent, n *alert.Notifier, b *hass.Bridge) {
+	for _, e := range events {
+		if n != nil {
+			n.NotifyAnomaly(e.Finding.Anomaly)
+		}
+		if b != nil {
+			b.Finding(e.Type, e.Finding)
+		}
+	}
+}
+
+// readChannels reads notification channels from a file or the environment, one URL
+// a line. They hold tokens, so they don't belong in flags, which ps shows, and the
+// errors say which line and never what's on it.
+func readChannels(file string) ([]alert.Route, error) {
+	text := os.Getenv("NETGRAPH_NOTIFY")
+	where := "$NETGRAPH_NOTIFY"
+	if file != "" {
+		b, err := os.ReadFile(file)
+		if err != nil {
+			return nil, fmt.Errorf("-notify-file: %w", err)
+		}
+		text, where = string(b), "-notify-file"
+	}
+	var routes []alert.Route
+	for i, line := range strings.Split(text, "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		r, err := alert.ParseChannel(line, nil)
+		if err != nil {
+			return nil, fmt.Errorf("%s, line %d: %w", where, i+1, err)
+		}
+		routes = append(routes, r)
+	}
+	return routes, nil
+}
+
+// readBridge reads the MQTT broker's URL from a file or the environment; it holds a
+// password, as above. Nil means Home Assistant isn't wanted.
+func readBridge(file string, log *slog.Logger) (*hass.Config, error) {
+	raw := os.Getenv("NETGRAPH_MQTT")
+	if file != "" {
+		b, err := os.ReadFile(file)
+		if err != nil {
+			return nil, fmt.Errorf("-mqtt-file: %w", err)
+		}
+		raw = string(b)
+	}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	c, err := hass.ParseURL(raw)
+	if err != nil {
+		return nil, fmt.Errorf("mqtt: %w", err)
+	}
+	c.Logger = log
+	if c.Options.Password != "" && c.Options.TLS == nil {
+		log.Warn("the MQTT password will cross the network in the clear; use mqtts:// unless the broker is on this machine")
+	}
+	return &c, nil
 }
 
 // reloadTokens re-reads the token files on SIGHUP. A failed read keeps the

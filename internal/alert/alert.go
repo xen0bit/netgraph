@@ -1,19 +1,18 @@
-// Package alert posts new-device notifications to a webhook.
+// Package alert delivers notifications: to a webhook, and to ntfy, Gotify, Telegram
+// and email (channels.go).
 //
-// The payload is JSON that common receivers understand without glue: Slack
+// The webhook's payload is JSON that common receivers understand without glue: Slack
 // and Mattermost read "text", Discord reads "content", and anything else can
 // use the structured "device" object. Delivery is asynchronous and bounded:
 // the ingest path only enqueues, a full queue drops (and logs) rather than
-// blocking, and each post is retried a few times with backoff.
+// blocking, and each channel retries a few times with backoff, on its own, so one
+// that's down doesn't hold up the others.
 package alert
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"log/slog"
 	"net/http"
 	"slices"
@@ -31,6 +30,8 @@ import (
 type Config struct {
 	// URL receives a POST per new device.
 	URL string
+	// Routes are further channels, each with what should reach it.
+	Routes []Route
 	// Learn suppresses alerts until this long after the network was first
 	// seen (Since), so a fresh install does not report every device in the
 	// house. Zero alerts from the start.
@@ -82,6 +83,9 @@ type Notifier struct {
 	mu       sync.Mutex
 	cooldown map[string]time.Time // anomaly key -> last posted
 
+	routes []*routeWorker
+	now    func() time.Time // tests
+
 	sent, failed, dropped, learning atomic.Uint64
 }
 
@@ -109,9 +113,119 @@ func New(cfg Config) *Notifier {
 	if cfg.AnomalyCooldown <= 0 {
 		cfg.AnomalyCooldown = time.Hour
 	}
-	return &Notifier{cfg: cfg, log: cfg.Logger, queue: make(chan notice, cfg.Queue),
-		cooldown: map[string]time.Time{}, backoff: time.Second}
+	n := &Notifier{cfg: cfg, log: cfg.Logger, queue: make(chan notice, cfg.Queue),
+		cooldown: map[string]time.Time{}, backoff: time.Second, now: time.Now}
+	routes := cfg.Routes
+	if cfg.URL != "" {
+		routes = append([]Route{{Channel: &webhookChannel{url: cfg.URL, client: cfg.Client, name: "webhook"}}}, routes...)
+	}
+	for _, r := range routes {
+		n.routes = append(n.routes, &routeWorker{Route: r, n: n, in: make(chan work, cfg.Queue)})
+	}
+	return n
 }
+
+// work is one message for one route. urgent goes through quiet hours.
+type work struct {
+	p      Payload
+	what   string
+	detail string
+	urgent bool
+}
+
+// routeWorker delivers to one channel, so a dead one holds up only itself.
+type routeWorker struct {
+	Route
+	n       *Notifier
+	in      chan work
+	held    []Payload
+	dropped int
+}
+
+func (w *routeWorker) run(ctx context.Context) {
+	tick := time.NewTicker(time.Minute)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case m := <-w.in:
+			if w.Quiet != nil && !m.urgent && w.Quiet.In(w.n.now()) {
+				if len(w.held) < maxHeld {
+					w.held = append(w.held, m.p)
+				} else {
+					w.dropped++
+				}
+				continue
+			}
+			w.flush(ctx)
+			w.n.deliver(ctx, w.Channel, m.p, m.what, m.detail)
+		case <-tick.C:
+			w.flush(ctx)
+		}
+	}
+}
+
+// flush sends what piled up, once quiet hours are over.
+func (w *routeWorker) flush(ctx context.Context) {
+	if len(w.held) == 0 || (w.Quiet != nil && w.Quiet.In(w.n.now())) {
+		return
+	}
+	p := heldDigest(w.held, w.dropped)
+	w.held, w.dropped = nil, 0
+	w.n.deliver(ctx, w.Channel, p, "quiet hours digest", "")
+}
+
+// dispatch hands a message to every route that wants it.
+func (n *Notifier) dispatch(p Payload, a *model.Anomaly, what, detail string) {
+	urgent := a != nil && a.Severity == model.SeverityHigh
+	for _, w := range n.routes {
+		if !w.wants(a) {
+			continue
+		}
+		select {
+		case w.in <- work{p, what, detail, urgent}:
+		default:
+			n.dropped.Add(1)
+			n.log.Warn("alert channel queue full; dropping", "channel", w.Name(), "event", what)
+		}
+	}
+}
+
+// ChannelInfo is what a person can be told about a channel: no secrets.
+type ChannelInfo struct {
+	Name  string   `json:"name"`
+	Min   string   `json:"min,omitempty"`
+	Kinds []string `json:"kinds,omitempty"`
+	Quiet string   `json:"quiet,omitempty"`
+}
+
+// Channels lists where alerts go.
+func (n *Notifier) Channels() []ChannelInfo {
+	out := make([]ChannelInfo, 0, len(n.routes))
+	for _, w := range n.routes {
+		c := ChannelInfo{Name: w.Name(), Min: w.Min, Kinds: w.Kinds}
+		if w.Quiet != nil {
+			c.Quiet = w.Quiet.String()
+		}
+		out = append(out, c)
+	}
+	return out
+}
+
+// Test sends a message straight to a channel, past its filters and quiet hours, and
+// says what happened. One attempt: a person is waiting.
+func (n *Notifier) Test(ctx context.Context, name string) error {
+	for _, w := range n.routes {
+		if w.Name() == name {
+			return w.Send(ctx, NewReportPayload("A test from netgraph: this channel works."))
+		}
+	}
+	return ErrNoChannel
+}
+
+// ErrNoChannel is Test's answer for a name it doesn't know.
+var ErrNoChannel = errors.New("no such channel")
 
 // SetSince sets Config.Since, for when the store is opened after the
 // notifier is created (the store's callback is the notifier). Call it
@@ -177,6 +291,9 @@ func (n *Notifier) NotifyAnomaly(a model.Anomaly) {
 
 // Run delivers alerts until ctx ends.
 func (n *Notifier) Run(ctx context.Context) {
+	for _, w := range n.routes {
+		go w.run(ctx)
+	}
 	for {
 		select {
 		case <-ctx.Done():
@@ -190,11 +307,11 @@ func (n *Notifier) Run(ctx context.Context) {
 					n.log.Debug("new device during learning period; not alerting", "mac", m.device.MAC, "label", m.device.Label)
 					continue
 				}
-				n.deliver(ctx, NewPayload(*m.device), "new device", m.device.MAC)
+				n.dispatch(NewPayload(*m.device), nil, "new device", m.device.MAC)
 			case m.anomaly != nil:
-				n.deliver(ctx, NewAnomalyPayload(*m.anomaly), "anomaly", m.anomaly.Summary)
+				n.dispatch(NewAnomalyPayload(*m.anomaly), m.anomaly, "anomaly", m.anomaly.Summary)
 			case m.report != "":
-				n.deliver(ctx, NewReportPayload(m.report), "report", m.report)
+				n.dispatch(NewReportPayload(m.report), nil, "report", m.report)
 			}
 		}
 	}
@@ -211,22 +328,18 @@ func (n *Notifier) inLearning(ctx context.Context, ts time.Time) bool {
 	return ts.Before(since.Add(n.cfg.Learn))
 }
 
-func (n *Notifier) deliver(ctx context.Context, p Payload, what, detail string) {
-	body, err := json.Marshal(p)
-	if err != nil {
-		return
-	}
+func (n *Notifier) deliver(ctx context.Context, c Channel, p Payload, what, detail string) {
 	backoff := n.backoff
 	for attempt := 1; ; attempt++ {
-		err := n.post(ctx, body)
+		err := c.Send(ctx, p)
 		if err == nil {
 			n.sent.Add(1)
-			n.log.Info("sent alert", "event", p.Event, "detail", detail)
+			n.log.Info("sent alert", "channel", c.Name(), "event", p.Event, "detail", detail)
 			return
 		}
 		if errors.Is(err, errPermanent) || attempt == 4 || ctx.Err() != nil {
 			n.failed.Add(1)
-			n.log.Warn("alert not delivered", "event", what, "detail", detail, "err", err)
+			n.log.Warn("alert not delivered", "channel", c.Name(), "event", what, "detail", detail, "err", err)
 			return
 		}
 		select {
@@ -236,28 +349,6 @@ func (n *Notifier) deliver(ctx context.Context, p Payload, what, detail string) 
 		}
 		backoff *= 4
 	}
-}
-
-func (n *Notifier) post(ctx context.Context, body []byte) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, n.cfg.URL, bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	resp, err := n.cfg.Client.Do(req)
-	if err != nil {
-		return err
-	}
-	io.Copy(io.Discard, io.LimitReader(resp.Body, 4096))
-	resp.Body.Close()
-	if resp.StatusCode/100 == 2 {
-		return nil
-	}
-	if resp.StatusCode == http.StatusRequestTimeout || resp.StatusCode == http.StatusTooManyRequests ||
-		resp.StatusCode/100 == 5 {
-		return fmt.Errorf("webhook: %s", resp.Status)
-	}
-	return fmt.Errorf("webhook: %s: %w", resp.Status, errPermanent)
 }
 
 var errPermanent = errors.New("permanent webhook failure")

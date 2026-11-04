@@ -58,6 +58,8 @@ netgraph serve -db /var/lib/netgraph/netgraph.db -listen :8443
 | `-exact-max` | `48h` | longer windows are answered from hourly rollups |
 | `-fact-gap` | `1h` | silence after which a relationship starts a new period |
 | `-asn-file` | `$NETGRAPH_ASN_FILE`; release builds: built in | an ASN table: the network and country of remote addresses ([networks](#networks-and-countries)); `none` for no table |
+| `-notify-file` | `$NETGRAPH_NOTIFY` | notification channels, one URL a line: see [Notifications](#notifications) |
+| `-mqtt-file` | `$NETGRAPH_MQTT` | publish to Home Assistant: see [Home Assistant](#home-assistant) |
 | `-alert-webhook` | `$NETGRAPH_ALERT_WEBHOOK` | POST a JSON alert when a new device joins, and optionally for anomalies and scheduled reports ([alerts](#new-device-alerts)) |
 | `-report-every` | off | with `-alert-webhook`, POST a summary report every interval, for example `24h` |
 | `-alert-learn` | `24h` | learn the network this long after the first sensor connects before alerting on new devices |
@@ -155,6 +157,53 @@ are looked up when it loads; `netgraph db enrich` does the same for a
 database offline, with the built-in table or `-asn-file`. The networks'
 names are kept in the database, so `netgraph query` reading the file shows
 them without the table.
+
+### Notifications
+
+Put channels in a file, one URL a line, and pass `-notify-file` (or set
+`$NETGRAPH_NOTIFY`). They hold tokens, which is why they aren't flags. A channel
+that's down holds up only itself.
+
+```
+ntfy://ntfy.sh/my-network?token=tk_abc          # ntfy+http:// for no TLS
+gotify://gotify.lan/?token=AbCdEf&min=medium    # gotify+http:// for no TLS
+telegram://123456:BOT-TOKEN@987654321?min=high  # the number is the chat
+smtp://me:password@mail.example.com:587/?from=net@example.com&to=me@example.com
+https://hooks.example.com/netgraph
+```
+
+Each takes `min=low|medium|high`, `kinds=scan,rogue_dhcp` and
+`quiet=22:00-07:00`, in the server's time. In quiet hours only high severity goes
+through; the rest arrive as one summary afterwards, up to 50 lines and a count of
+the others. New devices and reports count as normal severity for this.
+
+New devices always notify. Findings also need `-alert-anomalies low` (or higher), a
+floor for every channel, and they notify when new and when they come back, not while
+they continue. For a daily digest, use `-report-every 24h`. Settings lists the
+channels, with a button to send each a test.
+
+Email won't send a password to a server that doesn't offer TLS, unless it's on
+this machine.
+
+### Home Assistant
+
+Put the broker's URL in a file and pass `-mqtt-file` (or set `$NETGRAPH_MQTT`):
+
+```
+mqtt://user:password@broker.lan:1883/netgraph
+mqtts://user:password@broker.lan/netgraph?devices=all
+```
+
+With Home Assistant's MQTT integration, entities appear by themselves through
+discovery: a presence tracker per device, a count of open findings, and an event for
+each new or returning finding. A device is home if it moved traffic in the last 10
+minutes, so a phone asleep on the network reads as away.
+
+It sends names and presence to the broker, so it's off until you ask. By default
+only devices you named or gave an owner are published; `devices=all` publishes
+everything, including every private MAC. A device that's forgotten or loses its name
+is taken back while the server runs. Anything published before a restart, and since
+removed, stays in the broker until you clear it.
 
 ### New-device alerts
 
