@@ -10,6 +10,7 @@ import { passportHTML } from "./passport.js";
 import { Privacy } from "./privacy.js";
 import { findingsHTML, findingDetail } from "./findings.js";
 import { airspaceHTML } from "./airspace.js";
+import { emptyPolicy, loadDraft, saveDraft, addEdge, policyHTML, impactHTML, readRule } from "./policy.js";
 import { sensorStatus, sensorDetail, fleetSettingsHTML, readSettings } from "./fleet.js";
 import { typeBadge, typeWhy, profileForm, presenceHTML, linksHTML, qualityHTML } from "./devices.js";
 import { Pulse } from "./pulse.js";
@@ -60,7 +61,7 @@ const areas = {
   map: { tabs: [["graph", "Map"]] },
   devices: { tabs: [["devices", "Devices"], ["presence", "Presence"], ["links", "To confirm"], ["passport", "Passport"]] },
   activity: { tabs: [["flows", "Connections"], ["destinations", "Destinations"], ["dns", "DNS"], ["facts", "Facts"], ["pulse", "Pulse"], ["quality", "Internet"]] },
-  findings: { tabs: [["findings", "Inbox"], ["anomalies", "This window"], ["incidents", "Incidents"], ["insights", "Insights"]], tools: `<button id="whatif-open" type="button" title="Test a proposed policy against observed traffic">What-if</button>` },
+  findings: { tabs: [["findings", "Inbox"], ["anomalies", "This window"], ["incidents", "Incidents"], ["insights", "Insights"], ["policy", "Policy"]], tools: `<button id="whatif-open" type="button" title="Test a proposed policy against observed traffic">What-if</button>` },
   wifi: { tabs: [["wifi", "Networks"], ["airspace", "Airspace"]] },
   settings: { tabs: [["settings", "General"], ["sensors", "Sensors"]] },
 };
@@ -782,6 +783,7 @@ async function renderTab(seq) {
     if (t === "settings") return renderSettings();
     if (t === "passport") return await renderPassport(seq);
     if (t === "findings") return await renderFindings(seq);
+    if (t === "policy") return await renderPolicy(seq);
     if (t === "airspace") {
       const a = await track(api("airspace"));
       if (seq === refreshSeq) $("#airspace-body").innerHTML = airspaceHTML(a);
@@ -1559,7 +1561,7 @@ function openEdge(e) {
     e.count ? `${e.count} ${e.rel === "connects" ? "connections" : "times"}${e.peak ? `, peak ${e.peak} open` : ""}` : "",
   ].filter(Boolean).map((s) => `<div class="muted">${esc(s)}</div>`).join("");
   body.innerHTML = `<h2>${esc(name(e.from))} → ${esc(name(e.to))}</h2>${stats}
-    <p><a data-filter="${esc(filter)}">Filter the window to these</a>${e.rel === "connects" ? ` · <a data-whatif="1">What if this were blocked?</a>` : ""}</p>
+    <p><a data-filter="${esc(filter)}">Filter the window to these</a>${e.rel === "connects" ? ` · <a data-whatif="1">What if this were blocked?</a> · In the policy: <a data-policy="allow">Allow</a> or <a data-policy="deny">Deny</a>` : ""}</p>
     <div id="edge-rows"><p class="muted">Loading…</p></div>`;
   body.onclick = (ev) => {
     const a = ev.target.closest("a");
@@ -1567,6 +1569,7 @@ function openEdge(e) {
     if (a.dataset.id) openEntity(a.dataset.id);
     if (a.dataset.filter) applyFilter(a.dataset.filter);
     if (a.dataset.whatif) openWhatIf(blockPolicy(e));
+    if (a.dataset.policy) addEdgeToPolicy(e, a.dataset.policy);
   };
   const q = {};
   for (const id of [e.from, e.to]) {
@@ -1645,7 +1648,10 @@ function openMapMenu(target, x, y) {
     items.push(["Show its connections", () => openEdge(e)]);
     const f = [filterTerm(e.from), filterTerm(e.to)].filter(Boolean).join(" ");
     if (f) items.push(["Filter to these", () => applyFilter(f)]);
-    if (e.rel === "connects") items.push(["What if this were blocked?", () => openWhatIf(blockPolicy(e))]);
+    if (e.rel === "connects") {
+      items.push(["What if this were blocked?", () => openWhatIf(blockPolicy(e))]);
+      items.push(["Allow in the policy", () => addEdgeToPolicy(e, "allow")], ["Deny in the policy", () => addEdgeToPolicy(e, "deny")]);
+    }
   } else {
     items.push(["Fit to view", () => diagram.fit()], ["Re-arrange", () => diagram.rearrange()]);
   }
@@ -2138,15 +2144,134 @@ async function runWhatIf() {
     const r = await send("POST", "whatif", { policy, from: String(state.to - state.span), to: String(state.to) });
     const s = r.summary || {};
     status.textContent = `${s.connections || 0} connections evaluated`;
-    const impact = (x) => `<li><b>${esc(x.device_name || "unknown device")}</b> → ${esc(x.destination || "?")} <span class="mono">${esc(x.port || "")}</span> <span class="muted">${esc(x.reason || "")}${x.rule ? ` (${esc(x.rule)})` : ""}</span></li>`;
-    box.innerHTML = `<p><b>${s.blocked || 0}</b> blocked (<b>${s.essential || 0}</b> essential), <b>${s.lookups || 0}</b> lookups blocked, <b>${s.unknown || 0}</b> unknown, <b>${s.unchanged || 0}</b> unchanged.</p>
-      ${(r.essential || []).length ? `<h3>Essential dependencies</h3><ul>${r.essential.map(impact).join("")}</ul>` : ""}
-      ${(r.blocked || []).length ? `<h3>Would be blocked</h3><ul>${r.blocked.slice(0, 100).map(impact).join("")}</ul>` : ""}
-      ${(r.unknown || []).length ? `<h3>Unknown</h3><ul>${r.unknown.slice(0, 50).map(impact).join("")}</ul>` : ""}
-      ${(r.gaps || []).map((g) => `<p class="muted">gap: ${esc(g)}</p>`).join("")}`;
+    box.innerHTML = impactHTML(r);
   } catch (e) {
     status.textContent = e.message;
   }
+}
+
+// --- policy --------------------------------------------------------------------------
+
+let policyDraft = null;
+const draft = () => (policyDraft ??= loadDraft(store));
+const windowBody = () => ({ from: String(state.to - state.span), to: String(state.to) });
+
+// An edge's two ends have names on the map; the rule's name says them.
+async function addEdgeToPolicy(e, action) {
+  const name = (id) => state.graph?.nodes?.find((n) => n.id === id)?.label || id;
+  if (!addEdge(draft(), e, action, name)) {
+    setStatus(`A rule can't name ${name(e.from)} or ${name(e.to)}: open Findings, Policy to write one by hand.`, true);
+    return;
+  }
+  saveDraft(store, draft());
+  try {
+    const r = await send("POST", "whatif", { policy: draft(), ...windowBody() });
+    const s = r.summary || {};
+    setStatus(`${action === "deny" ? "Denied" : "Allowed"} in the policy: it would stop ${s.blocked || 0} connections here, ${s.essential || 0} essential. See Findings, Policy.`);
+  } catch (err) { setStatus(err.message, true); }
+  if (state.tab === "policy") refresh();
+}
+
+let policyRun = 0;
+async function simulatePolicy() {
+  const box = $("#policy-impact");
+  if (!box) return;
+  const run = ++policyRun;
+  box.textContent = "Working it out…";
+  try {
+    const r = await send("POST", "whatif", { policy: draft(), ...windowBody() });
+    if (run === policyRun) box.innerHTML = impactHTML(r);
+  } catch (err) {
+    // A half-typed rule is the usual cause: say what's wrong, and wait for the next edit.
+    if (run === policyRun) box.textContent = err.message;
+  }
+}
+
+function policyChanged({ redraw = false } = {}) {
+  saveDraft(store, draft());
+  if (!redraw) policyDrawn = JSON.stringify(draft());
+  $("#policy-config").hidden = true;
+  $("#policy-warnings").innerHTML = "";
+  $("[data-policy-download]").hidden = true;
+  if (redraw) drawPolicy(policyDevices);
+  else simulatePolicy();
+}
+
+let policyDevices = [];
+let policyDrawn = "";
+function drawPolicy(devices) {
+  $("#policy-body").innerHTML = policyHTML(draft(), devices);
+  policyDrawn = JSON.stringify(draft());
+  simulatePolicy();
+}
+
+// A refresh, or Live ticking, mustn't redraw under someone typing or wipe an export. If the
+// draft is what's on screen, only the simulation needs doing again.
+async function renderPolicy(seq) {
+  if (policyDrawn === JSON.stringify(draft()) && $("#policy-body").firstChild) {
+    simulatePolicy();
+    return;
+  }
+  const devices = await track(api("devices"));
+  if (seq !== refreshSeq) return;
+  policyDevices = devices;
+  drawPolicy(devices);
+}
+
+function wirePolicy() {
+  const body = $("#policy-body");
+  body.addEventListener("change", (e) => {
+    const p = draft();
+    const tr = e.target.closest("tr[data-rule]");
+    if (tr) { p.rules[Number(tr.dataset.rule)] = readRule(tr); policyChanged(); return; }
+    const key = e.target.dataset.p;
+    if (key && key in p.defaults) { p.defaults[key] = e.target.value; policyChanged(); }
+  });
+  body.addEventListener("click", async (e) => {
+    const p = draft();
+    const tr = e.target.closest("tr[data-rule]");
+    const i = tr ? Number(tr.dataset.rule) : -1;
+    const swap = (a, b) => { [p.rules[a], p.rules[b]] = [p.rules[b], p.rules[a]]; policyChanged({ redraw: true }); };
+    if (e.target.closest("[data-rule-del]")) { p.rules.splice(i, 1); policyChanged({ redraw: true }); return; }
+    if (e.target.closest("[data-rule-up]")) { swap(i, i - 1); return; }
+    if (e.target.closest("[data-rule-down]")) { swap(i, i + 1); return; }
+    if (e.target.closest("[data-rule-add]")) {
+      p.rules.push({ name: "new rule", from: "any", to: "any", ports: [], action: "deny" });
+      policyChanged({ redraw: true });
+      return;
+    }
+    if (e.target.closest("[data-policy-clear]")) {
+      policyDraft = emptyPolicy();
+      policyChanged({ redraw: true });
+      return;
+    }
+    if (e.target.closest("[data-policy-export]")) {
+      const warnings = $("#policy-warnings"), out = $("#policy-config");
+      warnings.textContent = "Writing it…";
+      try {
+        const x = await send("POST", "policy/export", { policy: p, format: $('[data-p="format"]').value, ...windowBody() });
+        warnings.innerHTML = (x.warnings || []).map((w) => `<p class="${/NOT DENIED|MISSING/.test(w) ? "err" : "muted"}">${esc(w)}</p>`).join("");
+        out.value = x.config;
+        out.hidden = false;
+        const dl = $("[data-policy-download]");
+        dl.hidden = false;
+        dl.onclick = () => download(x.filename, x.config, "text/plain");
+      } catch (err) { warnings.textContent = err.message; }
+    }
+  });
+  body.addEventListener("submit", async (e) => {
+    if (e.target.id !== "policy-learn") return;
+    e.preventDefault();
+    const device = new FormData(e.target).get("device");
+    const gaps = $("#policy-gaps");
+    gaps.textContent = "Reading what it did…";
+    try {
+      const l = await track(api("policy/learn", new URLSearchParams({ device })));
+      policyDraft = { ...emptyPolicy(), ...l.policy };
+      policyChanged({ redraw: true });
+      $("#policy-gaps").innerHTML = `<p>From ${l.connections} connections: ${l.policy.rules.length} rules.</p>${(l.gaps || []).map((g) => `<p class="muted">${esc(g)}</p>`).join("")}`;
+    } catch (err) { gaps.textContent = err.message; }
+  });
 }
 
 // --- ask -----------------------------------------------------------------------------
@@ -2875,7 +3000,7 @@ function filterSuggest() {
 function commands() {
   const go = [["Home", "home", "1"], ["Map", "map", "2"], ["Devices", "devices", "3"], ["Activity", "activity", "4"], ["Findings", "findings", "5"], ["Wi-Fi", "wifi", "6"], ["Settings", "settings", "7"]]
     .map(([label, area, key]) => ({ label: `Go to ${label}`, key, run: () => selectArea(area) }));
-  const views = [["Connections", "flows"], ["Destinations", "destinations"], ["DNS", "dns"], ["Facts", "facts"], ["Pulse", "pulse"], ["Presence", "presence"], ["Devices to confirm", "links"], ["Internet quality", "quality"], ["Wi-Fi airspace", "airspace"], ["Findings inbox", "findings"], ["Anomalies in this window", "anomalies"], ["Incidents", "incidents"], ["Insights", "insights"], ["Sensors", "sensors"]]
+  const views = [["Connections", "flows"], ["Destinations", "destinations"], ["DNS", "dns"], ["Facts", "facts"], ["Pulse", "pulse"], ["Presence", "presence"], ["Devices to confirm", "links"], ["Internet quality", "quality"], ["Wi-Fi airspace", "airspace"], ["Findings inbox", "findings"], ["Anomalies in this window", "anomalies"], ["Incidents", "incidents"], ["Insights", "insights"], ["Policy builder", "policy"], ["Sensors", "sensors"]]
     .map(([label, t]) => ({ label: `Go to ${label}`, run: () => selectTab(t) }));
   const onMap = (f) => () => { if (state.tab !== "graph") selectTab("graph"); f(); };
   return [
@@ -3234,6 +3359,7 @@ function init() {
   matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { diagram.setTheme(theme()); });
   $("#ask-open").onclick = openAsk;
   $("#whatif-run").onclick = runWhatIf;
+  wirePolicy();
   $("#ask-form").onsubmit = async (e) => {
     e.preventDefault();
     const q = $("#ask-q").value.trim();

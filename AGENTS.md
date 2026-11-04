@@ -59,6 +59,9 @@ that are easy to break.
 - **The map keeps its places** (`web/src/js/map/`). A node with a known
   position never moves unless a person moves it or asks to re-arrange: new
   nodes give way. Don't add a layout step that shifts what is already placed.
+- **netgraph never touches a firewall.** `internal/policy` only reads and writes text. An export
+  is built from what's parsed or reduced to a safe alphabet, so a hostname can't add a rule, and
+  anything it can't express is commented out and warned about: a dropped deny is a hole.
 - **Every table has an erasure decision** in `tableErasure`
   (`internal/store/erasure_tables_test.go`): a new one fails that test until
   it's added to `db forget`, `db purge` and the disk guard as it needs.

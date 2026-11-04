@@ -532,3 +532,10 @@ body[data-role="viewer"] .fleet-settings button[type="submit"], body[data-role="
 .air-fill.crowded { background: var(--warn, #c78a00); }
 .air-count { font-size: 12px; font-variant-numeric: tabular-nums; }
 .air-channel { position: absolute; bottom: 0; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--muted, inherit); }
+
+/* The policy builder. */
+#policy-body { display: grid; gap: var(--sp-4); }
+.policy-line { display: flex; flex-wrap: wrap; gap: var(--sp-2) var(--sp-4); align-items: center; }
+.policy-rules input { width: 100%; min-width: 7em; }
+.policy-row-tools { white-space: nowrap; }
+#policy-config { width: 100%; font-family: var(--mono, monospace); font-size: 12px; margin-top: var(--sp-2); }
