@@ -114,6 +114,7 @@ func run(args []string) error {
 	wifiData := fs.Bool("wifi-data", false, "emit one event per Wi-Fi data frame (noisy; management and handshakes are always reported)")
 	conntrackFlag := fs.String("conntrack", "off", "also read the kernel's connection table: offloaded reports what hardware offload hides from capture; all reports everything, with -capture=false (needs CAP_NET_ADMIN)")
 	conntrackEvery := fs.Duration("conntrack-every", 10*time.Second, "how often to read the connection table")
+	remoteConfig := fs.Bool("remote-config", true, "take settings the server offers, held in memory only: log level, reverse DNS, active timeout and flush interval")
 	captureOn := fs.Bool("capture", true, "capture packets on -iface; with false, -iface only says which networks are local, and -conntrack supplies the traffic")
 	memLimit := fs.Int("mem-limit-mb", 128, "Go soft memory limit, MiB, unless $GOMEMLIMIT is set (0: none)")
 	logLevel := fs.String("log-level", "info", "debug, info, warn or error")
@@ -121,7 +122,9 @@ func run(args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
-	log := newLogger(*logLevel, *logFormat)
+	var level slog.LevelVar
+	_ = level.UnmarshalText([]byte(*logLevel))
+	log := newLevelLogger(&level, *logFormat)
 	slog.SetDefault(log)
 	if *memLimit > 0 && os.Getenv("GOMEMLIMIT") == "" {
 		debug.SetMemoryLimit(int64(*memLimit) << 20)
@@ -206,13 +209,19 @@ func run(args []string) error {
 	}
 	liveNames := append([]string(nil), names...)
 	var namesMu sync.Mutex
+	settings := newSettings(*logLevel, *rdnsOn && *pcap == "", *active, *flushEvery, &level)
 	buildHello := func() wire.Hello {
 		namesMu.Lock()
 		defer namesMu.Unlock()
-		return wire.Hello{
+		h := wire.Hello{
 			Name: *name, Version: buildinfo.Version, OS: runtime.GOOS, Arch: runtime.GOARCH,
-			Interfaces: sensor.InterfaceInfo(liveNames), ActiveTimeout: *active,
+			Interfaces: sensor.InterfaceInfo(liveNames), ActiveTimeout: settings.activeTimeout(),
 		}
+		if *remoteConfig && shipperWanted(*server) {
+			c := settings.inEffect()
+			h.Config = &c
+		}
+		return h
 	}
 	hello := buildHello()
 
@@ -227,7 +236,7 @@ func run(args []string) error {
 	// Reverse DNS is an active lookup, so it is only done on live capture:
 	// a replay must not depend on the resolver of the machine replaying it.
 	var reverse *rdns.Lookup
-	if *rdnsOn && *pcap == "" {
+	if *pcap == "" {
 		reverse = rdns.New(rdns.Config{
 			Timeout: *rdnsTimeout, Workers: *rdnsWorkers, TTL: *rdnsTTL, Logger: log,
 			Emit: func(n rdns.Name) {
@@ -237,6 +246,7 @@ func run(args []string) error {
 			},
 		})
 		defer reverse.Close()
+		reverse.SetEnabled(*rdnsOn)
 	}
 	proc := sensor.NewProcessor(sensor.Config{
 		Flow:   flow.Config{ActiveTimeout: *active, TCPIdle: *tcpIdle, UDPIdle: *udpIdle, MaxFlows: *maxFlows},
@@ -244,6 +254,17 @@ func run(args []string) error {
 		RDNS: reverse, IsLocal: sensor.LocalChecker(hello.Interfaces), WiFi: wifiProc,
 	}, out)
 	r := &sensor.Runner{Processor: proc, Out: out, Hello: hello, HelloFunc: buildHello}
+	settings.apply = func(c wire.SensorConfig) {
+		if d := time.Duration(c.ActiveTimeoutS) * time.Second; d > 0 {
+			proc.SetActiveTimeout(d)
+		}
+		if reverse != nil && c.RDNS != nil {
+			reverse.SetEnabled(*c.RDNS)
+		}
+		if shipper != nil {
+			shipper.SetFlushInterval(time.Duration(c.FlushS) * time.Second)
+		}
+	}
 
 	var shipDone chan struct{}
 	shipCtx, cancelShip := context.WithCancel(context.Background())
@@ -265,6 +286,25 @@ func run(args []string) error {
 			log.Info("loaded wifi keys from server", "networks", nets, "pairwise", pairs)
 		}
 		cancelLoad()
+		syncSettings := func(ctx context.Context) {
+			if !*remoteConfig {
+				return
+			}
+			c, err := shipper.FetchConfig(ctx)
+			if err != nil {
+				// Keep doing what it's doing: a server that's down or too old
+				// shouldn't change how the sensor behaves.
+				log.Debug("fetch settings", "err", err)
+				return
+			}
+			if settings.update(c) {
+				log.Info("settings from the server", "in_effect", fmt.Sprintf("%+v", settings.summary()))
+				r.RefreshHello()
+			}
+		}
+		loadCtx, cancelLoad = context.WithTimeout(shipCtx, 5*time.Second)
+		syncSettings(loadCtx)
+		cancelLoad()
 		go func() {
 			t := time.NewTicker(time.Minute)
 			defer t.Stop()
@@ -274,6 +314,7 @@ func run(args []string) error {
 					return
 				case <-t.C:
 					syncWiFiKeys(shipCtx, shipper, wifiProc.Keys(), log, &keySince)
+					syncSettings(shipCtx)
 				}
 			}
 		}()
@@ -516,10 +557,8 @@ func tlsConfig(caFile string, insecure bool) (*tls.Config, error) {
 	return cfg, nil
 }
 
-func newLogger(level, format string) *slog.Logger {
-	var l slog.Level
-	_ = l.UnmarshalText([]byte(level))
-	opts := &slog.HandlerOptions{Level: l}
+func newLevelLogger(level slog.Leveler, format string) *slog.Logger {
+	opts := &slog.HandlerOptions{Level: level}
 	if format == "json" {
 		return slog.New(slog.NewJSONHandler(os.Stderr, opts))
 	}

@@ -63,6 +63,7 @@ type Shipper struct {
 	spool        []batch
 	spoolBytes   int
 	wake         chan struct{}
+	flushEvery   chan time.Duration
 
 	stats ShipperStats
 }
@@ -126,12 +127,13 @@ func NewShipper(cfg ShipperConfig) *Shipper {
 		}
 	}
 	return &Shipper{
-		cfg:      cfg,
-		boot:     NewBootID(),
-		client:   &http.Client{Transport: tr, Timeout: 30 * time.Second},
-		log:      cfg.Logger,
-		wake:     make(chan struct{}, 1),
-		encodeCh: make(chan encodeJob, 8),
+		cfg:        cfg,
+		boot:       NewBootID(),
+		client:     &http.Client{Transport: tr, Timeout: 30 * time.Second},
+		log:        cfg.Logger,
+		wake:       make(chan struct{}, 1),
+		flushEvery: make(chan time.Duration, 1),
+		encodeCh:   make(chan encodeJob, 8),
 	}
 }
 
@@ -287,6 +289,9 @@ func (s *Shipper) Run(ctx context.Context) {
 		case <-ctx.Done():
 			s.drain()
 			return
+		case d := <-s.flushEvery:
+			tick.Reset(d)
+			continue
 		case <-tick.C:
 			s.seal()
 		case <-s.wake:

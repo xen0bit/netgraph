@@ -32,6 +32,9 @@ that are easy to break.
 - **The sensor persists nothing.** It writes no file: no database, spool,
   cache or keyring on disk. Its only inputs from disk are the token and CA
   files it is pointed at. (The kernel's connection table comes over netlink.)
+- **The server can't do much to a sensor.** `wire.SensorConfig` is a short list of bounded
+  settings, held in memory only: nothing in it may run anything, name a path, or change where
+  data goes. Upgrades are prompted, never performed.
 - **Wi-Fi keys are configured on the server; decryption happens on the
   sensor, in pure Go.** `netgraph serve -wifi-key-file` holds the
   passphrases, derives PMKs (`internal/wifi`), and serves only PMKs and WEP

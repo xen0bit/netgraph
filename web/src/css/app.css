@@ -517,3 +517,9 @@ body.privacy [data-export], body.privacy #g-svg, body.privacy #g-d2, body.privac
   .stats b { font-size: var(--text-lg); }
   .tabs button { padding: 8px 10px; }
 }
+
+/* Sensor settings, in the details panel. */
+.fleet-settings { display: grid; gap: var(--sp-2); justify-items: start; }
+.fleet-settings label { display: grid; gap: 2px; }
+.fleet-settings input[type="number"] { width: 8em; }
+body[data-role="viewer"] .fleet-settings button[type="submit"], body[data-role="viewer"] [data-fleet-all] { display: none; }

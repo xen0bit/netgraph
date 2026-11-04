@@ -19,6 +19,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -82,6 +83,7 @@ type Lookup struct {
 	jobs   chan job
 	wg     sync.WaitGroup
 
+	off      atomic.Bool
 	mu       sync.Mutex
 	cache    map[netip.Addr]entry
 	inflight map[netip.Addr]bool
@@ -127,10 +129,13 @@ func New(cfg Config) *Lookup {
 	return l
 }
 
+// SetEnabled turns lookups on and off while running. Those in flight finish.
+func (l *Lookup) SetEnabled(on bool) { l.off.Store(!on) }
+
 // Observe records that ip was seen at ts. It only enqueues work; it never
 // blocks on the network.
 func (l *Lookup) Observe(ip netip.Addr, mac string, ts time.Time) {
-	if !ip.IsValid() || l.ctx.Err() != nil {
+	if !ip.IsValid() || l.ctx.Err() != nil || l.off.Load() {
 		return
 	}
 	ip = ip.Unmap()

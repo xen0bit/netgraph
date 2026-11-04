@@ -59,7 +59,10 @@ are unix milliseconds.
 | `GET /api/v1/graph?format=svg\|d2\|txt` | the graph drawn by the server; `theme=dark`, `layout=elk\|dagre` |
 | `GET /api/v1/entity?id=device:3c:22:fb:01:02:03` | `{id, kind, key, label, attrs, device, facts, flows, dns, timeline: [{ts, type, detail}]}` |
 | `GET /api/v1/entity?id=sensor:router` | a sensor's version, interfaces and last reported counters (`attrs`), so `sensor_silent` and the Sensors table can open one |
-| `GET /api/v1/sensors` | `[{name, version, interfaces, first_seen, last_seen, stats}]` |
+| `GET /api/v1/sensors` | `[{name, version, os, arch, interfaces, first_seen, last_seen, stats, status, problems, upgrade_to, settable, config, in_effect, config_applied, takes_config}]`. `status` is `ok`, `quiet` or `struggling`; `problems` says what's going wrong now, from the difference between its last two reports; `upgrade_to` is set if it's older than the server |
+| `GET /api/v1/sensors/{name}/config` | what's been asked of this name alone, `%2A` for all sensors: `{log_level, rdns, active_timeout_s, flush_s}`. Viewer |
+| `PUT /api/v1/sensors/{name}/config` | replaces it; `{}` clears it. `204`, or `400`. Operator |
+| `GET /api/v1/sensor/config` | what a sensor asks, with the ingest token and `X-Netgraph-Sensor`: the fleet's settings with its own on top |
 | `GET /api/v1/wifi` | `[{bssid, ssid, security, channel, clients, first_seen, last_seen}]`, from monitor-mode sensors |
 | `GET /api/v1/live` | server-sent events: `event: ingest` with `[{type, ts, entity, label, detail}]` per batch |
 | `PUT /api/v1/devices/{mac}/label` | names a device by hand: body `{"label": "Living room TV"}` (JSON required; at most 64 printable characters), `{"label": ""}` restores the automatic name. `204`, or `400`/`404`. Read token |

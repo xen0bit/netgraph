@@ -73,6 +73,8 @@ type Hello struct {
 	Interfaces []Interface `json:"interfaces"`
 	// Settings that change how flow records must be read.
 	ActiveTimeout time.Duration `json:"active_timeout"`
+	// Config is what it's doing now, if it takes settings from the server.
+	Config *SensorConfig `json:"config,omitempty"`
 }
 
 type Interface struct {

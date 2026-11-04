@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/xen0bit/netgraph/internal/store"
+	"github.com/xen0bit/netgraph/internal/wire"
 )
 
 func authServer(t *testing.T, cfg Config) (*httptest.Server, *store.Store, *Server) {
@@ -322,5 +323,40 @@ func TestChangesAreAudited(t *testing.T) {
 	_, list := do(t, srv, call{method: "GET", path: auditPath, token: "a"})
 	if !strings.Contains(list, "POST /api/v1/annotations") {
 		t.Errorf("list: %s", list)
+	}
+}
+
+func TestSensorSettingsRoles(t *testing.T) {
+	srv, _, _ := authServer(t, Config{IngestToken: "ingest", ReadToken: "read", OperatorToken: "operator"})
+	put := func(token, path, body string) int {
+		resp, _ := do(t, srv, call{method: "PUT", path: path, body: body, token: token})
+		return resp.StatusCode
+	}
+	if got := put("read", "/api/v1/sensors/edge/config", `{"flush_s":3}`); got != http.StatusForbidden {
+		t.Errorf("a viewer changed settings: %d", got)
+	}
+	if got := put("operator", "/api/v1/sensors/edge/config", `{"flush_s":3000}`); got != http.StatusBadRequest {
+		t.Errorf("out of range: %d", got)
+	}
+	if got := put("operator", "/api/v1/sensors/edge/config", `{"flushs":3}`); got != http.StatusBadRequest {
+		t.Errorf("a typo read as saved: %d", got)
+	}
+	if got := put("operator", "/api/v1/sensors/edge/config", `{"flush_s":3}`); got != http.StatusNoContent {
+		t.Errorf("%d", got)
+	}
+	if got := put("operator", "/api/v1/sensors/%2A/config", `{"log_level":"warn"}`); got != http.StatusNoContent {
+		t.Errorf("fleet: %d", got)
+	}
+	// A sensor asks with the ingest token, and gets both layers.
+	sensor := map[string]string{wire.HeaderSensor: "edge"}
+	resp, body := do(t, srv, call{method: "GET", path: "/api/v1/sensor/config", token: "ingest", headers: sensor})
+	if resp.StatusCode != http.StatusOK || !strings.Contains(body, `"flush_s":3`) || !strings.Contains(body, `"log_level":"warn"`) {
+		t.Errorf("%d %s", resp.StatusCode, body)
+	}
+	if resp, _ := do(t, srv, call{method: "GET", path: "/api/v1/sensor/config", token: "read", headers: sensor}); resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("the read token got a sensor's settings: %d", resp.StatusCode)
+	}
+	if resp, _ := do(t, srv, call{method: "GET", path: "/api/v1/sensor/config", token: "ingest"}); resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("no sensor named: %d", resp.StatusCode)
 	}
 }

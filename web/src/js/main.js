@@ -9,6 +9,7 @@ import { tokens, lastToken, localSuggestions, searched } from "./filters.js";
 import { passportHTML } from "./passport.js";
 import { Privacy } from "./privacy.js";
 import { findingsHTML, findingDetail } from "./findings.js";
+import { sensorStatus, sensorDetail, fleetSettingsHTML, readSettings } from "./fleet.js";
 import { typeBadge, typeWhy, profileForm, presenceHTML, linksHTML, qualityHTML } from "./devices.js";
 import { Pulse } from "./pulse.js";
 
@@ -540,6 +541,39 @@ function pollFindingCount() {
   api("findings", new URLSearchParams({ limit: 1 })).then((l) => showFindingCount(l.counts)).catch(() => {});
 }
 
+// A sensor's panel. Saving reads the list again: whether it's been picked up is the sensor's to say.
+function sensorForm(path, redraw) {
+  $("#panel-body").onsubmit = async (e) => {
+    const form = e.target.closest("[data-fleet-form]");
+    if (!form) return;
+    e.preventDefault();
+    const said = form.querySelector("[data-fleet-said]");
+    try {
+      await send("PUT", path, readSettings(form));
+      said.textContent = "Saved. Sensors pick this up within a minute.";
+      redraw?.();
+    } catch (err) { said.textContent = err.message; }
+  };
+}
+
+async function openFleetSettings() {
+  $("#panel").hidden = false;
+  ++entityReq;
+  const values = await track(api("sensors/%2A/config", new URLSearchParams())).catch(() => ({}));
+  $("#panel-body").innerHTML = fleetSettingsHTML(values);
+  $("#panel-body").onclick = null;
+  sensorForm("sensors/%2A/config");
+}
+
+function openSensor(s) {
+  $("#panel").hidden = false;
+  ++entityReq;
+  state.open = `sensor:${s.name}`;
+  $("#panel-body").innerHTML = sensorDetail(s);
+  $("#panel-body").onclick = (e) => { if (e.target.closest("[data-fleet-all]")) openFleetSettings(); };
+  sensorForm(`sensors/${encodeURIComponent(s.name)}/config`, () => refresh());
+}
+
 async function openFinding(id) {
   const panel = $("#panel");
   panel.hidden = false;
@@ -1023,15 +1057,16 @@ const tables = {
     id: (i) => `incident:${i.id}`,
   },
   sensors: {
-    cols: ["Sensor", "Version", "Interfaces", "First seen", "Last seen", "Packets", "Kernel drops", "Active flows", "Evicted", "Queued", "Sent", "Send errors"],
-    num: [5, 6, 7, 8, 9, 10, 11],
-    row: (s) => [esc(s.name), esc(s.version), esc((s.interfaces || []).join(", ")), stamp(s.first_seen), stamp(s.last_seen),
+    cols: ["Sensor", "Status", "Version", "Interfaces", "First seen", "Last seen", "Packets", "Kernel drops", "Active flows", "Evicted", "Queued", "Sent", "Send errors"],
+    num: [6, 7, 8, 9, 10, 11, 12],
+    row: (s) => [esc(s.name), sensorStatus(s), esc(s.version), esc((s.interfaces || []).join(", ")), stamp(s.first_seen), stamp(s.last_seen),
       s.stats?.packets ?? "", s.stats?.kernel_drops ?? "", s.stats?.flows_active ?? "", s.stats?.flows_evicted ?? "",
       s.stats?.events_queued ?? "", s.stats?.batches_sent ?? "", s.stats?.send_errors ?? ""],
-    keys: [(s) => s.name, (s) => s.version, (s) => (s.interfaces || []).join(" "), (s) => s.first_seen, (s) => s.last_seen,
+    keys: [(s) => s.name, (s) => s.status, (s) => s.version, (s) => (s.interfaces || []).join(" "), (s) => s.first_seen, (s) => s.last_seen,
       (s) => s.stats?.packets, (s) => s.stats?.kernel_drops, (s) => s.stats?.flows_active, (s) => s.stats?.flows_evicted,
       (s) => s.stats?.events_queued, (s) => s.stats?.batches_sent, (s) => s.stats?.send_errors],
     id: (s) => `sensor:${s.name}`,
+    open: (s) => openSensor(s),
   },
 };
 
