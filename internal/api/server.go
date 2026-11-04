@@ -44,7 +44,7 @@ type Config struct {
 	// An empty token disables that check.
 	IngestToken string
 	ReadToken   string
-	// Web is the web UI's files (index.html, web.wasm[.gz], ...); nil
+	// Web is the web UI's files (index.html, ...); nil
 	// serves a page saying the UI was not built in.
 	Web    fs.FS
 	Logger *slog.Logger
@@ -218,8 +218,7 @@ func acceptsGzip(r *http.Request) bool {
 }
 
 // gzipResponseWriter compresses ordinary responses, but not SSE, HEAD or a
-// representation that already has a Content-Encoding (the web WASM asset is
-// stored gzipped).
+// representation that already has a Content-Encoding.
 type gzipResponseWriter struct {
 	http.ResponseWriter
 	gz      *gzip.Writer
@@ -1515,30 +1514,6 @@ func (s *Server) web(w http.ResponseWriter, r *http.Request) {
 	p := strings.TrimPrefix(path.Clean(r.URL.Path), "/")
 	if p == "" {
 		p = "index.html"
-	}
-	// web.wasm ships only gzipped (a quarter of the size, and the binary
-	// embeds it): sent as-is to browsers that accept gzip, which is all of
-	// them, and inflated here for anything that does not.
-	if strings.HasSuffix(p, ".wasm") {
-		w.Header().Set("Content-Type", "application/wasm")
-		w.Header().Set("Vary", "Accept-Encoding")
-		w.Header().Set("Cache-Control", "no-cache")
-		if f, err := s.cfg.Web.Open(p + ".gz"); err == nil {
-			defer f.Close()
-			if st, serr := f.Stat(); serr == nil && acceptsGzip(r) {
-				w.Header().Set("Content-Encoding", "gzip")
-				w.Header().Set("Content-Length", strconv.FormatInt(st.Size(), 10))
-				io.Copy(w, f)
-				return
-			}
-			if zr, zerr := gzip.NewReader(f); zerr == nil {
-				defer zr.Close()
-				io.Copy(w, zr)
-				return
-			}
-			httpError(w, http.StatusInternalServerError, errors.New("web UI asset is corrupt"))
-			return
-		}
 	}
 	st, err := fs.Stat(s.cfg.Web, p)
 	if err != nil || st.IsDir() {
