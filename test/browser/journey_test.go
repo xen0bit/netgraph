@@ -121,7 +121,9 @@ type session struct {
 // the app's own scripts on every load.
 func open(t *testing.T, hash, initJS string) *session {
 	t.Helper()
-	opts := append(chromedp.DefaultExecAllocatorOptions[:], chromedp.NoSandbox, chromedp.WindowSize(1500, 950))
+	opts := append(chromedp.DefaultExecAllocatorOptions[:], chromedp.NoSandbox, chromedp.WindowSize(1500, 950),
+		// A fresh CI runner can take longer than the default 20s to start Chrome at all.
+		chromedp.WSURLReadTimeout(90*time.Second))
 	if p := os.Getenv("NETGRAPH_CHROME"); p != "" {
 		opts = append(opts, chromedp.ExecPath(p))
 	}
