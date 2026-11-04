@@ -210,6 +210,19 @@ func (s *session) seen(frag string) []string {
 	return out
 }
 
+// waitForRequest waits for a request, since a change was made. It's how to know a change
+// has begun: the status only says "loading" for as long as the answer takes, which a
+// poll can miss on a fast machine.
+func (s *session) waitForRequest(what, frag string) {
+	s.t.Helper()
+	for deadline := time.Now().Add(45 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+		if len(s.seen(frag)) > 0 {
+			return
+		}
+	}
+	s.t.Fatalf("timed out waiting for %s: no request for %s", what, frag)
+}
+
 func (s *session) clearRequests() {
 	empty := []string{}
 	s.requests.Store(&empty)
@@ -275,7 +288,7 @@ func TestRecorderKeepsPanAndZoom(t *testing.T) {
 	s.eval(zoom, &before)
 	s.clearRequests()
 	s.run(chromedp.Click(`#rec-fwd`, chromedp.ByQuery))
-	s.waitFor("the step", `document.querySelector("#status").textContent.startsWith("loading")`)
+	s.waitForRequest("the step", "/api/v1/summary")
 	s.settle()
 	if len(s.seen("/api/v1/summary")) == 0 {
 		t.Fatal("stepping fetched nothing")
