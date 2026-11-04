@@ -21,10 +21,12 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
+	"github.com/chromedp/chromedp/kb"
 )
 
 const readToken = "journey-read-token"
@@ -275,15 +277,15 @@ func TestLeavingRecorderStopsFollowing(t *testing.T) {
 // Stepping through recorded moments keeps the view the person chose.
 func TestRecorderKeepsPanAndZoom(t *testing.T) {
 	s := open(t, window(), "")
-	s.waitFor("the graph", `!!document.querySelector("#diagram svg")`)
+	s.waitFor("the graph", `Number(document.querySelector("#diagram canvas").dataset.nodes) > 0`)
 	s.settle()
 	s.run(chromedp.Click(`#recorder`, chromedp.ByQuery))
 	s.waitFor("the recorder", `!document.querySelector("#recorder-bar").hidden`)
 	s.settle()
-	s.waitFor("the graph", `!!document.querySelector("#diagram svg")`)
+	s.waitFor("the graph", `Number(document.querySelector("#diagram canvas").dataset.nodes) > 0`)
 	zoom := `(() => { const el = document.querySelector("#diagram"); const r = el.getBoundingClientRect();
 		for (let i = 0; i < 4; i++) el.dispatchEvent(new WheelEvent("wheel", {deltaY: -120, clientX: r.left + 200, clientY: r.top + 100, bubbles: true}));
-		return document.querySelector("#diagram svg").style.transform; })()`
+		return document.querySelector("#diagram canvas").dataset.view; })()`
 	var before, after string
 	s.eval(zoom, &before)
 	s.clearRequests()
@@ -293,7 +295,7 @@ func TestRecorderKeepsPanAndZoom(t *testing.T) {
 	if len(s.seen("/api/v1/summary")) == 0 {
 		t.Fatal("stepping fetched nothing")
 	}
-	s.eval(`document.querySelector("#diagram svg")?.style.transform || ""`, &after)
+	s.eval(`Number(document.querySelector("#diagram canvas").dataset.nodes) > 0 ? document.querySelector("#diagram canvas").dataset.view : ""`, &after)
 	if after == "" {
 		t.Fatal("the next moment has no graph to compare")
 	}
@@ -363,23 +365,21 @@ func TestLiveKeepsTokenOutOfURLs(t *testing.T) {
 	}
 }
 
-// A table-only visit does not pay for the graph engine.
-func TestTablesDoNotLoadTheEngine(t *testing.T) {
-	s := open(t, window()+"&tab=devices", "")
-	s.settle()
-	s.waitFor("rows", `!!document.querySelector("#t-devices tbody tr[data-i]")`)
-	time.Sleep(500 * time.Millisecond)
-	if got := s.seen("worker.js"); len(got) > 0 {
-		t.Errorf("the engine started on a table tab: %v", got)
+// The page needs no download beyond its own small files.
+func TestNoEngineDownload(t *testing.T) {
+	s := open(t, window(), "")
+	s.waitFor("the map", `Number(document.querySelector("#diagram canvas").dataset.nodes) > 0`)
+	for _, f := range []string{"worker.js", ".wasm", "wasm_exec"} {
+		if got := s.seen(f); len(got) > 0 {
+			t.Errorf("fetched %v", got)
+		}
 	}
 	var version string
+	s.waitFor("the version", `document.querySelector("#version").textContent.length > 0`)
 	s.eval(`document.querySelector("#version").textContent`, &version)
-	if version == "" {
-		t.Error("no version in the footer without the engine")
+	if !strings.HasPrefix(version, "netgraph") {
+		t.Errorf("version %q", version)
 	}
-	// Going to the graph then loads it.
-	s.run(chromedp.Click(`[data-tab="graph"]`, chromedp.ByQuery))
-	s.waitFor("the graph", `!!document.querySelector("#diagram svg")`)
 }
 
 // An empty window offers a way to the data.
@@ -436,7 +436,7 @@ func TestGraphDoesNotWaitForAnomalies(t *testing.T) {
 			return f(...a);
 		}; })()`
 	s := open(t, window(), slow)
-	s.waitFor("the graph", `!!document.querySelector("#diagram svg")`)
+	s.waitFor("the graph", `Number(document.querySelector("#diagram canvas").dataset.nodes) > 0`)
 	s.waitFor("the summary", `document.querySelector("#summary").textContent.includes("devices")`)
 }
 
@@ -518,3 +518,244 @@ func TestHourlyWindowClaimsOnlyWhatItKnows(t *testing.T) {
 		}
 	}
 }
+
+const nodesDrawn = `Number(document.querySelector("#diagram canvas").dataset.nodes) > 0`
+
+// point returns where a JavaScript expression says to click on the page.
+func (s *session) point(js string) (x, y float64) {
+	s.t.Helper()
+	var p struct{ X, Y float64 }
+	s.eval(js, &p)
+	if p.X == 0 && p.Y == 0 {
+		s.t.Fatalf("no point from %s", js)
+	}
+	return p.X, p.Y
+}
+
+func nodePoint(pick string) string {
+	return `(() => { const m = document.querySelector("#diagram").__map;
+		const d = [...m.nodes.values()].find((n) => ` + pick + `);
+		if (!d) return {X: 0, Y: 0};
+		const p = m.screenOf(d.id); return {X: p.x, Y: p.y}; })()`
+}
+
+// edgePoint is a spot on an edge that no node covers.
+const edgePoint = `(() => { const m = document.querySelector("#diagram").__map; const r = m.canvas.getBoundingClientRect();
+	for (const d of m.edges.values()) {
+		if (d.dying || !d.c || d.data.rel !== "connects") continue;
+		const q = {x: .25*d.c.ax + .5*d.c.cx + .25*d.c.bx, y: .25*d.c.ay + .5*d.c.cy + .25*d.c.by};
+		if (m.nodeAt(q.x, q.y)) continue;
+		return {X: r.left + q.x*m.scale + m.x, Y: r.top + q.y*m.scale + m.y};
+	}
+	return {X: 0, Y: 0}; })()`
+
+func TestClickNodeOpensDetails(t *testing.T) {
+	s := open(t, window(), "")
+	s.waitFor("the map", nodesDrawn)
+	s.settle()
+	x, y := s.point(nodePoint(`n.data.kind === "device"`))
+	s.run(chromedp.MouseClickXY(x, y))
+	s.waitFor("the details", `!document.querySelector("#panel").hidden && document.querySelector("#panel h2")?.textContent.length > 0`)
+	var id string
+	s.eval(`document.querySelector("#panel-body .mono").textContent`, &id)
+	if !strings.HasPrefix(id, "device:") {
+		t.Errorf("details of %q", id)
+	}
+}
+
+// An edge is a thing you can ask about.
+func TestClickEdgeListsConnections(t *testing.T) {
+	s := open(t, window(), "")
+	s.waitFor("the map", nodesDrawn)
+	s.settle()
+	s.waitFor("edges to be placed", `[...document.querySelector("#diagram").__map.edges.values()].some((d) => d.c)`)
+	x, y := s.point(edgePoint)
+	s.run(chromedp.MouseClickXY(x, y))
+	s.waitFor("its connections", `document.querySelector("#edge-rows li") !== null`)
+	var text string
+	s.eval(`document.querySelector("#panel-body").textContent`, &text)
+	if !strings.Contains(text, "→") || !strings.Contains(text, "What if") {
+		t.Errorf("edge panel: %.300s", text)
+	}
+}
+
+// Dragging pins a node: it stays through a refresh and a reload, for anyone.
+func TestDraggedNodeStaysPinned(t *testing.T) {
+	s := open(t, window(), "")
+	s.waitFor("the map", nodesDrawn)
+	s.settle()
+	x, y := s.point(nodePoint(`n.data.kind === "device"`))
+	var id string
+	s.eval(`(() => { const m = document.querySelector("#diagram").__map; return m.nodeAt(...(() => { const r = m.canvas.getBoundingClientRect(); return [(`+fmt.Sprint(x)+` - r.left - m.x)/m.scale, (`+fmt.Sprint(y)+` - r.top - m.y)/m.scale]; })()).id; })()`, &id)
+	s.run(chromedp.ActionFunc(func(ctx context.Context) error {
+		for _, ev := range []struct {
+			typ  input.MouseType
+			x, y float64
+		}{{input.MouseMoved, x, y}, {input.MousePressed, x, y}, {input.MouseMoved, x + 30, y + 20}, {input.MouseMoved, x + 90, y + 70}, {input.MouseReleased, x + 90, y + 70}} {
+			p := input.DispatchMouseEvent(ev.typ, ev.x, ev.y).WithButton(input.Left).WithClickCount(1)
+			if err := p.Do(ctx); err != nil {
+				return err
+			}
+		}
+		return nil
+	}))
+	s.waitFor("the pin to be stored", fmt.Sprintf(`(async () => {
+		const r = await fetch("/api/v1/map/pins", {headers: {Authorization: "Bearer %s"}});
+		return (await r.json()).some((p) => p.id === %q);
+	})()`, readToken, id))
+	pos := fmt.Sprintf(`(() => { const d = document.querySelector("#diagram").__map.nodes.get(%q); return d ? Math.round(d.tx) + "," + Math.round(d.ty) : ""; })()`, id)
+	var before, after string
+	s.eval(pos, &before)
+	s.run(chromedp.Reload())
+	s.waitFor("the map", nodesDrawn)
+	s.settle()
+	s.eval(pos, &after)
+	if before == "" || before != after {
+		t.Errorf("pinned at %q, after a reload %q", before, after)
+	}
+	// Leave no pin for other tests: positions must not depend on order.
+	s.eval(fmt.Sprintf(`fetch("/api/v1/map/pins", {method: "DELETE", headers: {Authorization: "Bearer %s", "Content-Type": "application/json"}, body: JSON.stringify({ids: [%q]})}).then(() => 1)`, readToken, id), nil)
+}
+
+// Nodes do not move when the window does: the map is a place.
+func TestPositionsSurviveAWindowChange(t *testing.T) {
+	s := open(t, window(), "")
+	s.waitFor("the map", nodesDrawn)
+	s.settle()
+	s.eval(`window.__ids = new Set([...document.querySelector("#diagram").__map.nodes.values()].filter((d) => d.data.kind === "device").map((d) => d.id)); 1`, nil)
+	all := `JSON.stringify([...document.querySelector("#diagram").__map.nodes.values()].filter((d) => window.__ids.has(d.id)).map((d) => [d.id, Math.round(d.tx), Math.round(d.ty)]).sort())`
+	var before, after string
+	s.eval(all, &before)
+	s.clearRequests()
+	s.run(chromedp.Click(`#g-identity`, chromedp.ByQuery))
+	s.waitForRequest("the change to land", "/api/v1/graph")
+	s.settle()
+	s.clearRequests()
+	s.run(chromedp.Click(`#g-identity`, chromedp.ByQuery))
+	s.waitForRequest("the change to land", "/api/v1/graph")
+	s.settle()
+	s.eval(all, &after)
+	if before != after {
+		t.Errorf("devices moved:\n%s\n%s", before, after)
+	}
+}
+
+func TestContextMenuAndNetworkTextIsNotMarkup(t *testing.T) {
+	s := open(t, window(), "")
+	s.waitFor("the map", nodesDrawn)
+	s.settle()
+	x, y := s.point(nodePoint(`n.data.kind === "device"`))
+	s.run(chromedp.MouseClickXY(x, y, chromedp.ButtonType(input.Right)))
+	s.waitFor("the menu", `!!document.querySelector("#map-menu button")`)
+	var labels string
+	s.eval(`[...document.querySelectorAll("#map-menu button")].map((b) => b.textContent).join("|")`, &labels)
+	for _, want := range []string{"Details", "Filter to this device", "Follow in Recorder", "Add a note"} {
+		if !strings.Contains(labels, want) {
+			t.Errorf("menu %q lacks %q", labels, want)
+		}
+	}
+	s.run(chromedp.KeyEvent("\u001b"))
+	s.waitFor("the menu to close", `!document.querySelector("#map-menu")`)
+	// The tooltip, list and panel take a hostile label as text.
+	s.eval(`(() => { const m = document.querySelector("#diagram").__map;
+		m.show({nodes: [{id: "device:x", kind: "device", label: "<img src=x onerror=window.__pwned=1>", sub: "<b>sub</b>", local: true}], edges: []});
+		m.showTip(m.graph.nodes[0], 10, 10); return 1; })()`, nil)
+	time.Sleep(200 * time.Millisecond)
+	var pwned bool
+	s.eval(`!!window.__pwned || !!document.querySelector("#diagram img, #diagram b")`, &pwned)
+	if pwned {
+		t.Error("a label off the network became markup")
+	}
+}
+
+// Arrow keys walk the map; Enter opens what they reached; the list has it too.
+func TestKeyboardReachesNodes(t *testing.T) {
+	s := open(t, window(), "")
+	s.waitFor("the map", nodesDrawn)
+	s.settle()
+	s.run(chromedp.Focus(`#diagram canvas`, chromedp.ByQuery), chromedp.KeyEvent(kb.ArrowDown))
+	s.waitFor("a focused node", `document.querySelector("#diagram").__map.focus !== ""`)
+	s.run(chromedp.KeyEvent("\r"))
+	s.waitFor("the details", `!document.querySelector("#panel").hidden`)
+	var n int
+	s.eval(`document.querySelectorAll(".map-list button").length`, &n)
+	var drawn string
+	s.eval(`document.querySelector("#diagram canvas").dataset.nodes`, &drawn)
+	if fmt.Sprint(n) != drawn {
+		t.Errorf("%d list items for %s nodes", n, drawn)
+	}
+}
+
+// A selection can be hidden, and brought back.
+func TestSelectionBarAndHide(t *testing.T) {
+	s := open(t, window(), "")
+	s.waitFor("the map", nodesDrawn)
+	s.settle()
+	var before int
+	s.eval(`Number(document.querySelector("#diagram canvas").dataset.nodes)`, &before)
+	s.eval(`(() => { const m = document.querySelector("#diagram").__map; const d = [...m.nodes.values()].find((n) => !n.data.local && n.data.kind !== "device") || [...m.nodes.values()][0];
+		m.selected = new Set([d.id]); m.h.onSelection([d.id]); return 1; })()`, nil)
+	s.waitFor("the bar", `!document.querySelector("#map-selection").hidden`)
+	s.run(chromedp.Click(`#map-selection-hide`, chromedp.ByQuery))
+	s.waitFor("it to be hidden", fmt.Sprintf(`Number(document.querySelector("#diagram canvas").dataset.nodes) < %d`, before))
+	s.waitFor("the way back", `!document.querySelector("#g-unhide").hidden`)
+	s.run(chromedp.Click(`#g-unhide`, chromedp.ByQuery))
+	s.waitFor("it to return", fmt.Sprintf(`Number(document.querySelector("#diagram canvas").dataset.nodes) === %d`, before))
+}
+
+// The budget: 500 nodes and 2,000 edges, drawn with particles, measured in
+// the page. Headless Chrome draws in software, so this is a floor on real
+// hardware, and the budget is a usable frame rate rather than 60 fps.
+func TestMapPerformanceBudget(t *testing.T) {
+	s := open(t, window()+"&tab=devices", "")
+	s.settle()
+	await := func(p *runtime.EvaluateParams) *runtime.EvaluateParams { return p.WithAwaitPromise(true) }
+	type measure struct {
+		LayoutMS float64
+		FrameMS  float64
+		Frames   int
+	}
+	// A busy machine can only make these slower, so one good measurement shows the map
+	// is within budget. A map that's really slow misses it every time.
+	var res measure
+	const attempts = 3
+	for attempt := 1; attempt <= attempts; attempt++ {
+		res = measure{}
+		s.run(chromedp.Evaluate(mapBudgetJS, &res, await))
+		t.Logf("attempt %d: 500 nodes, 2000 edges: show %.0f ms, %.1f ms a frame over %d frames", attempt, res.LayoutMS, res.FrameMS, res.Frames)
+		if res.Frames >= 10 && res.FrameMS <= 50 && res.LayoutMS <= 500 {
+			return
+		}
+	}
+	if res.Frames < 10 {
+		t.Errorf("only %d frames in 3s", res.Frames)
+	}
+	if res.FrameMS > 50 {
+		t.Errorf("%.1f ms a frame", res.FrameMS)
+	}
+	if res.LayoutMS > 500 {
+		t.Errorf("show took %.0f ms", res.LayoutMS)
+	}
+}
+
+// mapBudgetJS draws a large map on an empty page, and reports what it cost.
+const mapBudgetJS = `(async () => {
+		const { LivingMap } = await import("/js/map/map.js");
+		const el = document.createElement("div");
+		el.style.cssText = "position:fixed;inset:0;z-index:99;background:#fff";
+		document.body.append(el);
+		const m = new LivingMap(el);
+		const nodes = [], edges = [];
+		for (let i = 0; i < 30; i++) nodes.push({id: "device:d" + i, kind: "device", label: "device-" + i, sub: "Vendor · 10.0.0." + i, local: true, bytes_in: 1e6, bytes_out: 1e5});
+		for (let i = 0; i < 470; i++) nodes.push({id: "domain:h" + i + ".example.com", kind: "domain", label: "h" + i + ".example.com", sub: "1.2.3." + (i % 250)});
+		for (let i = 0; i < 2000; i++) edges.push({from: "device:d" + (i % 30), to: nodes[30 + (i * 7) % 470].id, rel: i % 5 ? "connects" : "queried", bytes_out: 1000 * (i + 1), bytes_in: 50000 * (i + 1), count: 1, ports: ["443/tcp"]});
+		const seen = new Set();
+		const uniq = edges.filter((e) => { const k = e.from + e.to + e.rel; if (seen.has(k)) return false; seen.add(k); return true; });
+		const t0 = performance.now();
+		m.show({nodes, edges: uniq}, {spanMS: 3600000});
+		const layoutMS = performance.now() - t0;
+		await new Promise((r) => setTimeout(r, 3000));
+		const out = {LayoutMS: layoutMS, FrameMS: Number(m.canvas.dataset.frameMs), Frames: m.frames.length};
+		el.remove();
+		return out;
+	})()`

@@ -6,7 +6,6 @@
 |---|---|
 | `cmd/netgraph-sensor` | the router agent. Must never import SQLite, d2 or the TUI libraries: `deps_test.go` enforces it (modernc SQLite does not build for MIPS, d2 adds ~20 MB) |
 | `cmd/netgraph` | server, CLI, TUI |
-| `cmd/web` | the WASM engine (`js && wasm`) |
 | `internal/wire` | event schema, batch codec, shipper (spool, retry) |
 | `internal/decode` | protocol parsers: DNS/mDNS/LLMNR/NBNS, DHCPv4/v6, ARP/NDP, LLDP, SSDP, HTTP, TLS ClientHello + JA4, QUIC Initial |
 | `internal/flow` | the flow table and interval export |
@@ -17,7 +16,7 @@
 | `internal/store` | SQLite schema, ingest and correlation, queries, retention |
 | `internal/graph`, `internal/graph/d2render` | graph assembly and d2 rendering |
 | `internal/api`, `internal/apiclient` | HTTP server and client (`model.Backend`) |
-| `internal/model` | API types, shared with WASM |
+| `internal/model` | API types |
 | `internal/tui` | the terminal UI |
 | `internal/oui` | the embedded IEEE MAC registry (`make oui.update`) |
 | `internal/testutil` | scripted pcap scenarios built with real implementations |
@@ -95,7 +94,7 @@ the script, and then:
   against netgraph's;
 - replays that capture into a fresh database and checks it learns the
   same names;
-- drives the web UI in headless Chrome (graph drawn by WASM, details
+- drives the web UI in headless Chrome (the map, details
   panel, every table);
 - runs `deploy/compose/sidecar.yml` as written, with the lab's images.
 

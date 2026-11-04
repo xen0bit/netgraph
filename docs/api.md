@@ -28,6 +28,7 @@ are unix milliseconds.
 
 | Endpoint | Returns |
 |---|---|
+| `GET /api/v1/map/pins` | `[{id, x, y, updated}]`: nodes a person placed on the map. `PUT` with `{"pins": [{id, x, y}]}` places them, `DELETE` with `{"ids": [...]}` removes them (JSON required; `204`). IDs are graph node IDs. Read token |
 | `GET /api/v1/range` | `{first_ms, last_ms, raw_from_ms, rollup_from_ms, now_ms}`: the span of the data held (zeros when there is none) and where each retention tier begins. Takes no window |
 | `GET /api/v1/summary` | `{devices, flows, inbound, peak_connections, dns_queries, domains, remote_ips, bytes_out, bytes_in, precision, ...}`; bytes are what devices here sent and received |
 | `GET /api/v1/devices` | `[{id, mac, label, user_label, auto_label, vendor, vendor_short, randomized, role, ips, hostnames, services, serves, fingerprints, user_agents, flows, inbound, dns_queries, bytes_out, bytes_in, remotes, active_from, active_to, first_seen, last_seen}]`; `serves` lists the ports clients connected to (`443/tcp`), `inbound` how many connections came in from outside |

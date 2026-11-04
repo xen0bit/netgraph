@@ -87,6 +87,14 @@ const (
 	PrecisionHour  = "hour"  // from hourly rollups: windows are widened to whole hours
 )
 
+// MapPin is where a person put a node on the map, in the map's own units.
+type MapPin struct {
+	ID      string  `json:"id"`
+	X       float64 `json:"x"`
+	Y       float64 `json:"y"`
+	Updated int64   `json:"updated,omitempty"`
+}
+
 // DataRange says what a server holds, so a UI can offer real times: unix
 // milliseconds, zero when it holds nothing. Raw records answer exactly from
 // RawFromMS on; rollups answer by the hour from RollupFromMS on.
