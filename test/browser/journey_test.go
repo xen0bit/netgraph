@@ -624,11 +624,13 @@ func TestPositionsSurviveAWindowChange(t *testing.T) {
 	all := `JSON.stringify([...document.querySelector("#diagram").__map.nodes.values()].filter((d) => window.__ids.has(d.id)).map((d) => [d.id, Math.round(d.tx), Math.round(d.ty)]).sort())`
 	var before, after string
 	s.eval(all, &before)
+	s.clearRequests()
 	s.run(chromedp.Click(`#g-identity`, chromedp.ByQuery))
-	s.waitFor("the change to land", `document.querySelector("#status").textContent.startsWith("loading")`)
+	s.waitForRequest("the change to land", "/api/v1/graph")
 	s.settle()
+	s.clearRequests()
 	s.run(chromedp.Click(`#g-identity`, chromedp.ByQuery))
-	s.waitFor("the change to land", `document.querySelector("#status").textContent.startsWith("loading")`)
+	s.waitForRequest("the change to land", "/api/v1/graph")
 	s.settle()
 	s.eval(all, &after)
 	if before != after {
