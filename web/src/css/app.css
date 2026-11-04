@@ -523,3 +523,12 @@ body.privacy [data-export], body.privacy #g-svg, body.privacy #g-d2, body.privac
 .fleet-settings label { display: grid; gap: 2px; }
 .fleet-settings input[type="number"] { width: 8em; }
 body[data-role="viewer"] .fleet-settings button[type="submit"], body[data-role="viewer"] [data-fleet-all] { display: none; }
+
+/* The air: networks per channel. */
+.air-bands { display: grid; gap: var(--sp-4); grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); margin-block: var(--sp-4); }
+.air-bars { display: flex; align-items: flex-end; gap: 4px; height: 120px; margin: 0; padding: 0; list-style: none; overflow-x: auto; }
+.air-bar { position: relative; display: flex; flex-direction: column; justify-content: flex-end; align-items: center; height: 100%; min-width: 26px; max-width: 56px; flex: 1 1 26px; padding-bottom: 20px; }
+.air-fill { display: block; width: 100%; min-height: 3px; border-radius: 3px 3px 0 0; background: var(--accent); }
+.air-fill.crowded { background: var(--warn, #c78a00); }
+.air-count { font-size: 12px; font-variant-numeric: tabular-nums; }
+.air-channel { position: absolute; bottom: 0; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--muted, inherit); }

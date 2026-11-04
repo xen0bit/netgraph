@@ -288,6 +288,8 @@ func (s *Store) WalkWiFi(ctx context.Context, f model.Filter, yield func(model.W
 		_ = json.Unmarshal([]byte(attrs), &a)
 		n.Security = a["security"]
 		n.Channel, _ = strconv.Atoi(a["channel"])
+		n.Signal, _ = strconv.Atoi(a["signal"])
+		n.Frequency, _ = strconv.Atoi(a["freq"])
 		if err := yield(n); err != nil {
 			return err
 		}

@@ -286,9 +286,12 @@ the sensor fetches from the server and holds only in memory:
 - **WPA3/SAE, OWE and 802.1X** cannot be followed from the air alone. They
   are parsed and reported as networks, and can be decrypted only when a PMK
   is supplied (`pmk <ssid> <hex>` in the server's key file). With that PMK,
-  an 802.1X handshake is followed like a WPA2 one. SAE and OWE handshakes
-  use SHA-256 key derivation and AES-CMAC MICs, which are not implemented
-  yet: they are reported, never decrypted.
+  an 802.1X handshake is followed like a WPA2 one, and SAE and OWE (group 19)
+  with their SHA-256 key derivation. An SAE or OWE PMK belongs to one
+  association, so a network can list several, and the handshake's MIC says
+  which applies: nothing is installed without it. A sensor that missed a
+  handshake can only rebuild its keys from the stored nonces if the network has
+  one PMK. FT, `SAE-EXT-KEY` and larger OWE groups are reported, never decrypted.
 
 Decrypted data frames are rebuilt as Ethernet and enter the normal flow,
 DNS, TLS and HTTP pipeline, so a Wi-Fi capture produces the same connection
@@ -355,8 +358,8 @@ extensions ioctl, so it works with mac80211 monitor interfaces and not with
   A partial datagram is dropped after 30 seconds or 64 KiB; an overlapping
   fragment never replaces bytes a lower-offset fragment supplied.
 - **WPA3/SAE, OWE and 802.1X** Wi-Fi has no passively derivable PMK; without
-  an explicitly supplied PMK, their data frames stay encrypted. A supplied
-  PMK decrypts 802.1X networks; SAE/OWE key derivation is not implemented.
+  an explicitly supplied PMK, their data frames stay encrypted. For SAE and
+  OWE that PMK is the session's, not something the passphrase can give.
 - **Wi-Fi group keys** come from a message 3 or group rekey that some
   sensor saw. A network whose GTK no sensor has seen since netgraph started
   (no client joined and the AP has not rekeyed) keeps its broadcasts

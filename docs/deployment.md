@@ -508,7 +508,7 @@ sudo tee /etc/netgraph/wifi.keys >/dev/null <<'EOF'
 # WPA/WPA2-PSK: <ssid> <passphrase or 64 hex digits>. The passphrase is the
 # rest of the line, so it may contain spaces; the SSID may not.
 wpa2 home-iot correct horse battery staple
-# WPA3/SAE or 802.1X: see below. A PMK is <ssid> <64 hex digits>.
+# WPA3/SAE, OWE or 802.1X: see below. A PMK is <ssid> <64 hex digits>. It may repeat.
 pmk some-eap-net 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 # WEP: <index 0-3> <5, 13 or 16 bytes of hex>
 wep 0 0102030405
@@ -528,9 +528,12 @@ its keys and decrypt its traffic. WEP likewise. **WPA3-SAE is different by
 design**: the master key comes from an ephemeral per-session Dragonfly
 exchange, so even with the passphrase a passive observer cannot derive it
 (this is SAE's forward secrecy). OWE (open WPA3) is the same. These show up
-fully in management and handshake events but their data is not decryptable;
-a `pmk` entry only helps if you obtain that session's PMK out of band (and
-for SAE the PMK changes every association). **WPA2/WPA3 "transition" networks
+fully in management and handshake events, and their data isn't decryptable
+unless you get that session's PMK from the AP or the client, for instance
+`hostapd -dd -K` on a network of your own, and add it as a `pmk` line. Each
+association has its own, so list as many as you like (the last 64 per network
+are kept): the handshake's MIC picks the right one, and a server reload
+(SIGHUP) adds new ones without losing keys already in use. **WPA2/WPA3 "transition" networks
 are decryptable per client:** a device that joins over WPA2-PSK can be
 decrypted; one that chooses SAE (most modern phones) cannot, on the same
 SSID.

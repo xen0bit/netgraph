@@ -67,7 +67,8 @@ func TestParseHiddenOpenAndWEP(t *testing.T) {
 		{"wpa", 0x0011, []byte("legacy"), ie(221, wpaBody(2, 2)), WPA},
 		{"wpa3", 0x0011, []byte("modern"), ie(48, rsnBody(4, 8)), WPA3},
 		{"transition", 0x0011, []byte("mixed"), ie(48, rsnBody2(4, 2, 8)), WPA2WPA3},
-		{"owe", 0x0011, []byte("open-secure"), ie(48, rsnBody(4, 12)), OWE},
+		{"owe", 0x0011, []byte("open-secure"), ie(48, rsnBody(4, 18)), OWE},
+		{"suite b is not owe", 0x0011, []byte("corp"), ie(48, rsnBody(4, 12)), WPA2},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := &Frame{Type: TypeManagement, Subtype: SubtypeBeacon, Capability: tc.cap}

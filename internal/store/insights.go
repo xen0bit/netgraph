@@ -169,7 +169,7 @@ func (s *Store) Coverage(ctx context.Context, f model.Filter) (*model.CoverageRe
 // flags from the same Wi-Fi facts the rest of netgraph uses.
 func (s *Store) Airspace(ctx context.Context, f model.Filter) (*model.AirspaceReport, error) {
 	from, to := s.window(f)
-	out := &model.AirspaceReport{FromMS: from, ToMS: to, Networks: []model.AirspaceNetwork{}}
+	out := &model.AirspaceReport{FromMS: from, ToMS: to, Networks: []model.AirspaceNetwork{}, Channels: []model.AirspaceChannel{}}
 	wifi, err := s.WiFi(ctx, f)
 	if err != nil {
 		return nil, err
@@ -191,7 +191,7 @@ func (s *Store) Airspace(ctx context.Context, f model.Filter) (*model.AirspaceRe
 		}
 	}
 	for _, n := range wifi {
-		an := model.AirspaceNetwork{BSSID: n.BSSID, SSID: n.SSID, Security: n.Security, Channel: n.Channel, FirstSeen: n.FirstSeen, LastSeen: n.LastSeen}
+		an := model.AirspaceNetwork{BSSID: n.BSSID, SSID: n.SSID, Security: n.Security, Channel: n.Channel, Signal: n.Signal, Band: wifiBand(n.Frequency, n.Channel), FirstSeen: n.FirstSeen, LastSeen: n.LastSeen}
 		an.Rogue = rogueBSSID[n.BSSID] || (n.Security == wifipkg.Open && rogueSSID[model.EntityID(model.KindSSID, strings.ToLower(n.SSID))])
 		rows, err := s.r.QueryContext(ctx, `SELECT coalesce(nullif(d.label,''), d.key)
 			FROM facts a JOIN entities d ON d.id = a.src
@@ -219,6 +219,7 @@ func (s *Store) Airspace(ctx context.Context, f model.Filter) (*model.AirspaceRe
 	slices.SortFunc(out.Networks, func(a, b model.AirspaceNetwork) int {
 		return cmp.Or(cmp.Compare(a.Channel, b.Channel), cmp.Compare(a.SSID, b.SSID), cmp.Compare(a.BSSID, b.BSSID))
 	})
+	out.Channels = channelsHeard(out.Networks)
 	out.Gaps = append(out.Gaps, "only channels covered by a monitor-mode sensor are visible")
 	return out, nil
 }
@@ -354,4 +355,67 @@ func (p *weeklyPattern) at(ts int64, hours float64) (mean, sd float64, ok bool) 
 	mean = sum / n
 	sd = math.Sqrt(max(0, sum2/n-mean*mean))
 	return mean * hours, sd * hours, true
+}
+
+// wifiBand names a network's band. The frequency settles it; failing that the channel number
+// nearly does, since 6 GHz channels share numbers with 2.4 and 5 GHz and can't be told apart.
+func wifiBand(freq, channel int) string {
+	switch {
+	case freq >= 5925:
+		return "6 GHz"
+	case freq >= 5000:
+		return "5 GHz"
+	case freq >= 2400:
+		return "2.4 GHz"
+	case channel >= 1 && channel <= 14:
+		return "2.4 GHz"
+	case channel >= 32 && channel <= 177:
+		return "5 GHz"
+	}
+	return ""
+}
+
+// channelsHeard sums networks by channel, in order of band and number.
+func channelsHeard(nets []model.AirspaceNetwork) []model.AirspaceChannel {
+	type key struct {
+		band    string
+		channel int
+	}
+	byKey := map[key]*model.AirspaceChannel{}
+	out := []model.AirspaceChannel{}
+	for _, n := range nets {
+		if n.Channel == 0 || n.Band == "" {
+			continue
+		}
+		k := key{n.Band, n.Channel}
+		c := byKey[k]
+		if c == nil {
+			c = &model.AirspaceChannel{Band: n.Band, Channel: n.Channel}
+			byKey[k] = c
+		}
+		c.Networks++
+		c.Clients += len(n.Clients)
+		// dBm are negative, and 0 means nobody said.
+		if n.Signal != 0 && (c.Strongest == 0 || n.Signal > c.Strongest) {
+			c.Strongest = n.Signal
+		}
+	}
+	for _, c := range byKey {
+		out = append(out, *c)
+	}
+	slices.SortFunc(out, func(a, b model.AirspaceChannel) int {
+		return cmp.Or(cmp.Compare(a.Band, b.Band), cmp.Compare(a.Channel, b.Channel))
+	})
+	// A 2.4 GHz channel is 20 MHz wide and they're 5 MHz apart, so four either side share air.
+	for i := range out {
+		if out[i].Band != "2.4 GHz" {
+			continue
+		}
+		for _, o := range out {
+			if d := o.Channel - out[i].Channel; o.Band == out[i].Band && d != 0 && d > -5 && d < 5 {
+				out[i].Overlapping += o.Networks
+			}
+		}
+	}
+	return out
 }

@@ -78,7 +78,7 @@ func (k *EAPOLKey) encryptedKeyData() bool {
 func (k *EAPOLKey) groupKeyIndex() int { return int(k.KeyInfo>>4) & 0x3 }
 
 // decryptKeyData unwraps the key data with the KEK: RC4 for descriptor
-// version 1, AES key wrap (RFC 3394) for versions 2 and 3.
+// version 1, AES key wrap (RFC 3394) for the others.
 func (k *EAPOLKey) decryptKeyData(kek []byte) ([]byte, error) {
 	if len(kek) != 16 {
 		return nil, fmt.Errorf("eapol: KEK length %d", len(kek))
@@ -97,7 +97,7 @@ func (k *EAPOLKey) decryptKeyData(kek []byte) ([]byte, error) {
 		out := make([]byte, len(k.KeyData))
 		rc.XORKeyStream(out, k.KeyData)
 		return out, nil
-	case 2, 3:
+	case 0, 2, 3:
 		return aesUnwrap(kek, k.KeyData)
 	}
 	return nil, fmt.Errorf("eapol: key descriptor version %d", k.Version())
@@ -293,18 +293,30 @@ func (k *Keyring) LoadGroupKey(r GroupKeyRecord) (bool, error) {
 	if g := k.group(ap.String(), r.KeyID); g != nil && !g.ts.Before(r.TS) {
 		return true, nil
 	}
-	pmk := k.pmkFor(r.SSID)
-	if len(pmk) != 32 {
-		return false, nil
-	}
 	msg := &EAPOLKey{Descriptor: r.Descriptor, KeyInfo: r.KeyInfo, KeyLength: r.KeyLength, KeyData: r.KeyData}
 	copy(msg.IV[:], r.IV)
-	ptk, err := DerivePTK(pmk, ap, sta, r.ANonce, r.SNonce, ptkBits)
-	if err != nil {
-		return false, err
+	pmks := k.pmksFor(r.SSID)
+	// The KEK depends on the pairwise cipher under the SHA-256 KDF, and a record doesn't
+	// say which that was. Unwrapping has its own integrity check, so a wrong guess fails.
+	ciphers := []string{""}
+	if usesSHA256KDF(msg.Version()) {
+		ciphers = []string{"", "GCMP-256"}
 	}
-	_, ok, err := k.installGTK(ap.String(), r.SSID, msg, splitPTK(ptk, msg.Version() == 1).KEK, r.TS)
-	return ok, err
+	var last error
+	for _, pmk := range pmks {
+		for _, cipher := range ciphers {
+			p, err := derivePair(pmk, ap, sta, r.ANonce, r.SNonce, msg.Version(), cipher)
+			if err != nil {
+				return false, err
+			}
+			_, ok, err := k.installGTK(ap.String(), r.SSID, msg, p.KEK, r.TS)
+			if ok {
+				return true, nil
+			}
+			last = err
+		}
+	}
+	return false, last
 }
 
 // processGroupKey follows group-key handshake message 1, in which the AP

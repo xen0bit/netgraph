@@ -1,6 +1,7 @@
 package wifi
 
 import (
+	"cmp"
 	"encoding/binary"
 	"encoding/hex"
 	"errors"
@@ -405,7 +406,7 @@ func (p *Processor) eapol(ts time.Time, f *Frame, msg *EAPOLKey) {
 			ANonce:     hex.EncodeToString(info.ANonce),
 			SNonce:     hex.EncodeToString(info.SNonce),
 			KeyVersion: info.Version,
-			Cipher:     info.Cipher,
+			Cipher:     cmp.Or(info.Chosen, info.Cipher),
 		}})
 	}
 	if g := info.GroupKey; g != nil && p.cfg.Emit != nil {

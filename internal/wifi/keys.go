@@ -6,6 +6,7 @@ import (
 	"crypto/hmac"
 	"crypto/md5"
 	"crypto/sha1"
+	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/binary"
 	"encoding/hex"
@@ -14,14 +15,17 @@ import (
 	"io"
 	"net"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
 )
 
-// Key derivation for WPA/WPA2-PSK. WPA3/SAE and 802.1X establish their PMK
+// Key derivation for WPA/WPA2-PSK. WPA3/SAE, OWE and 802.1X establish their PMK
 // in ways a passive observer cannot reproduce; Keyring accepts a PMK for
-// those cases, which is enough to follow the 4-way handshake.
+// those cases, which is enough to follow the 4-way handshake. An SAE or OWE PMK
+// changes with each association, so a network can have several: the handshake's
+// MIC says which one, if any, belongs to it.
 
 var errUnsupportedKey = errors.New("wifi: key exchange cannot be followed passively")
 
@@ -102,6 +106,73 @@ func DerivePTK(pmk, aa, spa, anonce, snonce []byte, bits int) ([]byte, error) {
 	return PRF(pmk, "Pairwise key expansion", data, bits/8), nil
 }
 
+// kdfSHA256 is the 802.11 KDF over HMAC-SHA-256 (IEEE 802.11-2020 12.7.1.6.2). The output's
+// length goes into every block, so a key of a different length differs throughout.
+func kdfSHA256(key []byte, label string, context []byte, bits int) []byte {
+	out := make([]byte, 0, (bits+7)/8+sha256.Size)
+	for i := uint16(1); len(out) < (bits+7)/8; i++ {
+		h := hmac.New(sha256.New, key)
+		var n [2]byte
+		binary.LittleEndian.PutUint16(n[:], i)
+		h.Write(n[:])
+		h.Write([]byte(label))
+		h.Write(context)
+		binary.LittleEndian.PutUint16(n[:], uint16(bits))
+		h.Write(n[:])
+		out = h.Sum(out)
+	}
+	return out[:(bits+7)/8]
+}
+
+func ptkContext(aa, spa, anonce, snonce []byte) []byte {
+	data := make([]byte, 0, 76)
+	a, s := lessFirst(aa, spa)
+	data = append(append(data, a...), s...)
+	a, s = lessFirst(anonce, snonce)
+	return append(append(data, a...), s...)
+}
+
+// usesSHA256KDF says a handshake's key descriptor version means the SHA-256 KDF: version 3
+// is the PSK-SHA256 and 802.1X-SHA256 suites, and version 0 leaves it to the AKM, of which
+// SAE and OWE with group 19 are the ones supported here.
+func usesSHA256KDF(version int) bool { return version == 0 || version == 3 }
+
+// temporalBits is the length of a cipher's temporal key.
+func temporalBits(cipher string) int {
+	if cipher == "GCMP-256" || cipher == "CCMP-256" {
+		return 256
+	}
+	return 128
+}
+
+// derivePair derives a client's keys for a handshake of this version and cipher. The two
+// KDFs differ: PRF-SHA1 gives a prefix of one long stream, so a single length serves all
+// ciphers, but the SHA-256 KDF's length changes the result.
+func derivePair(pmk, aa, spa, anonce, snonce []byte, version int, cipher string) (*PTK, error) {
+	if !usesSHA256KDF(version) {
+		ptk, err := DerivePTK(pmk, aa, spa, anonce, snonce, ptkBits)
+		if err != nil {
+			return nil, err
+		}
+		p := splitPTK(ptk, version == 1)
+		p.Cipher = cipher
+		return p, nil
+	}
+	if len(pmk) != 32 || len(anonce) != 32 || len(snonce) != 32 || len(aa) != 6 || len(spa) != 6 {
+		return nil, fmt.Errorf("wifi: bad PTK inputs")
+	}
+	tk := temporalBits(cipher)
+	ptk := kdfSHA256(pmk, "Pairwise key expansion", ptkContext(aa, spa, anonce, snonce), 256+tk)
+	p := &PTK{KCK: ptk[0:16], KEK: ptk[16:32], Cipher: cipher}
+	if tk == 256 {
+		p.TK256 = ptk[32:64]
+		p.TK = ptk[32:48]
+	} else {
+		p.TK = ptk[32:48]
+	}
+	return p, nil
+}
+
 func lessFirst(a, b []byte) ([]byte, []byte) {
 	if bytes.Compare(a, b) <= 0 {
 		return a, b
@@ -154,23 +225,29 @@ func pairwiseCipher(chosen string, sec Security) string {
 	return ""
 }
 
-// rsnPairwise returns the pairwise cipher named by the RSN element in an
+// rsnChoice returns the pairwise cipher and AKM named by the RSN element in an
 // EAPOL-Key message's (unencrypted) key data: message 2 carries the
 // station's choice there.
-func rsnPairwise(keyData []byte) string {
+func rsnChoice(keyData []byte) (cipher, akm string) {
 	ies, err := parseIEs(keyData)
 	if err != nil {
-		return ""
+		return "", ""
 	}
 	body, ok := ies.find(ieRSN)
 	if !ok {
-		return ""
+		return "", ""
 	}
 	s, err := parseSuiteIE(body, true)
-	if err != nil || len(s.Pairwise) != 1 {
-		return ""
+	if err != nil {
+		return "", ""
 	}
-	return s.Pairwise[0]
+	if len(s.Pairwise) == 1 {
+		cipher = s.Pairwise[0]
+	}
+	if len(s.AKMs) == 1 {
+		akm = s.AKMs[0]
+	}
+	return cipher, akm
 }
 
 // EAPOLKey is one 802.1X EAPOL-Key message. Raw aliases the frame and is
@@ -185,6 +262,8 @@ type EAPOLKey struct {
 	MIC        [16]byte
 	KeyData    []byte
 	Raw        []byte
+	// AKM is what message 2 chose, when known. Version 0 leaves the MIC to it.
+	AKM string
 }
 
 // Message is 1..4 for the 4-way handshake, 0 for a group-key message.
@@ -220,15 +299,16 @@ func (k *EAPOLKey) Cipher() string {
 		return "TKIP"
 	case 2:
 		return "CCMP"
-	case 3:
+	case 0, 3:
 		return "AES-CMAC"
 	}
 	return ""
 }
 
-// VerifyMIC checks the EAPOL-Key MIC with the key confirmation key. Only
-// HMAC-MD5 and HMAC-SHA1 versions are implemented; AES-CMAC (WPA3) is a
-// deliberate, explicit gap so a WPA3 network is never silently trusted.
+// VerifyMIC checks the EAPOL-Key MIC with the key confirmation key: HMAC-MD5,
+// HMAC-SHA1 or AES-CMAC. Version 0 leaves the choice to the AKM: SAE uses AES-CMAC, and
+// OWE with group 19 uses HMAC-SHA-256 cut to 128 bits. The suites with longer MICs don't
+// parse to this shape, so they fail here rather than verify.
 func (k *EAPOLKey) VerifyMIC(kck []byte) (bool, error) {
 	if len(k.Raw) < 99 {
 		return false, fmt.Errorf("eapol: short key frame")
@@ -253,7 +333,13 @@ func (k *EAPOLKey) VerifyMIC(kck []byte) (bool, error) {
 		h := hmac.New(sha1.New, kck)
 		h.Write(body)
 		mac = h.Sum(nil)
-	case 3:
+	case 0, 3:
+		if k.Version() == 0 && k.AKM == "OWE" {
+			h := hmac.New(sha256.New, kck)
+			h.Write(body)
+			mac = h.Sum(nil)
+			break
+		}
 		cm := aesCMAC(kck, body)
 		mac = cm[:]
 	default:
@@ -296,6 +382,8 @@ type HandshakeInfo struct {
 	Cipher    string
 	Valid     bool
 	Installed bool
+	// Chosen is the pairwise cipher the station picked, if its message 2 was seen.
+	Chosen string
 	// Group marks a group-key handshake message (a GTK rekey) rather
 	// than a 4-way handshake message; GTK that a group key was learned.
 	Group, GTK bool
@@ -312,6 +400,7 @@ type HandshakeInfo struct {
 type handshake struct {
 	anonce, snonce []byte
 	cipher         string // pairwise cipher from message 2's RSN element
+	akm            string // and the AKM
 }
 
 // pairSource is what a PTK was derived from: the network whose PMK was
@@ -341,9 +430,10 @@ type Keyring struct {
 	mu sync.RWMutex
 
 	networks   map[string]network
-	pmks       map[string][]byte     // SSID -> PMK
+	pmks       map[string][][]byte   // SSID -> its PMKs, the newest first
 	pairs      map[string]*PTK       // "bssid|sta" -> PTK
 	pairNet    map[string]pairSource // "bssid|sta" -> what derived the PTK
+	pairPMK    map[string][]byte     // "bssid|sta" -> the PMK it came from
 	handshakes map[string]*handshake
 	groups     map[string]*apGroup // BSSID -> GTKs
 	wep        [4][]byte
@@ -353,14 +443,56 @@ type Keyring struct {
 // WEP keys. The server reads them from its key file and serves them to
 // sensors, which hold them only in memory (Keyring.SetSecrets).
 type Secrets struct {
-	PMKs map[string][]byte // lower-case SSID -> 32-byte PMK
+	PMKs map[string][]byte // lower-case SSID -> 32-byte PMK, the newest given
+	// More holds a network's earlier PMKs, where it has several: SAE and OWE have one per
+	// association, so a handshake's MIC says which applies.
+	More map[string][][]byte
 	WEP  [4][]byte
+}
+
+// maxPMKsPerNetwork bounds how many PMKs one handshake gets tried against.
+const maxPMKsPerNetwork = 64
+
+// Add gives a network another PMK. The newest counts as its main one.
+func (s *Secrets) Add(ssid string, pmk []byte) {
+	ssid = strings.ToLower(ssid)
+	if s.PMKs == nil {
+		s.PMKs = map[string][]byte{}
+	}
+	old := s.PMKs[ssid]
+	if bytes.Equal(old, pmk) {
+		return
+	}
+	s.PMKs[ssid] = pmk
+	if old == nil {
+		return
+	}
+	if s.More == nil {
+		s.More = map[string][][]byte{}
+	}
+	kept := slices.DeleteFunc(s.More[ssid], func(b []byte) bool { return bytes.Equal(b, pmk) || bytes.Equal(b, old) })
+	kept = append(kept, old)
+	if len(kept) >= maxPMKsPerNetwork {
+		kept = kept[len(kept)-maxPMKsPerNetwork+1:]
+	}
+	s.More[ssid] = kept
+}
+
+// All lists every network's PMKs, a network's oldest first, so giving them to Add in this
+// order rebuilds the same thing.
+func (s *Secrets) All(yield func(ssid string, pmk []byte)) {
+	for ssid, pmk := range s.PMKs {
+		for _, old := range s.More[ssid] {
+			yield(ssid, old)
+		}
+		yield(ssid, pmk)
+	}
 }
 
 // LoadKeyFile reads Wi-Fi keys from a file. Each non-comment line is one of:
 //
 //	wpa2 <ssid> <passphrase or 64 hex digits>
-//	pmk  <ssid> <64 hex digits>
+//	pmk  <ssid> <64 hex digits>  (may repeat: SAE and OWE have one per association)
 //	wep  <0-3>  <5, 13 or 16 bytes of hex>
 //
 // The format is deliberately separate from command-line flags so a
@@ -399,7 +531,7 @@ func ParseKeyFile(r io.Reader) (*Secrets, error) {
 			if err != nil {
 				return nil, fmt.Errorf("line %d: %w", line, err)
 			}
-			s.PMKs[strings.ToLower(ssid)] = pmk
+			s.Add(ssid, pmk)
 		case "pmk":
 			ssid, pmk, ok := strings.Cut(rest, " ")
 			if !ok || ssid == "" {
@@ -409,7 +541,7 @@ func ParseKeyFile(r io.Reader) (*Secrets, error) {
 			if err != nil || len(b) != 32 {
 				return nil, fmt.Errorf("line %d: PMK must be 64 hex digits", line)
 			}
-			s.PMKs[strings.ToLower(ssid)] = b
+			s.Add(ssid, b)
 		case "wep":
 			idx, hexKey, ok := strings.Cut(rest, " ")
 			if !ok {
@@ -450,7 +582,8 @@ func ParseWEPKey(index int, hexKey string) ([]byte, error) {
 func NewKeyring() *Keyring {
 	return &Keyring{
 		networks:   map[string]network{},
-		pmks:       map[string][]byte{},
+		pmks:       map[string][][]byte{},
+		pairPMK:    map[string][]byte{},
 		pairs:      map[string]*PTK{},
 		pairNet:    map[string]pairSource{},
 		handshakes: map[string]*handshake{},
@@ -462,12 +595,18 @@ func NewKeyring() *Keyring {
 // PMK that was removed or changed is dropped with it, so revoking a
 // network's key on the server stops its decryption on the next sync.
 func (k *Keyring) SetSecrets(s *Secrets) {
-	pmks := map[string][]byte{}
+	pmks := map[string][][]byte{}
 	var wep [4][]byte
 	if s != nil {
 		for ssid, pmk := range s.PMKs {
+			ssid = strings.ToLower(ssid)
 			if len(pmk) == 32 {
-				pmks[strings.ToLower(ssid)] = append([]byte(nil), pmk...)
+				pmks[ssid] = append(pmks[ssid], append([]byte(nil), pmk...))
+			}
+			for _, more := range s.More[ssid] {
+				if len(more) == 32 {
+					pmks[ssid] = append(pmks[ssid], append([]byte(nil), more...))
+				}
 			}
 		}
 		for i, b := range s.WEP {
@@ -476,14 +615,20 @@ func (k *Keyring) SetSecrets(s *Secrets) {
 	}
 	k.mu.Lock()
 	defer k.mu.Unlock()
+	holds := func(list [][]byte, pmk []byte) bool {
+		return slices.ContainsFunc(list, func(b []byte) bool { return bytes.Equal(b, pmk) })
+	}
 	for key, src := range k.pairNet {
-		if !bytes.Equal(k.pmks[src.ssid], pmks[src.ssid]) {
+		if !holds(pmks[src.ssid], k.pairPMK[key]) {
 			delete(k.pairs, key)
 			delete(k.pairNet, key)
+			delete(k.pairPMK, key)
 		}
 	}
 	for bssid, g := range k.groups {
-		if !bytes.Equal(k.pmks[g.ssid], pmks[g.ssid]) {
+		// A group key came through one of the network's PMKs. Another being added doesn't
+		// touch it; losing all of them does.
+		if !slices.ContainsFunc(k.pmks[g.ssid], func(b []byte) bool { return holds(pmks[g.ssid], b) }) {
 			delete(k.groups, bssid)
 		}
 	}
@@ -498,7 +643,7 @@ func (k *Keyring) AddPassphrase(ssid, pass string) error {
 		return err
 	}
 	k.mu.Lock()
-	k.pmks[strings.ToLower(ssid)] = pmk
+	k.pmks[strings.ToLower(ssid)] = [][]byte{pmk}
 	k.mu.Unlock()
 	return nil
 }
@@ -510,7 +655,7 @@ func (k *Keyring) AddPMK(ssid string, pmk []byte) error {
 		return fmt.Errorf("wifi: PMK must be 32 bytes")
 	}
 	k.mu.Lock()
-	k.pmks[strings.ToLower(ssid)] = append([]byte(nil), pmk...)
+	k.pmks[strings.ToLower(ssid)] = [][]byte{append([]byte(nil), pmk...)}
 	k.mu.Unlock()
 	return nil
 }
@@ -560,7 +705,17 @@ func (k *Keyring) setNetwork(bssid, ssid string, s Security) {
 func (k *Keyring) pmkFor(ssid string) []byte {
 	k.mu.RLock()
 	defer k.mu.RUnlock()
-	return append([]byte(nil), k.pmks[strings.ToLower(ssid)]...)
+	if all := k.pmks[strings.ToLower(ssid)]; len(all) > 0 {
+		return append([]byte(nil), all[0]...)
+	}
+	return nil
+}
+
+// pmksFor is every PMK a network has. They're replaced whole, never changed, so sharing is fine.
+func (k *Keyring) pmksFor(ssid string) [][]byte {
+	k.mu.RLock()
+	defer k.mu.RUnlock()
+	return slices.Clone(k.pmks[strings.ToLower(ssid)])
 }
 
 // evict removes arbitrary entries until m holds at most keep. Map order is
@@ -615,11 +770,11 @@ func (k *Keyring) ProcessEAPOL(f *Frame, msg *EAPOLKey) HandshakeInfo {
 		hs.anonce = append([]byte(nil), msg.Nonce[:]...)
 	case 2:
 		hs.snonce = append([]byte(nil), msg.Nonce[:]...)
-		hs.cipher = rsnPairwise(msg.KeyData)
+		hs.cipher, hs.akm = rsnChoice(msg.KeyData)
 	case 3:
 		hs.anonce = append([]byte(nil), msg.Nonce[:]...)
 	}
-	anonce, snonce, cipher := hs.anonce, hs.snonce, hs.cipher
+	anonce, snonce, cipher, akm := hs.anonce, hs.snonce, hs.cipher, hs.akm
 	k.mu.Unlock()
 	if info.Message == 1 {
 		// It only carries the authenticator nonce; message 2 completes
@@ -636,33 +791,43 @@ func (k *Keyring) ProcessEAPOL(f *Frame, msg *EAPOLKey) HandshakeInfo {
 	if ssid == "" || len(anonce) != 32 || len(snonce) != 32 {
 		return info
 	}
-	pmk := k.pmkFor(ssid)
-	if len(pmk) != 32 {
+	pmks := k.pmksFor(ssid)
+	if len(pmks) == 0 {
 		// No passphrase/PMK: the frame is still useful as an
 		// observation, but no key can be derived.
 		return info
 	}
-	tkip := msg.Version() == 1
-	ptk, err := DerivePTK(pmk, ap, sta, anonce, snonce, ptkBits)
-	if err != nil {
-		info.Err = err
+	if msg.Version() == 0 && akm != "" && akm != "SAE" && akm != "OWE" {
+		info.Err = errUnsupportedKey // its keys and MICs are other lengths: report it, don't guess
 		return info
 	}
-	split := splitPTK(ptk, tkip)
-	split.Cipher = cipher
-	switch info.Message {
-	case 2, 3, 4:
-		ok, err := msg.VerifyMIC(split.KCK)
+	msg.AKM = akm
+	// The MIC is what proves a PMK is this handshake's. Nothing is installed without it.
+	var split *PTK
+	var pmk []byte
+	for _, candidate := range pmks {
+		p, err := derivePair(candidate, ap, sta, anonce, snonce, msg.Version(), cipher)
 		if err != nil {
 			info.Err = err
 			return info
 		}
-		info.Valid = ok
-		if !ok {
+		ok, err := msg.VerifyMIC(p.KCK)
+		if err != nil {
+			info.Err = err
 			return info
 		}
+		if ok {
+			split, pmk = p, candidate
+			break
+		}
 	}
-	k.install(key, newPairSource(ssid, anonce, snonce), split)
+	if split == nil {
+		info.Valid = false
+		return info
+	}
+	info.Valid = true
+	info.Chosen = cipher
+	k.install(key, newPairSource(ssid, anonce, snonce), split, pmk)
 	info.Installed = true
 	if info.Message == 3 {
 		// Message 3 carries the AP's current GTK, wrapped with the KEK.
@@ -710,22 +875,22 @@ func (k *Keyring) LoadHandshakeCipher(bssid, sta, ssid string, anonce, snonce []
 		// whose PMK changed: nothing to redo on a periodic resync.
 		return true, nil
 	}
-	pmk := k.pmkFor(ssid)
-	if len(pmk) != 32 {
+	// A stored handshake has no MIC to check a PMK against, so this needs there to be only
+	// the one. A network with several gets its keys from a handshake seen live.
+	pmks := k.pmksFor(ssid)
+	if len(pmks) != 1 {
 		return false, nil
 	}
-	ptk, err := DerivePTK(pmk, ap, st, anonce, snonce, ptkBits)
+	installedKey, err := derivePair(pmks[0], ap, st, anonce, snonce, keyVersion, cipher)
 	if err != nil {
 		return false, err
 	}
-	installedKey := splitPTK(ptk, keyVersion == 1)
-	installedKey.Cipher = cipher
-	k.install(key, src, installedKey)
+	k.install(key, src, installedKey, pmks[0])
 	return true, nil
 }
 
 // install records a pairwise key and what it was derived from.
-func (k *Keyring) install(key string, src pairSource, ptk *PTK) {
+func (k *Keyring) install(key string, src pairSource, ptk *PTK, pmk []byte) {
 	k.mu.Lock()
 	if len(k.pairs) > 50_000 {
 		// Evict some, not all: clearing the map drops every client's
@@ -736,10 +901,12 @@ func (k *Keyring) install(key string, src pairSource, ptk *PTK) {
 			}
 			delete(k.pairs, old)
 			delete(k.pairNet, old)
+			delete(k.pairPMK, old)
 		}
 	}
 	k.pairs[key] = ptk
 	k.pairNet[key] = src
+	k.pairPMK[key] = pmk
 	k.mu.Unlock()
 }
 
