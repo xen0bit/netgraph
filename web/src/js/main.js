@@ -9,6 +9,7 @@ import { tokens, lastToken, localSuggestions, searched } from "./filters.js";
 import { passportHTML } from "./passport.js";
 import { Privacy } from "./privacy.js";
 import { findingsHTML, findingDetail } from "./findings.js";
+import { airspaceHTML } from "./airspace.js";
 import { sensorStatus, sensorDetail, fleetSettingsHTML, readSettings } from "./fleet.js";
 import { typeBadge, typeWhy, profileForm, presenceHTML, linksHTML, qualityHTML } from "./devices.js";
 import { Pulse } from "./pulse.js";
@@ -60,7 +61,7 @@ const areas = {
   devices: { tabs: [["devices", "Devices"], ["presence", "Presence"], ["links", "To confirm"], ["passport", "Passport"]] },
   activity: { tabs: [["flows", "Connections"], ["destinations", "Destinations"], ["dns", "DNS"], ["facts", "Facts"], ["pulse", "Pulse"], ["quality", "Internet"]] },
   findings: { tabs: [["findings", "Inbox"], ["anomalies", "This window"], ["incidents", "Incidents"], ["insights", "Insights"]], tools: `<button id="whatif-open" type="button" title="Test a proposed policy against observed traffic">What-if</button>` },
-  wifi: { tabs: [["wifi", "Wi-Fi"]] },
+  wifi: { tabs: [["wifi", "Networks"], ["airspace", "Airspace"]] },
   settings: { tabs: [["settings", "General"], ["sensors", "Sensors"]] },
 };
 const areaOf = (t) => Object.keys(areas).find((a) => areas[a].tabs.some(([id]) => id === t));
@@ -781,6 +782,11 @@ async function renderTab(seq) {
     if (t === "settings") return renderSettings();
     if (t === "passport") return await renderPassport(seq);
     if (t === "findings") return await renderFindings(seq);
+    if (t === "airspace") {
+      const a = await track(api("airspace"));
+      if (seq === refreshSeq) $("#airspace-body").innerHTML = airspaceHTML(a);
+      return;
+    }
     if (t === "quality") {
       const q = await track(api("quality"));
       if (seq === refreshSeq) $("#quality-body").innerHTML = qualityHTML(q);
@@ -2869,7 +2875,7 @@ function filterSuggest() {
 function commands() {
   const go = [["Home", "home", "1"], ["Map", "map", "2"], ["Devices", "devices", "3"], ["Activity", "activity", "4"], ["Findings", "findings", "5"], ["Wi-Fi", "wifi", "6"], ["Settings", "settings", "7"]]
     .map(([label, area, key]) => ({ label: `Go to ${label}`, key, run: () => selectArea(area) }));
-  const views = [["Connections", "flows"], ["Destinations", "destinations"], ["DNS", "dns"], ["Facts", "facts"], ["Pulse", "pulse"], ["Presence", "presence"], ["Devices to confirm", "links"], ["Internet quality", "quality"], ["Findings inbox", "findings"], ["Anomalies in this window", "anomalies"], ["Incidents", "incidents"], ["Insights", "insights"], ["Sensors", "sensors"]]
+  const views = [["Connections", "flows"], ["Destinations", "destinations"], ["DNS", "dns"], ["Facts", "facts"], ["Pulse", "pulse"], ["Presence", "presence"], ["Devices to confirm", "links"], ["Internet quality", "quality"], ["Wi-Fi airspace", "airspace"], ["Findings inbox", "findings"], ["Anomalies in this window", "anomalies"], ["Incidents", "incidents"], ["Insights", "insights"], ["Sensors", "sensors"]]
     .map(([label, t]) => ({ label: `Go to ${label}`, run: () => selectTab(t) }));
   const onMap = (f) => () => { if (state.tab !== "graph") selectTab("graph"); f(); };
   return [

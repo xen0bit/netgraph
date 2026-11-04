@@ -3,7 +3,7 @@
 import { esc, ago } from "./util.js";
 
 const statusText = { ok: "Reporting", quiet: "Quiet", struggling: "Struggling" };
-const statusClass = { ok: "sev-low", quiet: "sev-medium", struggling: "sev-high" };
+const statusClass = { ok: "", quiet: "sev-medium", struggling: "sev-high" };
 
 export const sensorStatus = (s) => {
   const state = `<span class="badge ${statusClass[s.status] || ""}">${esc(statusText[s.status] || s.status || "")}</span>`;

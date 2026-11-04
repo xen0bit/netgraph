@@ -464,7 +464,7 @@ func syncWiFiKeys(ctx context.Context, shipper *wire.Shipper, keys *wifi.Keyring
 	sec := &wifi.Secrets{PMKs: map[string][]byte{}}
 	for _, p := range got.PMKs {
 		if b, err := hex.DecodeString(p.PMK); err == nil && len(b) == 32 && p.SSID != "" {
-			sec.PMKs[p.SSID] = b
+			sec.Add(p.SSID, b)
 		}
 	}
 	for _, w := range got.WEP {

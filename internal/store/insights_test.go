@@ -197,3 +197,71 @@ func TestWeatherFollowsTheHourOfTheWeek(t *testing.T) {
 		t.Errorf("gaps: %v", rep.Gaps)
 	}
 }
+
+func TestChannelsHeard(t *testing.T) {
+	got := channelsHeard([]model.AirspaceNetwork{
+		{Band: "2.4 GHz", Channel: 1, Signal: -70, Clients: []string{"a"}},
+		{Band: "2.4 GHz", Channel: 1, Signal: -40},
+		{Band: "2.4 GHz", Channel: 3},
+		{Band: "2.4 GHz", Channel: 6},
+		{Band: "5 GHz", Channel: 36, Signal: -60},
+		{Band: "5 GHz", Channel: 40},
+		{Band: "", Channel: 200},
+		{Band: "5 GHz", Channel: 0},
+	})
+	if len(got) != 5 {
+		t.Fatalf("%+v", got)
+	}
+	one := got[0]
+	if one.Channel != 1 || one.Networks != 2 || one.Clients != 1 || one.Strongest != -40 || one.Overlapping != 1 {
+		t.Errorf("%+v", one)
+	}
+	if three := got[1]; three.Overlapping != 3 { // two on 1, one on 6
+		t.Errorf("%+v", three)
+	}
+	if six := got[2]; six.Overlapping != 1 { // 3 is near, 1 isn't
+		t.Errorf("%+v", six)
+	}
+	if got[3].Band != "5 GHz" || got[3].Overlapping != 0 {
+		t.Errorf("%+v", got[3])
+	}
+}
+
+func TestWiFiBand(t *testing.T) {
+	for _, c := range []struct {
+		freq, ch int
+		want     string
+	}{
+		{2412, 1, "2.4 GHz"}, {5180, 36, "5 GHz"}, {5955, 1, "6 GHz"}, {0, 11, "2.4 GHz"}, {0, 149, "5 GHz"}, {0, 0, ""}, {0, 200, ""},
+	} {
+		if got := wifiBand(c.freq, c.ch); got != c.want {
+			t.Errorf("%d %d: %q", c.freq, c.ch, got)
+		}
+	}
+}
+
+func TestAirspaceReportsSignalAndChannels(t *testing.T) {
+	st := fleetStore(t)
+	ctx := context.Background()
+	now := time.Now()
+	evs := []wire.Event{
+		{Seq: 1, Type: wire.TypeWiFi, TS: now, WiFi: &wire.WiFi{Kind: "beacon", BSSID: "02:00:00:00:00:01", SSID: "home", Channel: 6, Frequency: 2437, Signal: -48, Security: "wpa3"}},
+		{Seq: 2, Type: wire.TypeWiFi, TS: now, WiFi: &wire.WiFi{Kind: "beacon", BSSID: "02:00:00:00:00:02", SSID: "next-door", Channel: 36, Frequency: 5180, Signal: -81, Security: "wpa2"}},
+	}
+	if _, err := st.Ingest(ctx, "air", "boot", evs); err != nil {
+		t.Fatal(err)
+	}
+	rep, err := st.Airspace(ctx, model.Filter{From: now.Add(-time.Minute), To: now.Add(time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rep.Networks) != 2 || len(rep.Channels) != 2 {
+		t.Fatalf("%+v", rep)
+	}
+	if n := rep.Networks[0]; n.SSID != "home" || n.Signal != -48 || n.Band != "2.4 GHz" {
+		t.Errorf("%+v", n)
+	}
+	if c := rep.Channels[1]; c.Band != "5 GHz" || c.Channel != 36 || c.Strongest != -81 {
+		t.Errorf("%+v", c)
+	}
+}

@@ -1582,6 +1582,12 @@ func (g *ingester) wifi(ctx context.Context, sid, ts int64, w *wire.WiFi) error 
 			if w.Security != "" {
 				attrs["security"] = w.Security
 			}
+			if w.Signal != 0 {
+				attrs["signal"] = strconv.Itoa(w.Signal)
+			}
+			if w.Frequency != 0 {
+				attrs["freq"] = strconv.Itoa(w.Frequency)
+			}
 			if err := g.fact(ctx, model.RelBroadcasts, dev, ssid, ts, ts, "wifi", attrs); err != nil {
 				return err
 			}

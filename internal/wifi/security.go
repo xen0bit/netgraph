@@ -329,9 +329,9 @@ func akmName(b []byte) string {
 		case 9:
 			return "FT-SAE"
 		case 11:
-			return "802.1X-SUITE-B-192"
+			return "802.1X-SUITE-B"
 		case 12:
-			return "OWE"
+			return "802.1X-SUITE-B-192"
 		case 13:
 			return "FT-802.1X-SHA384"
 		case 14:
@@ -343,9 +343,15 @@ func akmName(b []byte) string {
 		case 17:
 			return "FT-FILS-SHA384"
 		case 18:
-			return "OWE-TRANSITION"
+			return "OWE"
 		case 19:
+			return "FT-PSK-SHA384"
+		case 20:
+			return "PSK-SHA384"
+		case 24:
 			return "SAE-EXT-KEY"
+		case 25:
+			return "FT-SAE-EXT-KEY"
 		}
 	}
 	if oui == ouiMicrosoft && typ == 2 {

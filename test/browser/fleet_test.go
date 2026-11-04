@@ -51,3 +51,38 @@ func TestSensorDetailIsText(t *testing.T) {
 		t.Error("a sensor's own words became markup")
 	}
 }
+
+// Network names are whatever anyone nearby chooses to broadcast.
+func TestAirspace(t *testing.T) {
+	s := open(t, window()+"&tab=airspace", "")
+	s.waitFor("the empty state", `document.querySelector("#airspace-body").textContent.includes("monitor-mode")`)
+	var out struct {
+		Injected bool `json:"injected"`
+		Bars     int  `json:"bars"`
+		Advice   bool `json:"advice"`
+		Rows     int  `json:"rows"`
+	}
+	s.run(chromedp.Evaluate(`import("/js/airspace.js").then((m) => {
+		const bad = "<img src=x onerror=window.pwned=1>";
+		const box = document.createElement("div");
+		box.innerHTML = m.airspaceHTML({
+			networks: [
+				{ssid: bad, bssid: bad, security: bad, band: bad, channel: 1, signal: -40, clients: [bad], rogue: true, last_seen: Date.now()},
+				{ssid: "", bssid: "02:00:00:00:00:02", band: "2.4 GHz", channel: 3, signal: 0, last_seen: Date.now()},
+			],
+			channels: [
+				{band: "2.4 GHz", channel: 1, networks: 1, clients: 1, strongest: -40, overlapping: 1},
+				{band: "2.4 GHz", channel: 3, networks: 1, clients: 0, overlapping: 1},
+				{band: bad, channel: 36, networks: 1, clients: 0},
+			],
+			gaps: [bad],
+		});
+		return {injected: !!box.querySelector("img"), bars: box.querySelectorAll(".air-bar").length, advice: box.textContent.includes("has the fewest"), rows: box.querySelectorAll("tbody tr").length};
+	})`, &out, awaitPromise))
+	if out.Injected {
+		t.Error("a network's name became markup")
+	}
+	if out.Bars != 3 || !out.Advice || out.Rows != 2 {
+		t.Errorf("%+v", out)
+	}
+}

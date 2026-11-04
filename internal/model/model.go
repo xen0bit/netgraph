@@ -1247,6 +1247,8 @@ type AirspaceNetwork struct {
 	SSID      string   `json:"ssid"`
 	Security  string   `json:"security,omitempty"`
 	Channel   int      `json:"channel,omitempty"`
+	Signal    int      `json:"signal,omitempty"` // dBm, as last heard by a sensor
+	Band      string   `json:"band,omitempty"`   // 2.4, 5 or 6 GHz
 	Clients   []string `json:"clients,omitempty"`
 	FirstSeen int64    `json:"first_seen"`
 	LastSeen  int64    `json:"last_seen"`
@@ -1258,7 +1260,22 @@ type AirspaceReport struct {
 	FromMS   int64             `json:"from"`
 	ToMS     int64             `json:"to"`
 	Networks []AirspaceNetwork `json:"networks"`
+	Channels []AirspaceChannel `json:"channels"`
 	Gaps     []string          `json:"gaps,omitempty"`
+}
+
+// AirspaceChannel is what was heard on one channel. It counts networks, which isn't how busy
+// the air is: one network can be idle and another flat out.
+type AirspaceChannel struct {
+	Band     string `json:"band"`
+	Channel  int    `json:"channel"`
+	Networks int    `json:"networks"`
+	Clients  int    `json:"clients"`
+	// Strongest is the loudest network here, in dBm; 0 if no sensor reported a level.
+	Strongest int `json:"strongest,omitempty"`
+	// Overlapping counts networks on other channels near enough to share its air: on 2.4 GHz,
+	// where neighbouring channels overlap.
+	Overlapping int `json:"overlapping,omitempty"`
 }
 
 // WeatherPoint is one observed or forecast bucket.
@@ -1329,6 +1346,8 @@ type WiFiNetwork struct {
 	SSID      string `json:"ssid"`
 	Security  string `json:"security,omitempty"`
 	Channel   int    `json:"channel,omitempty"`
+	Signal    int    `json:"signal,omitempty"` // dBm, as last heard by a sensor
+	Frequency int    `json:"freq,omitempty"`   // MHz
 	Clients   int    `json:"clients"`
 	FirstSeen int64  `json:"first_seen"`
 	LastSeen  int64  `json:"last_seen"`

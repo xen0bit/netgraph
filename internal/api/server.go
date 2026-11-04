@@ -728,10 +728,11 @@ func (s *Server) wifiKeys(w http.ResponseWriter, r *http.Request) {
 	}
 	out := wire.WiFiKeys{PMKs: []wire.WiFiPMK{}, WEP: []wire.WiFiWEP{}, Handshakes: hs, GroupKeys: gks}
 	if sec := s.keys.Load(); sec != nil && s.ingestToken() != "" {
-		for ssid, pmk := range sec.PMKs {
+		sec.All(func(ssid string, pmk []byte) {
 			out.PMKs = append(out.PMKs, wire.WiFiPMK{SSID: ssid, PMK: hex.EncodeToString(pmk)})
-		}
-		slices.SortFunc(out.PMKs, func(a, b wire.WiFiPMK) int { return cmp.Compare(a.SSID, b.SSID) })
+		})
+		// Stable, so a network's order stays what All gave: it says which is newest.
+		slices.SortStableFunc(out.PMKs, func(a, b wire.WiFiPMK) int { return cmp.Compare(a.SSID, b.SSID) })
 		for i, k := range sec.WEP {
 			if k != nil {
 				out.WEP = append(out.WEP, wire.WiFiWEP{Index: i, Key: hex.EncodeToString(k)})

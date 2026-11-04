@@ -48,8 +48,8 @@ that are easy to break.
   **as the AP sent it, still wrapped with the client's KEK**, plus that
   handshake's nonces, stored in `wifi_group_keys`. Never ship an unwrapped
   GTK. The key file is never copied into the database.
-  WPA3/SAE and 802.1X are parsed but need a supplied PMK; never fake a
-  handshake result.
+  WPA3/SAE, OWE and 802.1X need a supplied PMK, and nothing installs unless the
+  handshake's MIC proves it; never fake a handshake result.
 - **Decoders are pure functions over bytes from the network**, which is
   attacker-controlled: bound every length, never loop on input, and give
   each a `Fuzz*` target. The processor also recovers from panics, but a
