@@ -325,6 +325,7 @@ async function renderTab(seq) {
   const t = state.tab;
   try {
     if (t === "graph") return await renderGraph(seq);
+    if (t === "insights") return await renderInsights(seq);
     const path = tablePath[t];
     const extra = state.limits[t] ? { limit: state.limits[t] } : {};
     if (t === "destinations" && $("#dest-group")?.value) extra.group = $("#dest-group").value;
@@ -880,6 +881,34 @@ function download(name, text, type) {
 function fileStamp() {
   const d = new Date(state.to);
   return `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}-${pad2(d.getHours())}${pad2(d.getMinutes())}`;
+}
+
+// --- insights -----------------------------------------------------------------------
+
+async function renderInsights(seq) {
+  const box = $("#insights-body");
+  box.innerHTML = `<p class="muted">Reading exposure, coverage, airspace and weather…</p>`;
+  try {
+    const [exposure, coverage, airspace, weather] = await Promise.all([
+      track(api("exposure")), track(api("coverage")), track(api("airspace")), track(api("weather")),
+    ]);
+    if (seq !== refreshSeq) return;
+    const findings = (exposure?.findings || []).map((f) => `<li>${badge(f.severity)} <b>${esc(f.kind.replaceAll("_", " "))}</b> ${esc(f.summary)}</li>`).join("");
+    const sensors = (coverage?.sensors || []).map((s) => `<tr><td>${esc(s.name)}</td><td>${s.devices}</td><td>${s.only_device}</td><td>${stamp(s.last_seen)}</td></tr>`).join("");
+    const only = (coverage?.devices || []).filter((d) => d.only_one).slice(0, 20).map((d) => `<li>${esc(d.label)} <span class="muted">only by ${esc(d.sensors.join(", "))}</span></li>`).join("");
+    const nets = (airspace?.networks || []).slice(0, 50).map((n) => `<tr><td class="mono">${esc(n.bssid)}</td><td>${esc(n.ssid)}</td><td>${esc(n.security || "open")}</td><td>${n.channel}</td><td>${(n.clients || []).length}</td><td>${n.rogue ? badge("high", "rogue") : ""}</td></tr>`).join("");
+    const pts = (weather?.points || []);
+    const max = Math.max(1, ...pts.map((p) => p.bytes_out + p.bytes_in));
+    const bars = pts.map((p) => `<span class="wbar${p.forecast ? " forecast" : ""}" title="${stamp(p.ts)} ${bytes(p.bytes_out + p.bytes_in)}" style="height:${Math.max(2, ((p.bytes_out + p.bytes_in) / max) * 54)}px"></span>`).join("");
+    box.innerHTML = `<div class="insight-grid">
+      <section class="card"><h3>Exposure</h3><p class="muted">Reachable or weak things, from evidence.</p><ul class="tight">${findings || "<li class=\"muted\">Nothing stands out.</li>"}</ul>${(exposure?.gaps || []).map((g) => `<p class="muted">${esc(g)}</p>`).join("")}</section>
+      <section class="card"><h3>Sensor coverage</h3><table class="mini"><thead><tr><th>Sensor</th><th>Devices</th><th>Only seen</th><th>Last seen</th></tr></thead><tbody>${sensors}</tbody></table>${only ? `<h4>Only one sensor saw</h4><ul class="tight">${only}</ul>` : ""}<p class="muted">Coverage is where traffic was observed, not an RF survey.</p></section>
+      <section class="card"><h3>Wi-Fi airspace</h3><table class="mini"><thead><tr><th>BSSID</th><th>SSID</th><th>Security</th><th>Ch</th><th>Clients</th><th></th></tr></thead><tbody>${nets || "<tr><td colspan=\"6\" class=\"muted\">No monitor-mode Wi-Fi data.</td></tr>"}</tbody></table></section>
+      <section class="card"><h3>Network weather</h3><div class="weather">${bars}</div><p class="muted">${weather ? `${pts.length} buckets · ${fmtSpan(weather.step_ms)} · the last six are a moving-mean forecast with a band` : "No traffic data."}</p>${(weather?.gaps || []).map((g) => `<p class="muted">${esc(g)}</p>`).join("")}</section>
+    </div>`;
+  } catch (e) {
+    box.innerHTML = `<p class="muted">${esc(e.message)}</p>`;
+  }
 }
 
 // --- entity panel -------------------------------------------------------------------

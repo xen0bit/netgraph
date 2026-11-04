@@ -35,6 +35,10 @@ type Backend interface {
 	Story(ctx context.Context, id string, f Filter) (*Story, error)
 	Timeline(ctx context.Context, f Filter, q TimelineQuery) (*TimelinePage, error)
 	Diff(ctx context.Context, a, b Filter, scope string) (*Diff, error)
+	Exposure(ctx context.Context, f Filter) (*ExposureReport, error)
+	Coverage(ctx context.Context, f Filter) (*CoverageReport, error)
+	Airspace(ctx context.Context, f Filter) (*AirspaceReport, error)
+	Weather(ctx context.Context, f Filter) (*WeatherReport, error)
 }
 
 // SearchResult is an entity whose key or name matches a search: a device by
@@ -833,6 +837,93 @@ type Answer struct {
 	Plan       []ToolCall    `json:"plan,omitempty"`
 	Followups  []string      `json:"followups,omitempty"`
 	Gaps       []string      `json:"gaps,omitempty"`
+}
+
+// ExposureFinding is one observation about what is reachable or weak.
+type ExposureFinding struct {
+	Kind     string        `json:"kind"`
+	Severity string        `json:"severity"`
+	Entity   string        `json:"entity,omitempty"`
+	Label    string        `json:"label,omitempty"`
+	Summary  string        `json:"summary"`
+	Evidence []EvidenceRef `json:"evidence,omitempty"`
+}
+
+// ExposureReport is a read-only risk inventory, not a vulnerability scan.
+type ExposureReport struct {
+	FromMS   int64             `json:"from"`
+	ToMS     int64             `json:"to"`
+	Findings []ExposureFinding `json:"findings"`
+	Gaps     []string          `json:"gaps,omitempty"`
+}
+
+// CoverageSensor is one sensor's health and observed devices.
+type CoverageSensor struct {
+	Name       string   `json:"name"`
+	LastSeen   int64    `json:"last_seen"`
+	Version    string   `json:"version,omitempty"`
+	Interfaces []string `json:"interfaces,omitempty"`
+	Devices    int      `json:"devices"`
+	OnlyDevice int      `json:"only_device"`
+}
+
+// CoverageDevice is which sensors saw one device.
+type CoverageDevice struct {
+	Device  string   `json:"device"`
+	Label   string   `json:"label,omitempty"`
+	Sensors []string `json:"sensors"`
+	OnlyOne bool     `json:"only_one,omitempty"`
+}
+
+// CoverageReport shows what each sensor can and cannot see.
+type CoverageReport struct {
+	FromMS  int64            `json:"from"`
+	ToMS    int64            `json:"to"`
+	Sensors []CoverageSensor `json:"sensors"`
+	Devices []CoverageDevice `json:"devices"`
+	Gaps    []string         `json:"gaps,omitempty"`
+}
+
+// AirspaceNetwork is one BSSID in the Wi-Fi airspace view.
+type AirspaceNetwork struct {
+	BSSID     string   `json:"bssid"`
+	SSID      string   `json:"ssid"`
+	Security  string   `json:"security,omitempty"`
+	Channel   int      `json:"channel,omitempty"`
+	Clients   []string `json:"clients,omitempty"`
+	FirstSeen int64    `json:"first_seen"`
+	LastSeen  int64    `json:"last_seen"`
+	Rogue     bool     `json:"rogue,omitempty"`
+}
+
+// AirspaceReport is the time-aware Wi-Fi view.
+type AirspaceReport struct {
+	FromMS   int64             `json:"from"`
+	ToMS     int64             `json:"to"`
+	Networks []AirspaceNetwork `json:"networks"`
+	Gaps     []string          `json:"gaps,omitempty"`
+}
+
+// WeatherPoint is one observed or forecast bucket.
+type WeatherPoint struct {
+	TS       int64  `json:"ts"`
+	BytesOut uint64 `json:"bytes_out"`
+	BytesIn  uint64 `json:"bytes_in"`
+	Flows    int    `json:"flows"`
+	DNS      int    `json:"dns"`
+	Devices  int    `json:"devices"`
+	Lower    uint64 `json:"lower,omitempty"`
+	Upper    uint64 `json:"upper,omitempty"`
+	Forecast bool   `json:"forecast,omitempty"`
+}
+
+// WeatherReport is a simple, explainable traffic forecast.
+type WeatherReport struct {
+	FromMS int64          `json:"from"`
+	ToMS   int64          `json:"to"`
+	StepMS int64          `json:"step"`
+	Points []WeatherPoint `json:"points"`
+	Gaps   []string       `json:"gaps,omitempty"`
 }
 
 // AnomalyMute suppresses matching findings until Until (ms). Empty Kind,

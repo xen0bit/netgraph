@@ -246,13 +246,15 @@ func checkWebUI(t *testing.T, devtools, ui, token, shotDir string, expect []stri
 		}
 	}
 
-	// The Incidents tab must at least render, even when no one has saved one.
+	// The Incidents and Insights tabs must render.
 	err = chromedp.Run(ctx,
 		chromedp.Click(`.tabs button[data-tab="incidents"]`, chromedp.ByQuery),
 		chromedp.WaitVisible(`#t-incidents`, chromedp.ByQuery),
+		chromedp.Click(`.tabs button[data-tab="insights"]`, chromedp.ByQuery),
+		chromedp.WaitVisible(`#insights-body .card`, chromedp.ByQuery),
 	)
 	if err != nil {
-		t.Errorf("incidents tab: %v", err)
+		t.Errorf("incidents/insights tabs: %v", err)
 	}
 
 	// Flight Recorder, Ask and What-if: the three new front doors.

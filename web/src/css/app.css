@@ -240,3 +240,16 @@ dialog.ask details { margin-top: 8px; }
 dialog.whatif { max-width: 900px; width: min(900px, 94vw); max-height: 86vh; overflow: auto; }
 dialog.whatif textarea { width: 100%; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
 dialog.whatif .actions { display: flex; gap: 10px; align-items: center; margin: 8px 0; }
+
+/* Insights. */
+.insight-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 14px; padding: 4px 0; }
+.card { border: 1px solid var(--line); border-radius: 8px; padding: 12px; background: var(--bg-1); }
+.card h3 { margin: 0 0 6px; }
+.card h4 { margin: 10px 0 4px; }
+.card ul.tight { margin: 6px 0; padding-left: 18px; }
+.card ul.tight li { margin: 2px 0; }
+table.mini { width: 100%; border-collapse: collapse; font-size: 12px; }
+table.mini th, table.mini td { text-align: left; padding: 3px 5px; border-bottom: 1px solid var(--line); }
+.weather { display: flex; align-items: flex-end; gap: 2px; height: 60px; padding: 4px 0; }
+.wbar { flex: 1; min-width: 2px; background: var(--accent); border-radius: 1px 1px 0 0; opacity: .8; }
+.wbar.forecast { background: transparent; border: 1px dashed var(--accent); opacity: .6; }

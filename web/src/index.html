@@ -72,6 +72,7 @@
     <button role="tab" data-tab="sensors">Sensors</button>
     <button role="tab" data-tab="anomalies">Anomalies</button>
     <button role="tab" data-tab="incidents">Incidents</button>
+    <button role="tab" data-tab="insights">Insights</button>
   </nav>
 
   <main>
@@ -109,6 +110,7 @@
     <section id="view-facts" class="view" hidden><table id="t-facts"></table></section>
     <section id="view-wifi" class="view" hidden><table id="t-wifi"></table></section>
     <section id="view-sensors" class="view" hidden><table id="t-sensors"></table></section>
+    <section id="view-insights" class="view" hidden><div id="insights-body"></div></section>
     <section id="view-incidents" class="view" hidden><div class="table-tools"><label class="muted">Status <select id="incident-status" aria-label="Filter incidents by status"><option value="">all</option><option value="open">open</option><option value="acknowledged">acknowledged</option><option value="resolved">resolved</option></select></label></div><table id="t-incidents"></table></section>
     <section id="view-anomalies" class="view" hidden><p id="anomaly-note" class="muted"></p><div class="table-tools"><label class="muted">Severity <select id="anomaly-sev" aria-label="Filter anomalies by severity"><option value="">all</option><option value="high">high</option><option value="medium">medium</option><option value="low">low</option></select></label></div><table id="t-anomalies"></table><div id="mutes"></div></section>
     <aside id="panel" class="panel" hidden aria-label="Details">

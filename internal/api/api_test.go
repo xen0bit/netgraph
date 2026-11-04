@@ -617,6 +617,18 @@ func TestRecorderEndpoints(t *testing.T) {
 	if _, err := c.Diff(ctx, window, window, ""); err != nil {
 		t.Fatalf("diff: %v", err)
 	}
+	if _, err := c.Exposure(ctx, window); err != nil {
+		t.Fatalf("exposure: %v", err)
+	}
+	if _, err := c.Coverage(ctx, window); err != nil {
+		t.Fatalf("coverage: %v", err)
+	}
+	if _, err := c.Airspace(ctx, window); err != nil {
+		t.Fatalf("airspace: %v", err)
+	}
+	if _, err := c.Weather(ctx, window); err != nil {
+		t.Fatalf("weather: %v", err)
+	}
 
 	post := func(path string, body any) *http.Response {
 		t.Helper()

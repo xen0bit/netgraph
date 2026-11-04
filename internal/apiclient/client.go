@@ -307,3 +307,27 @@ func (c *Client) Ask(ctx context.Context, question string, f model.Filter) (*mod
 	}
 	return &v, nil
 }
+
+func (c *Client) Exposure(ctx context.Context, f model.Filter) (*model.ExposureReport, error) {
+	var v model.ExposureReport
+	err := c.getJSON(ctx, "/api/v1/exposure", f.Values(), &v)
+	return &v, err
+}
+
+func (c *Client) Coverage(ctx context.Context, f model.Filter) (*model.CoverageReport, error) {
+	var v model.CoverageReport
+	err := c.getJSON(ctx, "/api/v1/coverage", f.Values(), &v)
+	return &v, err
+}
+
+func (c *Client) Airspace(ctx context.Context, f model.Filter) (*model.AirspaceReport, error) {
+	var v model.AirspaceReport
+	err := c.getJSON(ctx, "/api/v1/airspace", f.Values(), &v)
+	return &v, err
+}
+
+func (c *Client) Weather(ctx context.Context, f model.Filter) (*model.WeatherReport, error) {
+	var v model.WeatherReport
+	err := c.getJSON(ctx, "/api/v1/weather", f.Values(), &v)
+	return &v, err
+}
