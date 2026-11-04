@@ -369,7 +369,7 @@ func TestWebUI(t *testing.T) {
 // clickTab reaches a view the way a person does: its area, then the view in it.
 func clickTab(tab string) chromedp.Action {
 	area := map[string]string{"flows": "activity", "dns": "activity", "facts": "activity", "destinations": "activity",
-		"anomalies": "findings", "incidents": "findings", "insights": "findings", "sensors": "settings", "graph": "map"}[tab]
+		"findings": "findings", "anomalies": "findings", "incidents": "findings", "insights": "findings", "sensors": "settings", "graph": "map"}[tab]
 	if area == "" {
 		area = tab
 	}

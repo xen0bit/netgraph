@@ -127,6 +127,8 @@ func New(cfg Config) *Server {
 	read("/api/v1/home", s.home)
 	read("/api/v1/passport", s.passport)
 	read("/api/v1/presence", s.presence)
+	read("/api/v1/findings", s.findings)
+	read("/api/v1/findings/{id}", s.finding)
 	read("/api/v1/devices/links", s.deviceLinks)
 	read("/api/v1/reel", s.reel)
 	read("/api/v1/reel/markers", s.reelMarkers)
@@ -169,6 +171,9 @@ func New(cfg Config) *Server {
 	s.mux.Handle("PUT /api/v1/devices/{mac}/label", s.requireRead(http.HandlerFunc(s.setLabel)))
 	s.mux.Handle("PUT /api/v1/devices/{mac}/profile", s.requireRead(http.HandlerFunc(s.setProfile)))
 	s.mux.Handle("POST /api/v1/devices/{mac}/link", s.requireRead(http.HandlerFunc(s.decideLink)))
+	s.mux.Handle("PATCH /api/v1/findings/{id}", s.requireRead(http.HandlerFunc(s.updateFinding)))
+	s.mux.Handle("POST /api/v1/findings/{id}/fine", s.requireRead(http.HandlerFunc(s.findingFine)))
+	s.mux.Handle("POST /api/v1/findings/seen", s.requireRead(http.HandlerFunc(s.findingsSeen)))
 	s.mux.Handle("POST /api/v1/anomalies/mute", s.requireRead(http.HandlerFunc(s.muteAnomaly)))
 	s.mux.Handle("POST /api/v1/whatif", s.requireRead(http.HandlerFunc(s.whatif)))
 	s.mux.Handle("POST /api/v1/ask", s.requireRead(http.HandlerFunc(s.ask)))
@@ -842,6 +847,116 @@ func (s *Server) deviceLinks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, links)
+}
+
+func (s *Server) findings(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	fq := model.FindingQuery{Status: q.Get("status"), Device: q.Get("device")}
+	for k, dst := range map[string]*int64{"since": &fq.SinceMS, "to": &fq.ToMS} {
+		if v := q.Get(k); v != "" {
+			n, err := strconv.ParseInt(v, 10, 64)
+			if err != nil || n <= 0 {
+				httpError(w, http.StatusBadRequest, fmt.Errorf("%s must be unix milliseconds", k))
+				return
+			}
+			*dst = n
+		}
+	}
+	if v := q.Get("limit"); v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n <= 0 {
+			httpError(w, http.StatusBadRequest, errors.New("limit must be a positive number"))
+			return
+		}
+		fq.Limit = n
+	}
+	out, err := s.cfg.Store.Findings(r.Context(), fq)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, out)
+}
+
+func findingID(w http.ResponseWriter, r *http.Request) (int64, bool) {
+	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
+	if err != nil {
+		httpError(w, http.StatusBadRequest, errors.New("a finding's id is a number"))
+		return 0, false
+	}
+	return id, true
+}
+
+func (s *Server) finding(w http.ResponseWriter, r *http.Request) {
+	id, ok := findingID(w, r)
+	if !ok {
+		return
+	}
+	f, err := s.cfg.Store.Finding(r.Context(), id)
+	if err != nil {
+		s.fail(w, err)
+		return
+	}
+	writeJSON(w, f)
+}
+
+func (s *Server) updateFinding(w http.ResponseWriter, r *http.Request) {
+	id, ok := findingID(w, r)
+	if !ok {
+		return
+	}
+	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		httpError(w, http.StatusUnsupportedMediaType, errors.New("expected application/json"))
+		return
+	}
+	var body struct {
+		Status string `json:"status"`
+		Note   string `json:"note"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192)).Decode(&body); err != nil {
+		httpError(w, http.StatusBadRequest, errors.New(`expected {"status": "...", "note": "..."}`))
+		return
+	}
+	if err := s.cfg.Store.SetFindingStatus(r.Context(), id, body.Status, body.Note); err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) findingFine(w http.ResponseWriter, r *http.Request) {
+	id, ok := findingID(w, r)
+	if !ok {
+		return
+	}
+	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		httpError(w, http.StatusUnsupportedMediaType, errors.New("expected application/json"))
+		return
+	}
+	var body struct {
+		Note string `json:"note"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8192)).Decode(&body); err != nil {
+		httpError(w, http.StatusBadRequest, errors.New(`expected {"note": "..."}`))
+		return
+	}
+	if err := s.cfg.Store.FindingFine(r.Context(), id, body.Note); err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) findingsSeen(w http.ResponseWriter, r *http.Request) {
+	if ct := r.Header.Get("Content-Type"); !strings.HasPrefix(ct, "application/json") {
+		httpError(w, http.StatusUnsupportedMediaType, errors.New("expected application/json"))
+		return
+	}
+	if err := s.cfg.Store.MarkFindingsSeen(r.Context()); err != nil {
+		s.fail(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) presence(w http.ResponseWriter, r *http.Request) {

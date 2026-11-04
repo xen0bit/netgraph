@@ -64,6 +64,9 @@ func (s *Store) Retain(ctx context.Context) (RetentionResult, error) {
 		// its GTK for as long as it runs, so these follow the rollups too.
 		{&r.Handshakes, `DELETE FROM wifi_group_keys WHERE rowid IN (SELECT rowid FROM wifi_group_keys WHERE ts < ? LIMIT 5000)`, roll, true},
 		{&r.Mutes, `DELETE FROM anomaly_mutes WHERE until < ?`, now.UnixMilli(), true},
+		// Closed findings follow the rollups their evidence came from; open ones stay
+		// until someone or a quiet week closes them.
+		{&r.Mutes, `DELETE FROM findings WHERE status IN ('resolved', 'dismissed') AND last_seen < ?`, roll, true},
 	}
 	// Each chunk takes the ingest lock for itself, so ingest runs between
 	// them. Deleting a fact ingest still has open is harmless: a fact past

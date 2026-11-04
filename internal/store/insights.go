@@ -254,10 +254,23 @@ func (s *Store) Weather(ctx context.Context, f model.Filter) (*model.WeatherRepo
 		mean := sum / float64(n)
 		sd := math.Sqrt(max(0, sum2/float64(n)-mean*mean))
 		next := series.Buckets[len(series.Buckets)-1].TS + step
+		season, err := s.weeklyPattern(ctx, f, to)
+		if err != nil {
+			return nil, err
+		}
+		seasonal := false
 		for i := range int64(6) {
-			out.Points = append(out.Points, model.WeatherPoint{
-				TS: next + i*step, Lower: uint64(max(0, mean-sd)), Upper: uint64(mean + sd), Forecast: true,
-			})
+			ts := next + i*step
+			lo, hi := max(0, mean-sd), mean+sd
+			if m, d, ok := season.at(ts, float64(step)/float64(time.Hour.Milliseconds())); ok {
+				lo, hi, seasonal = max(0, m-d), m+d, true
+			}
+			out.Points = append(out.Points, model.WeatherPoint{TS: ts, Lower: uint64(lo), Upper: uint64(hi), Forecast: true})
+		}
+		if seasonal {
+			out.Gaps = append(out.Gaps, "forecast follows this hour's usual traffic over up to four weeks")
+		} else {
+			out.Gaps = append(out.Gaps, "forecast is a moving mean: there isn't yet a week or more of history at this hour")
 		}
 	} else {
 		out.Gaps = append(out.Gaps, "no whole bucket to forecast from")
@@ -265,6 +278,80 @@ func (s *Store) Weather(ctx context.Context, f model.Filter) (*model.WeatherRepo
 	if series.Precision != model.PrecisionExact {
 		out.Gaps = append(out.Gaps, "the window is answered from hourly rollups")
 	}
-	out.Gaps = append(out.Gaps, "forecast is a moving mean over observed buckets, not a seasonal model")
 	return out, nil
+}
+
+// weeklyPattern is what traffic usually is at each hour of the week, and failing
+// that at each hour of the day, from the hourly rollups of up to four weeks. Quiet
+// hours have no rollup row, so they count as zero from the first data held.
+type weeklyPattern struct {
+	week, day map[int64][]float64
+}
+
+const (
+	patternWeeks   = 4
+	patternMinWeek = 2 // samples of an hour of the week before trusting it
+	patternMinDay  = 3 // samples of an hour of the day
+)
+
+func (s *Store) weeklyPattern(ctx context.Context, f model.Filter, to int64) (*weeklyPattern, error) {
+	hour := time.Hour.Milliseconds()
+	end := hourOf(to)
+	from := end - patternWeeks*7*24*hour
+	w := &where{}
+	w.add("bucket >= ? AND bucket < ?", from, end)
+	if err := s.flowWhere(ctx, f, w, hourlyCols); err != nil {
+		return nil, err
+	}
+	rows, err := s.r.QueryContext(ctx, `SELECT bucket, sum(bytes_out + bytes_in) FROM traffic_hourly WHERE `+w.sql()+` GROUP BY bucket ORDER BY bucket`, w.args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	got := map[int64]float64{}
+	first := int64(0)
+	for rows.Next() {
+		var b int64
+		var v float64
+		if err := rows.Scan(&b, &v); err != nil {
+			return nil, err
+		}
+		if first == 0 {
+			first = b
+		}
+		got[b] = v
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	p := &weeklyPattern{week: map[int64][]float64{}, day: map[int64][]float64{}}
+	if first == 0 {
+		return p, nil
+	}
+	for b := first; b < end; b += hour {
+		p.week[pmod(b, 7*24*hour)/hour] = append(p.week[pmod(b, 7*24*hour)/hour], got[b])
+		p.day[pmod(b, 24*hour)/hour] = append(p.day[pmod(b, 24*hour)/hour], got[b])
+	}
+	return p, nil
+}
+
+// at is the expected traffic and its spread for a bucket of hours long, at ts.
+func (p *weeklyPattern) at(ts int64, hours float64) (mean, sd float64, ok bool) {
+	hour := time.Hour.Milliseconds()
+	samples := p.week[pmod(ts, 7*24*hour)/hour]
+	if len(samples) < patternMinWeek {
+		samples = p.day[pmod(ts, 24*hour)/hour]
+		if len(samples) < patternMinDay {
+			return 0, 0, false
+		}
+	}
+	var sum, sum2 float64
+	for _, v := range samples {
+		sum += v
+		sum2 += v * v
+	}
+	n := float64(len(samples))
+	mean = sum / n
+	sd = math.Sqrt(max(0, sum2/n-mean*mean))
+	return mean * hours, sd * hours, true
 }

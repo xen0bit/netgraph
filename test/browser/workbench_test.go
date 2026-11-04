@@ -361,3 +361,44 @@ func TestLinkSuggestionsAsk(t *testing.T) {
 	s.run(chromedp.Click(`[data-link="same"]`, chromedp.ByQuery))
 	s.waitFor("it answered", `window.__link?.body.includes('"decision":"same"') && window.__link.url.includes("da%3A00") && document.querySelector("#links-body h2")?.textContent === "Nothing to ask"`)
 }
+
+// The inbox: a finding is counted, explained, and leaves when it's dealt with.
+func TestFindingsInbox(t *testing.T) {
+	s := open(t, "tab=findings", "")
+	s.waitFor("a finding", `!!document.querySelector("#findings-body [data-finding]")`)
+	s.waitFor("the count", `!document.querySelector("#findings-count").hidden || document.querySelectorAll("#findings-body .finding.unread").length === 0`)
+	s.run(chromedp.Click(`#findings-body [data-finding]`, chromedp.ByQuery))
+	s.waitFor("the explanation", `!document.querySelector("#panel").hidden && document.querySelector("#panel-body").textContent.includes("Why this fired") && document.querySelector("#panel-body").textContent.includes("What you could do")`)
+	id := `document.querySelector("#findings-body [data-finding]").dataset.finding`
+	var first string
+	s.eval(id, &first)
+	s.run(chromedp.Click(`#panel-body [data-fstatus="resolved"]`, chromedp.ByQuery))
+	s.waitFor("it to leave Open", fmt.Sprintf(`!document.querySelector('#findings-body [data-finding="%s"]')`, first))
+	s.run(chromedp.Click(`[data-findings-status="resolved"]`, chromedp.ByQuery))
+	s.waitFor("it under Resolved", fmt.Sprintf(`!!document.querySelector('#findings-body [data-finding="%s"]')`, first))
+	s.run(chromedp.Click(fmt.Sprintf(`#findings-body [data-finding="%s"]`, first), chromedp.ByQuery))
+	s.waitFor("its panel", `!!document.querySelector('#panel-body [data-fstatus="new"]')`)
+	s.run(chromedp.Click(`#panel-body [data-fstatus="new"]`, chromedp.ByQuery))
+	s.waitFor("it reopened", fmt.Sprintf(`!document.querySelector('#findings-body [data-finding="%s"]')`, first))
+}
+
+// Findings off the network are text.
+func TestFindingsAreText(t *testing.T) {
+	bad := `<img src=x onerror=window.__pwned=1>`
+	stub := fmt.Sprintf(`const real = window.fetch; window.fetch = async (u, o) => {
+		const url = String(u);
+		const f = {id: 7, kind: %[1]q, severity: "high", summary: %[1]q, device: "device:aa", device_name: %[1]q, first_seen: 1, last_seen: 2, occurrences: 1, status: "new", status_at: 2, why: %[1]q, advice: %[1]q, usual: %[1]q, note: %[1]q, evidence: {x: %[1]q}};
+		if (url.includes("/findings/7") && !(o && o.method)) return new Response(JSON.stringify(f), {headers: {"content-type": "application/json"}});
+		if (url.includes("/findings/7")) return new Response(null, {status: 204});
+		if (url.includes("/api/v1/findings")) return new Response(JSON.stringify({findings: [f, {...f, id: 8}], groups: [{device: "device:aa", device_name: %[1]q, from: 1, to: 2, severity: "high", ids: [7, 8]}], counts: {new: 2}, scanned_at: 1}), {headers: {"content-type": "application/json"}});
+		return real(u, o); };`, bad)
+	s := open(t, "tab=findings", stub)
+	s.waitFor("a finding", `!!document.querySelector("#findings-body [data-finding]")`)
+	s.run(chromedp.Click(`#findings-body [data-finding]`, chromedp.ByQuery))
+	s.waitFor("details", `document.querySelector("#panel-body").textContent.includes("Why this fired")`)
+	var pwned bool
+	s.eval(`!!window.__pwned || !!document.querySelector("#findings-body img, #panel-body img")`, &pwned)
+	if pwned {
+		t.Error("a finding became markup")
+	}
+}

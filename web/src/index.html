@@ -86,7 +86,7 @@
     <button role="tab" data-area="map" data-tab="graph">Map</button>
     <button role="tab" data-area="devices" data-tab="devices">Devices</button>
     <button role="tab" data-area="activity" data-tab="flows">Activity</button>
-    <button role="tab" data-area="findings" data-tab="anomalies">Findings</button>
+    <button role="tab" data-area="findings" data-tab="findings">Findings<span id="findings-count" class="nav-count" hidden></span></button>
     <button role="tab" data-area="wifi" data-tab="wifi">Wi-Fi</button>
     <button role="tab" data-area="settings" data-tab="settings">Settings</button>
   </nav>
@@ -136,6 +136,7 @@
       </div>
       </details>
     </section>
+    <section id="view-findings" class="view" hidden><div id="findings-body"></div></section>
     <section id="view-presence" class="view" hidden><div id="presence-body"></div></section>
     <section id="view-links" class="view" hidden><div id="links-body"></div></section>
     <section id="view-passport" class="view" hidden><div id="passport-body"></div></section>

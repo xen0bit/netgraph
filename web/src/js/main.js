@@ -7,6 +7,7 @@ import { homeHTML, installBlock } from "./home.js";
 import { parseWhen, fuzzy } from "./palette.js";
 import { tokens, lastToken, localSuggestions, searched } from "./filters.js";
 import { passportHTML } from "./passport.js";
+import { findingsHTML, findingDetail } from "./findings.js";
 import { typeBadge, typeWhy, profileForm, presenceHTML, linksHTML } from "./devices.js";
 import { Pulse } from "./pulse.js";
 
@@ -56,14 +57,14 @@ const areas = {
   map: { tabs: [["graph", "Map"]] },
   devices: { tabs: [["devices", "Devices"], ["presence", "Presence"], ["links", "To confirm"], ["passport", "Passport"]] },
   activity: { tabs: [["flows", "Connections"], ["destinations", "Destinations"], ["dns", "DNS"], ["facts", "Facts"], ["pulse", "Pulse"]] },
-  findings: { tabs: [["anomalies", "Anomalies"], ["incidents", "Incidents"], ["insights", "Insights"]], tools: `<button id="whatif-open" type="button" title="Test a proposed policy against observed traffic">What-if</button>` },
+  findings: { tabs: [["findings", "Inbox"], ["anomalies", "This window"], ["incidents", "Incidents"], ["insights", "Insights"]], tools: `<button id="whatif-open" type="button" title="Test a proposed policy against observed traffic">What-if</button>` },
   wifi: { tabs: [["wifi", "Wi-Fi"]] },
   settings: { tabs: [["settings", "General"], ["sensors", "Sensors"]] },
 };
 const areaOf = (t) => Object.keys(areas).find((a) => areas[a].tabs.some(([id]) => id === t));
 // Views that answer about now rather than about the window: the time controls,
 // the Recorder and the filter have nothing to say to them.
-const plainTabs = new Set(["home", "settings", "sensors", "incidents", "pulse", "passport", "links"]);
+const plainTabs = new Set(["home", "settings", "sensors", "incidents", "pulse", "passport", "links", "findings"]);
 
 function loadHash() {
   const raw = location.hash.slice(1);
@@ -325,6 +326,7 @@ async function refresh() {
   document.body.classList.toggle("rec-on", state.rec.on);
   renderChips();
   const seq = ++refreshSeq;
+  pollFindingCount();
   if (plainTabs.has(state.tab)) {
     await loadRange();
     if (seq === refreshSeq) await renderTab(seq);
@@ -449,13 +451,10 @@ async function renderHome(seq, { force = false } = {}) {
     homeState.links = l.length;
     drawHome();
   }).catch(() => {});
-  // At most a day of checks: they read every connection in what they cover.
-  const to = report.as_of + 1;
-  const from = Math.max(report.since, to - units.d);
-  const findings = await track(api("anomalies", new URLSearchParams({ from, to }))).catch(() => null);
+  // What's already been found, so the page doesn't wait for the checks to run.
+  const findings = await track(api("findings", new URLSearchParams({ status: "open", since: report.since, limit: 200 }))).catch(() => null);
   if (seq !== refreshSeq || !findings) return;
-  findings.from = from;
-  findings.to = to;
+  showFindingCount(findings.counts);
   homeState.findings = findings;
   drawHome();
 }
@@ -478,17 +477,88 @@ function homeClick(e) {
     selectTab("graph");
     return;
   }
-  if (e.target.closest("[data-home-findings]") && homeState.findings) {
-    if (state.live) setLive(false);
-    state.to = homeState.findings.to;
-    state.span = Math.max(homeState.findings.to - homeState.findings.from, 10_000);
-    selectTab("anomalies");
-    return;
-  }
+  if (e.target.closest("[data-home-findings]")) { selectTab("findings"); return; }
   const open = e.target.closest("[data-open]");
   if (open) { openEntity(open.dataset.open); return; }
   const tab = e.target.closest("[data-tab]");
   if (tab) selectTab(tab.dataset.tab);
+}
+
+// --- findings -----------------------------------------------------------------------
+
+let findingsStatus = "open";
+
+// The count of unread findings, on the tab, whatever view is open.
+function showFindingCount(counts) {
+  const el = $("#findings-count");
+  const n = counts?.new || 0;
+  el.hidden = !n;
+  el.textContent = n > 99 ? "99+" : String(n);
+  el.title = `${n} new`;
+}
+
+async function renderFindings(seq) {
+  const q = new URLSearchParams();
+  if (findingsStatus) q.set("status", findingsStatus);
+  const l = await track(api("findings", q));
+  if (seq !== refreshSeq) return;
+  showFindingCount(l.counts);
+  $("#findings-body").innerHTML = findingsHTML(l, findingsStatus);
+}
+
+let lastFindingCount = 0;
+function pollFindingCount() {
+  if (Date.now() - lastFindingCount < 30_000) return;
+  lastFindingCount = Date.now();
+  api("findings", new URLSearchParams({ limit: 1 })).then((l) => showFindingCount(l.counts)).catch(() => {});
+}
+
+async function openFinding(id) {
+  const panel = $("#panel");
+  panel.hidden = false;
+  const req = ++entityReq;
+  let f;
+  try {
+    f = await track(api(`findings/${id}`, new URLSearchParams()));
+  } catch (e) {
+    if (req === entityReq) $("#panel-body").innerHTML = `<p class="muted">${esc(e.message)}</p>`;
+    return;
+  }
+  if (req !== entityReq) return;
+  $("#panel-body").innerHTML = findingDetail(f);
+  const act = (p) => p.then(() => { lastFindingCount = 0; refresh(); openFinding(id); }).catch((e) => setStatus(e.message, true));
+  $("#panel-body").onclick = (e) => {
+    const st = e.target.closest("[data-fstatus]");
+    if (st) { act(send("PATCH", `findings/${id}`, { status: st.dataset.fstatus })); return; }
+    if (e.target.closest("[data-ffine]")) { act(send("POST", `findings/${id}/fine`, { note: "" })); return; }
+    const dev = e.target.closest("[data-fdevice]");
+    if (dev) { openPassport(dev.dataset.fdevice); return; }
+    if (e.target.closest("[data-fmoment]")) {
+      if (state.live) setLive(false);
+      state.to = f.last_seen + units.m * 5;
+      state.span = units.h;
+      const narrow = [f.entity, f.device].find((x) => /^(ip|asn|device):/.test(x || ""));
+      if (narrow) state.filter = narrow;
+      closePanel();
+      selectTab("graph");
+    }
+  };
+  $("#panel-body form.finding-note").onsubmit = (e) => {
+    e.preventDefault();
+    act(send("PATCH", `findings/${id}`, { status: "", note: e.target.elements.note.value }));
+  };
+  if (f.status === "new") send("PATCH", `findings/${id}`, { status: "seen" }).then(() => { lastFindingCount = 0; pollFindingCount(); }).catch(() => {});
+}
+
+function findingsClick(e) {
+  const st = e.target.closest("[data-findings-status]");
+  if (st) { findingsStatus = st.dataset.findingsStatus; refresh(); return; }
+  if (e.target.closest("[data-findings-seen]")) {
+    send("POST", "findings/seen", {}).then(() => { lastFindingCount = 0; refresh(); }).catch((err) => setStatus(err.message, true));
+    return;
+  }
+  const row = e.target.closest("[data-finding]");
+  if (row) openFinding(Number(row.dataset.finding));
 }
 
 // --- passport -----------------------------------------------------------------------
@@ -605,6 +675,7 @@ async function renderTab(seq) {
     if (t === "home") return await renderHome(seq);
     if (t === "settings") return renderSettings();
     if (t === "passport") return await renderPassport(seq);
+    if (t === "findings") return await renderFindings(seq);
     if (t === "presence") {
       const p = await track(api("presence"));
       if (seq === refreshSeq) $("#presence-body").innerHTML = presenceHTML(p);
@@ -2386,6 +2457,13 @@ async function renderRail(seq) {
   }
   if (seq !== refreshSeq) return;
   const events = page?.events || [];
+  // Findings belong on the rail too, whatever their status.
+  const found = await api("findings", new URLSearchParams({ since: state.to - units.d, to: state.to + 1, limit: 40, ...(state.rec.follow.startsWith("device:") ? { device: state.rec.follow } : {}) })).catch(() => null);
+  if (seq !== refreshSeq) return;
+  for (const f of found?.findings || []) {
+    if (f.last_seen <= state.to) events.push({ ts: f.last_seen, kind: "finding", title: f.summary, entity: f.device || f.entity || "" });
+  }
+  events.sort((a, b) => b.ts - a.ts);
   if (!events.length) {
     box.innerHTML = `<div class="rail-head"><b>Events</b><span class="muted">nothing recorded in the last day</span></div>`;
     return;
@@ -2638,7 +2716,7 @@ function filterSuggest() {
 function commands() {
   const go = [["Home", "home", "1"], ["Map", "map", "2"], ["Devices", "devices", "3"], ["Activity", "activity", "4"], ["Findings", "findings", "5"], ["Wi-Fi", "wifi", "6"], ["Settings", "settings", "7"]]
     .map(([label, area, key]) => ({ label: `Go to ${label}`, key, run: () => selectArea(area) }));
-  const views = [["Connections", "flows"], ["Destinations", "destinations"], ["DNS", "dns"], ["Facts", "facts"], ["Pulse", "pulse"], ["Presence", "presence"], ["Devices to confirm", "links"], ["Anomalies", "anomalies"], ["Incidents", "incidents"], ["Insights", "insights"], ["Sensors", "sensors"]]
+  const views = [["Connections", "flows"], ["Destinations", "destinations"], ["DNS", "dns"], ["Facts", "facts"], ["Pulse", "pulse"], ["Presence", "presence"], ["Devices to confirm", "links"], ["Findings inbox", "findings"], ["Anomalies in this window", "anomalies"], ["Incidents", "incidents"], ["Insights", "insights"], ["Sensors", "sensors"]]
     .map(([label, t]) => ({ label: `Go to ${label}`, run: () => selectTab(t) }));
   const onMap = (f) => () => { if (state.tab !== "graph") selectTab("graph"); f(); };
   return [
@@ -2925,6 +3003,7 @@ function init() {
     if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") { e.preventDefault(); togglePalette(); }
   });
   $("#passport-body").onclick = passportClick;
+  $("#findings-body").onclick = findingsClick;
   $("#pulse-pause").onclick = () => {
     pulse.setPaused(!pulse.paused);
     $("#pulse-pause").setAttribute("aria-pressed", String(pulse.paused));

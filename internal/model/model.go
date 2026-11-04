@@ -778,6 +778,61 @@ type Anomaly struct {
 	Evidence   map[string]string `json:"evidence,omitempty"`
 }
 
+// Finding statuses: its life from when a check first reports it.
+const (
+	FindingNew          = "new"
+	FindingSeen         = "seen"
+	FindingAcknowledged = "acknowledged"
+	FindingResolved     = "resolved"  // a person's word, or a week of silence (AutoResolved)
+	FindingDismissed    = "dismissed" // a person said it's fine; it won't be reported again
+)
+
+// Finding is an anomaly with a memory. Its embedded TS is LastSeen.
+type Finding struct {
+	Anomaly
+	ID           int64  `json:"id"`
+	FirstSeen    int64  `json:"first_seen"`
+	LastSeen     int64  `json:"last_seen"`
+	Occurrences  int    `json:"occurrences"`
+	Status       string `json:"status"`
+	StatusAt     int64  `json:"status_at"`
+	AutoResolved bool   `json:"auto_resolved,omitempty"`
+	Recurrences  int    `json:"recurrences,omitempty"` // times it came back after being resolved
+	Note         string `json:"note,omitempty"`
+	// On a single finding's answer only.
+	Why    string `json:"why,omitempty"`
+	Advice string `json:"advice,omitempty"`
+	Usual  string `json:"usual,omitempty"`
+}
+
+// FindingGroup is one device's findings close together in time: probably one story.
+type FindingGroup struct {
+	Device     string  `json:"device"`
+	DeviceName string  `json:"device_name,omitempty"`
+	FromMS     int64   `json:"from"`
+	ToMS       int64   `json:"to"`
+	Severity   string  `json:"severity"`
+	IDs        []int64 `json:"ids"`
+}
+
+// FindingQuery selects findings.
+type FindingQuery struct {
+	Status  string // a status, "open", or empty for all
+	SinceMS int64  // last seen at or after this
+	ToMS    int64  // first seen before this
+	Device  string
+	Limit   int
+}
+
+// FindingList is findings with what's needed to show them.
+type FindingList struct {
+	Findings  []Finding      `json:"findings"`
+	Groups    []FindingGroup `json:"groups"`
+	Counts    map[string]int `json:"counts"` // every finding by status, whatever was selected
+	ScannedMS int64          `json:"scanned_at,omitempty"`
+	Learning  bool           `json:"learning,omitempty"`
+}
+
 // AnomalyReport is a window's anomalies. Checks that compare with history
 // need a day of it before the window; until then Learning is set and only
 // the checks that need no history run.

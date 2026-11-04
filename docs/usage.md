@@ -212,7 +212,7 @@ Incidents, Insights, What-if), **Wi-Fi** and **Settings** (General, Sensors).
 
 - **Home:** where a bare address lands. Whether sensors are reporting, what's new
   since you were last here (a gap of over half an hour starts a new visit, and
-  it looks back at most 7 days, 24 hours for findings), who is here, who was busiest in the last hour,
+  it looks back at most 7 days), who is here, who was busiest in the last hour,
   and the last day's traffic; click a bar to open the map at that moment. "Now"
   means the newest data held, and the page says so when that is not now. With no
   data yet, it shows how to connect a sensor and watches for the first packets.
@@ -240,6 +240,14 @@ Incidents, Insights, What-if), **Wi-Fi** and **Settings** (General, Sensors).
   it was never online alongside. Nothing happens until you answer. Yes links them and
   copies the name, owner and groups; history stays under each address, and the
   passport can undo it.
+- **Findings:** the checks run every five minutes, and what they find is remembered.
+  The Inbox holds each finding once, with why it fired, whether it's usual for that
+  device and what you could do. New ones are counted on the tab. Open one to mark it
+  seen; acknowledge or resolve it, or say **This is fine**, which stops it being
+  reported for that device and that thing (undo it under This window, in Muted findings).
+  A resolved finding comes back only for something that happened later, and one
+  quiet for a week resolves itself. Findings about one device close together are
+  grouped. **This window** still runs the checks over whatever window you've chosen.
 - **Settings:** theme, saved views, the commands to add a sensor to this server, what this
   browser remembers, and what the server holds.
 - **Window:** pick presets, type times, shift with ◀ ▶ or `[` `]`, or drag

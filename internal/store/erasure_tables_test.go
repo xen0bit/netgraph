@@ -33,6 +33,7 @@ var tableErasure = map[string]string{
 	"incident_evidence": "forget, purge",
 	"traffic_minute":    "forget, purge, disk guard",
 	"map_pins":          "forget, purge; too small for the disk guard to matter",
+	"findings":          "forget, purge; too small for the disk guard to matter",
 }
 
 func TestEveryTableHasAnErasureDecision(t *testing.T) {

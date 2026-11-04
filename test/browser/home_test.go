@@ -66,6 +66,7 @@ func TestAreasRememberTheirView(t *testing.T) {
 	s.run(chromedp.Click(`.tabs [data-area="activity"]`, chromedp.ByQuery))
 	s.waitFor("DNS again", `!document.querySelector("#view-dns").hidden`)
 	s.run(chromedp.Click(`.tabs [data-area="findings"]`, chromedp.ByQuery))
+	s.waitFor("the inbox first", `!document.querySelector("#view-findings").hidden`)
 	s.waitFor("What-if under Findings", `!!document.querySelector("#subtabs #whatif-open")`)
 	s.run(chromedp.Click(`#subtabs #whatif-open`, chromedp.ByQuery))
 	s.waitFor("the What-if dialog", `document.querySelector("#whatif-dialog").open`)
