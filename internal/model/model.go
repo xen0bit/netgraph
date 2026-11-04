@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/netip"
 	"net/url"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -79,7 +80,14 @@ type Filter struct {
 	Multicast bool // include multicast/broadcast traffic
 	Limit     int  // maximum rows; 0 means the endpoint's default
 	Offset    int  // rows to skip, for paging
+	// Sort orders flows across the whole window, before Limit: one of FlowSorts.
+	// Empty is busiest first. Hourly answers keep their own order.
+	Sort string
 }
+
+// FlowSorts are the columns flows can be sorted by on the server, each with
+// "-" in front for descending.
+var FlowSorts = []string{"first_seen", "last_seen", "bytes", "bytes_out", "bytes_in"}
 
 // Precision tells how exactly a result honours the window edges.
 const (
@@ -218,6 +226,49 @@ type Home struct {
 	TopTalkers   []Device     `json:"top_talkers"`
 	Since        *Summary     `json:"summary_since,omitempty"`
 	Traffic      *Timeseries  `json:"traffic,omitempty"`
+}
+
+// PassportDay is one day of a device's traffic.
+type PassportDay struct {
+	TS       int64  `json:"ts"`
+	Flows    int    `json:"flows"`
+	BytesOut uint64 `json:"bytes_out"`
+	BytesIn  uint64 `json:"bytes_in"`
+}
+
+// PassportWeek is one week of a device's traffic.
+type PassportWeek struct {
+	Flows        int    `json:"flows"`
+	BytesOut     uint64 `json:"bytes_out"`
+	BytesIn      uint64 `json:"bytes_in"`
+	Destinations int    `json:"destinations"`
+}
+
+// PassportDest is what a device talked to, or was reached from, this week.
+type PassportDest struct {
+	Key       string `json:"key"`
+	Direction string `json:"direction"`
+	Flows     int    `json:"flows"`
+	BytesOut  uint64 `json:"bytes_out"`
+	BytesIn   uint64 `json:"bytes_in"`
+	New       bool   `json:"new,omitempty"` // not seen in the week before
+}
+
+// Passport is one device's profile, from the hourly rollups.
+type Passport struct {
+	ID              string         `json:"id"`
+	AsOfMS          int64          `json:"as_of"`
+	WeekFromMS      int64          `json:"week_from"`
+	LastWeekFromMS  int64          `json:"last_week_from"`
+	Device          *Device        `json:"device"`
+	Hours           []uint64       `json:"hours"` // bytes this week per hour of the day, in the reader's timezone
+	Days            []PassportDay  `json:"days"`
+	ThisWeek        PassportWeek   `json:"this_week"`
+	LastWeek        PassportWeek   `json:"last_week"`
+	HasLastWeek     bool           `json:"has_last_week"` // the device existed for all of it
+	NewDestinations int            `json:"new_destinations"`
+	Destinations    []PassportDest `json:"destinations"`
+	Story           *Story         `json:"story,omitempty"`
 }
 
 // Flow states relative to the window.
@@ -1121,6 +1172,9 @@ func (f Filter) Values() url.Values {
 	if f.Offset != 0 {
 		v.Set("offset", strconv.Itoa(f.Offset))
 	}
+	if f.Sort != "" {
+		v.Set("sort", f.Sort)
+	}
 	return v
 }
 
@@ -1181,6 +1235,12 @@ func ParseFilter(v url.Values, now time.Time) (Filter, error) {
 		if f.Offset, err = strconv.Atoi(s); err != nil || f.Offset < 0 {
 			return f, fmt.Errorf("offset: %q is not a non-negative number", s)
 		}
+	}
+	if s := v.Get("sort"); s != "" {
+		if !slices.Contains(FlowSorts, strings.TrimPrefix(s, "-")) {
+			return f, fmt.Errorf("sort: %q is not one of %v", s, FlowSorts)
+		}
+		f.Sort = s
 	}
 	return f, nil
 }

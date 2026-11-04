@@ -117,7 +117,7 @@ export function homeHTML(h, rep, { firstVisit, origin }) {
           <div><b>${esc(bytes(s?.bytes_in))}</b><span>received</span></div>
         </div>
         ${h.new_devices.length ? `<h3>New devices</h3><ul class="new-devices">${h.new_devices.slice(0, 6).map((d) => `<li><button type="button" class="row-link" data-open="${esc(d.id)}"><b>${esc(d.label)}</b> <span class="muted">${esc(deviceSub(d))} · first seen ${esc(stamp(d.first_seen))}</span></button></li>`).join("")}</ul>` : ""}
-        <h3>Findings</h3>
+        <h3>Findings${h.as_of - h.since > units.d ? ", last 24 hours" : ""}</h3>
         ${findingsBlock(rep)}
       </section>
       <section class="card" aria-labelledby="h-here">

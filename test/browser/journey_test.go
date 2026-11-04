@@ -300,11 +300,15 @@ func TestRecorderKeepsPanAndZoom(t *testing.T) {
 	s.waitFor("the recorder", `!document.querySelector("#recorder-bar").hidden`)
 	s.settle()
 	s.waitFor("the graph", `Number(document.querySelector("#diagram canvas").dataset.nodes) > 0`)
-	zoom := `(() => { const el = document.querySelector("#diagram"); const r = el.getBoundingClientRect();
-		for (let i = 0; i < 4; i++) el.dispatchEvent(new WheelEvent("wheel", {deltaY: -120, clientX: r.left + 200, clientY: r.top + 100, bubbles: true}));
-		return document.querySelector("#diagram canvas").dataset.view; })()`
-	var before, after string
-	s.eval(zoom, &before)
+	// The listener is on the canvas, and the view is published on the next frame:
+	// this must really have zoomed, or stepping has nothing to preserve.
+	var fitted, before, after string
+	s.eval(`document.querySelector("#diagram canvas").dataset.view`, &fitted)
+	s.eval(`(() => { const c = document.querySelector("#diagram canvas"); const r = c.getBoundingClientRect();
+		for (let i = 0; i < 4; i++) c.dispatchEvent(new WheelEvent("wheel", {deltaY: -120, clientX: r.left + 200, clientY: r.top + 100, bubbles: true, cancelable: true}));
+		return 1; })()`, nil)
+	s.waitFor("the zoom", fmt.Sprintf(`document.querySelector("#diagram canvas").dataset.view !== %q`, fitted))
+	s.eval(`document.querySelector("#diagram canvas").dataset.view`, &before)
 	s.clearRequests()
 	s.run(chromedp.Click(`#rec-fwd`, chromedp.ByQuery))
 	s.waitForRequest("the step", "/api/v1/summary")
@@ -520,6 +524,40 @@ func TestScreenshots(t *testing.T) {
 		var buf []byte
 		s.run(chromedp.CaptureScreenshot(&buf))
 		if err := os.WriteFile(filepath.Join(dir, name+".png"), buf, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The workbench: a passport, the Pulse, and the palette open over chips.
+	{
+		s := open(t, window()+"&tab=devices&q=dir:out%20app:tls", "")
+		s.settle()
+		s.run(chromedp.KeyEvent("k", chromedp.KeyModifiers(input.ModifierCtrl)))
+		s.run(chromedp.SendKeys(`#palette-q`, "alice", chromedp.ByQuery))
+		s.waitFor("results", `[...document.querySelectorAll("#palette-list li[data-i]")].some((l) => l.textContent.includes("alice-iphone"))`)
+		var buf []byte
+		s.run(chromedp.CaptureScreenshot(&buf))
+		if err := os.WriteFile(filepath.Join(dir, "palette.png"), buf, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		s.eval(`[...document.querySelectorAll("#palette-list li[data-i]")].find((l) => l.textContent.includes("alice-iphone")).click()`, nil)
+		s.waitFor("the passport", `!!document.querySelector("#passport-body .passport")`)
+		time.Sleep(300 * time.Millisecond)
+		s.run(chromedp.CaptureScreenshot(&buf))
+		if err := os.WriteFile(filepath.Join(dir, "passport.png"), buf, 0o644); err != nil {
+			t.Fatal(err)
+		}
+		s.run(chromedp.Evaluate(`document.querySelector('#subtabs [data-tab="devices"]').click()`, nil))
+		s.run(chromedp.Evaluate(`document.querySelector('.tabs [data-area="activity"]').click(); 1`, nil))
+		s.waitFor("Activity", `!document.querySelector("#view-flows").hidden`)
+		s.run(chromedp.Evaluate(`document.querySelector('#subtabs [data-tab="pulse"]').click(); 1`, nil))
+		s.waitFor("Pulse", `!document.querySelector("#view-pulse").hidden`)
+		time.Sleep(500 * time.Millisecond)
+		if out, err := exec.Command(sensor, "run", "-pcap", replay, "-server", baseURL, "-name", "shots").CombinedOutput(); err != nil {
+			t.Fatalf("sensor: %v\n%s", err, out)
+		}
+		s.waitFor("lines", `document.querySelectorAll("#pulse-list li").length > 3`)
+		s.run(chromedp.CaptureScreenshot(&buf))
+		if err := os.WriteFile(filepath.Join(dir, "pulse.png"), buf, 0o644); err != nil {
 			t.Fatal(err)
 		}
 	}

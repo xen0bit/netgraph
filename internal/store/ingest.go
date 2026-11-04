@@ -65,6 +65,7 @@ func (s *Store) Ingest(ctx context.Context, sensor, boot string, events []wire.E
 		s.reloadNets(ctx)
 		return res, err
 	}
+	s.nameLive(ctx, live)
 	s.sub.publish(live)
 	s.invalidateAnomaliesThrottled()
 	if s.cfg.OnNewDevice != nil {

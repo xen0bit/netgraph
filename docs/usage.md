@@ -216,12 +216,27 @@ Incidents, Insights, What-if), **Wi-Fi** and **Settings** (General, Sensors).
   and the last day's traffic; click a bar to open the map at that moment. "Now"
   means the newest data held, and the page says so when that is not now. With no
   data yet, it shows how to connect a sensor and watches for the first packets.
-- **Settings:** theme, the commands to add a sensor to this server, what this
+- **Command palette** (`Ctrl+K`): go anywhere, run any command, find a device, or
+  type a time: `yesterday 3pm`, `tuesday`, `2 hours ago`, `last 24h`,
+  `2026-10-25 14:00`. A moment opens the hour around it.
+- **Pulse** (Activity): new connections and DHCP as sensors deliver them, whatever
+  the window. Pause holds lines back; it shows the newest 500 and counts the rest.
+- **Passport** (Devices, or "Open its passport" in a device's details): who a device
+  is, when it's busy, how this week compares with the last and what's new since,
+  from hourly totals. The address bar holds it, so it can be shared.
+- **Tables:** past 400 rows only what's near the screen is drawn, so the browser's
+  own search finds only those; All CSV has everything. **Columns** chooses what shows, in this
+  browser. Sorting Connections by a time or by bytes covers the whole window on the
+  server; other columns, and hourly answers, sort the rows loaded.
+- **Settings:** theme, saved views, the commands to add a sensor to this server, what this
   browser remembers, and what the server holds.
 - **Window:** pick presets, type times, shift with ◀ ▶ or `[` `]`, or drag
   across the traffic timeline to zoom into a slice. **Live** follows now
   and refreshes as sensors deliver.
-- **Filter:** the same syntax as the TUI.
+- **Filter:** the same syntax as the TUI. Press `/` and it suggests keys, values
+  and devices; each term becomes a chip you can remove. **Save view** keeps the
+  view, filter, map options and window length in this browser, under Saved views
+  and in the palette. A saved view opens as that length up to now.
 - **Find** (`f`): devices by MAC, name or label, addresses, DNS names and
   networks, as you type; Enter or a click opens the details.
 - **Map:** devices, the names they looked up and reached, where those
