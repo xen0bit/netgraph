@@ -21,7 +21,7 @@ before:
   hooks:
     - go mod tidy
     - go vet ./...
-    # The web UI (static files + WASM) is embedded in netgraph, so it has
+    # The web UI (static files) is embedded in netgraph, so it has
     # to exist before the build. Needs only Go and gzip.
     - make web.build
     # So is the network (AS) table: downloaded from iptoasn.com at release
