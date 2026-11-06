@@ -113,7 +113,10 @@ func (s *Store) WhatIf(ctx context.Context, p *policy.Policy, f model.Filter, sc
 		dev := byID[fl.Device]
 		zone := p.ZoneFor(fl.Device, firstNonEmpty(fl.DeviceName, dev.label, fl.Device), dev.role)
 		dst := firstNonEmpty(fl.Name, fl.RemoteIP)
-		if zone == "" {
+		// Version 1 rules only select zones; version 2 rules can select a
+		// device, its label or anything, so a device without a zone is still
+		// decided there.
+		if zone == "" && p.Version != 2 {
 			imp := model.Impact{
 				Kind: "connection", Device: fl.Device, DeviceName: firstNonEmpty(fl.DeviceName, dev.label),
 				Destination: dst, Port: portString(fl), Direction: fl.Direction,

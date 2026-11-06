@@ -4,6 +4,7 @@ package lab
 
 import (
 	"context"
+	"slices"
 	"strings"
 	"testing"
 
@@ -107,19 +108,20 @@ func checkPolicy(t *testing.T, c *apiclient.Client, f model.Filter) {
 		t.Errorf("rescan created %d decisions, %v", again, err)
 	}
 
-	// Connection groups fold the laptop's names under their site.
-	groups, err := c.ConnectionGroups(ctx, model.Filter{From: f.From, To: f.To, Device: laptopMAC}, "domain")
+	// Connection groups: by device, the laptop's connections fold into one
+	// group holding the names it used.
+	groups, err := c.ConnectionGroups(ctx, f, "device")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var site *model.ConnectionGroup
+	var mine *model.ConnectionGroup
 	for i := range groups {
-		if groups[i].Key == "lab.test" {
-			site = &groups[i]
+		if groups[i].Key == laptop {
+			mine = &groups[i]
 		}
 	}
-	if site == nil || len(site.Destinations) < 3 || site.BytesIn == 0 {
-		t.Errorf("lab.test group = %+v (of %d groups)", site, len(groups))
+	if mine == nil || mine.BytesIn == 0 || !slices.Contains(mine.Destinations, "hold.lab.test") || !slices.Contains(mine.Destinations, "plain.lab.test") {
+		t.Errorf("laptop group = %+v (of %d groups)", mine, len(groups))
 	}
 
 	// The laptop looked up every name it used: none is a name mismatch.
