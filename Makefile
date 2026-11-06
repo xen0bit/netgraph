@@ -49,6 +49,11 @@ build-server:
 build-sensor:
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/netgraph-sensor ./cmd/netgraph-sensor
 
+## build-ech: build the experimental ECH observer (not part of normal builds)
+.PHONY: build-ech
+build-ech:
+	CGO_ENABLED=0 GOOS=linux $(GO) build -tags experimental -trimpath -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/netgraph-ech ./cmd/netgraph-ech
+
 ## build-agent: build ./bin/netgraph-agent (Linux host agent)
 .PHONY: build-agent
 build-agent:
