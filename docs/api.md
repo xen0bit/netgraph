@@ -92,6 +92,12 @@ are unix milliseconds.
 | `GET /api/v1/purposes?host=` | purpose metadata for a host |
 | `POST /api/v1/purposes` | import an application manifest; `DELETE /purposes/{id}` removes one entry |
 | `GET/POST /api/v1/policy/bundle` | export or restore a configuration bundle (no history, decisions, tokens or keys) |
+| `POST /api/v1/agent/hello` | host-agent registration; agent token |
+| `POST /api/v1/agent/events` | host-agent process/connection/actual batch; agent token |
+| `GET /api/v1/agent/policy` | active policy, profile and mode for an agent; agent token |
+| `GET /api/v1/agents` | optional host agents with counts |
+| `GET /api/v1/agents/{name}/processes` | an agent's latest processes |
+| `GET /api/v1/agents/{name}/connections` | an agent's latest process-attributed connections with predicted/actual actions |
 | `GET /api/v1/archive` | `{enabled, bytes, files, oldest, newest}`: the long-term archive. Viewer |
 | `GET /api/v1/sensors` | `[{name, version, os, arch, interfaces, first_seen, last_seen, stats, status, problems, upgrade_to, settable, config, in_effect, config_applied, takes_config}]`. `status` is `ok`, `quiet` or `struggling`; `problems` says what's going wrong now, from the difference between its last two reports; `upgrade_to` is set if it's older than the server |
 | `GET /api/v1/sensors/{name}/config` | what's been asked of this name alone, `%2A` for all sensors: `{log_level, rdns, active_timeout_s, flush_s}`. Viewer |

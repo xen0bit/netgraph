@@ -1775,3 +1775,66 @@ type Purpose struct {
 	Source           string `json:"source,omitempty"`
 	Updated          int64  `json:"updated"`
 }
+
+// Agent is an optional host agent the server has heard from.
+type Agent struct {
+	Name         string   `json:"name"`
+	Host         string   `json:"host,omitempty"`
+	OS           string   `json:"os,omitempty"`
+	Arch         string   `json:"arch,omitempty"`
+	Version      string   `json:"version,omitempty"`
+	Capabilities []string `json:"capabilities,omitempty"`
+	Boot         string   `json:"boot,omitempty"`
+	Seq          uint64   `json:"seq,omitempty"`
+	FirstSeen    int64    `json:"first_seen"`
+	LastSeen     int64    `json:"last_seen"`
+	Processes    int      `json:"processes"`
+	Connections  int      `json:"connections"`
+}
+
+// AgentProcess is one process the agent attributed.
+type AgentProcess struct {
+	Agent     string `json:"agent"`
+	PID       int    `json:"pid"`
+	PPID      int    `json:"ppid,omitempty"`
+	UID       int    `json:"uid,omitempty"`
+	Path      string `json:"path,omitempty"`
+	Cmdline   string `json:"cmdline,omitempty"`
+	CodeID    string `json:"code_id,omitempty"`
+	SHA256    string `json:"sha256,omitempty"`
+	Signer    string `json:"signer,omitempty"`
+	Package   string `json:"package,omitempty"`
+	Start     int64  `json:"start,omitempty"`
+	FirstSeen int64  `json:"first_seen"`
+	LastSeen  int64  `json:"last_seen"`
+}
+
+// AgentConnection is one process-attributed connection.
+type AgentConnection struct {
+	Agent      string `json:"agent"`
+	Key        string `json:"key"`
+	Proto      string `json:"proto,omitempty"`
+	LocalIP    string `json:"local_ip,omitempty"`
+	LocalPort  int    `json:"local_port,omitempty"`
+	RemoteIP   string `json:"remote_ip,omitempty"`
+	RemotePort int    `json:"remote_port,omitempty"`
+	Direction  string `json:"direction,omitempty"`
+	State      string `json:"state,omitempty"`
+	PID        int    `json:"pid,omitempty"`
+	UID        int    `json:"uid,omitempty"`
+	App        string `json:"app,omitempty"`
+	Path       string `json:"path,omitempty"`
+	CodeID     string `json:"code_id,omitempty"`
+	SHA256     string `json:"sha256,omitempty"`
+	BytesOut   uint64 `json:"bytes_out,omitempty"`
+	BytesIn    uint64 `json:"bytes_in,omitempty"`
+	FirstSeen  int64  `json:"first_seen,omitempty"`
+	LastSeen   int64  `json:"last_seen,omitempty"`
+	SNI        string `json:"sni,omitempty"`
+	HTTPHost   string `json:"http_host,omitempty"`
+	Predicted  string `json:"predicted,omitempty"`
+	Actual     string `json:"actual,omitempty"`
+	Rule       string `json:"rule,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+	Stalled    bool   `json:"stalled,omitempty"`
+}

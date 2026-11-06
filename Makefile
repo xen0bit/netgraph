@@ -49,6 +49,11 @@ build-server:
 build-sensor:
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/netgraph-sensor ./cmd/netgraph-sensor
 
+## build-agent: build ./bin/netgraph-agent (Linux host agent)
+.PHONY: build-agent
+build-agent:
+	CGO_ENABLED=0 GOOS=linux $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/netgraph-agent ./cmd/netgraph-agent
+
 ## web.build: assemble the web UI into web/dist
 .PHONY: web.build
 web.build:

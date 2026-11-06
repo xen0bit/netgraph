@@ -13,6 +13,7 @@ export function manageHTML(d) {
   const triggers = d.triggers || [];
   const decisions = d.decisions || [];
   const purposes = d.purposes || [];
+  const agents = d.agents || [];
   const audit = d.audit || { findings: [], summary: {} };
 
   const policyRows = policies.map((p) => `<tr>
@@ -81,6 +82,9 @@ export function manageHTML(d) {
   </section>
   <section class="card"><h3>Open decisions <button type="button" id="manage-scan">Scan this window</button></h3>
     ${decisionRows ? `<table class="mini"><thead><tr><th>When</th><th>Device</th><th>Remote</th><th>Port</th><th>Kind</th><th>Rule</th><th></th></tr></thead><tbody>${decisionRows}</tbody></table>` : `<p class="muted">No open decisions. Scan the window after saving an ask rule.</p>`}
+  </section>
+  <section class="card"><h3>Host agents</h3>
+    ${agents.length ? `<table class="mini"><thead><tr><th>Name</th><th>Host</th><th>OS</th><th>Processes</th><th>Connections</th><th>Last seen</th></tr></thead><tbody>${agents.map((a) => `<tr><td>${esc(a.name)}</td><td>${esc(a.host || "")}</td><td>${esc(a.os || "")} ${esc(a.arch || "")}</td><td>${a.processes}</td><td>${a.connections}</td><td>${when(a.last_seen)}</td></tr>`).join("")}</tbody></table>` : `<p class="muted">No optional host agents connected.</p>`}
   </section>
   <section class="card"><h3>Application purposes</h3>
     ${purposes.length ? `<table class="mini"><thead><tr><th>Application</th><th>Host</th><th>Purpose</th><th>If denied</th></tr></thead><tbody>${purposes.slice(0, 100).map((p) => `<tr><td>${esc(p.application)}</td><td class="mono">${esc(p.host)}</td><td>${esc(p.purpose || "")}</td><td>${esc(p.deny_consequences || "")}</td></tr>`).join("")}</tbody></table>` : `<p class="muted">No purpose metadata imported.</p>`}

@@ -46,6 +46,9 @@ var tableErasure = map[string]string{
 	"network_triggers":  "forget, purge; configuration, not observations",
 	"policy_decisions":  "forget, purge; decisions are observations of traffic",
 	"app_purposes":      "forget, purge; metadata, not observations",
+	"agents":            "forget, purge; agent identity, not observations",
+	"agent_processes":   "forget, purge; process observations",
+	"agent_connections": "forget, purge; connection observations",
 }
 
 func TestEveryTableHasAnErasureDecision(t *testing.T) {
