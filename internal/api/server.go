@@ -50,6 +50,10 @@ type Config struct {
 	// are empty, the read token does everything, as it did before they existed.
 	OperatorToken string
 	AdminToken    string
+	// AgentToken authenticates the optional host agent. It is separate from
+	// the sensor ingest token: the agent reports process identity and may
+	// receive enforcement decisions.
+	AgentToken string
 	// Proxy trusts a reverse proxy to say who someone is. Nil trusts none.
 	Proxy *ProxyAuth
 	// Notify is where alerts go, for Settings. Nil when there are none.
@@ -79,6 +83,7 @@ type Server struct {
 
 	ingestTok   atomic.Pointer[string]
 	readTok     atomic.Pointer[string]
+	agentTok    atomic.Pointer[string]
 	roleTok     atomic.Pointer[roleTokens]
 	ingestStats ingestMetrics
 	liveSubs    atomic.Int32
@@ -131,6 +136,7 @@ func New(cfg Config) *Server {
 	}
 	s := &Server{cfg: cfg, mux: http.NewServeMux(), log: cfg.Logger, done: make(chan struct{}), modelAsks: make(chan struct{}, maxModelAsks)}
 	s.SetTokens(cfg.IngestToken, cfg.ReadToken)
+	s.SetAgentToken(cfg.AgentToken)
 	s.SetRoleTokens(cfg.OperatorToken, cfg.AdminToken)
 	s.keys.Store(cfg.WiFi)
 	s.mux.HandleFunc("POST /api/v1/ingest", s.ingest)
@@ -213,6 +219,7 @@ func New(cfg Config) *Server {
 	s.registerGeoRoutes()
 	s.registerPurposeRoutes()
 	s.registerBundleRoutes()
+	s.registerAgentRoutes()
 	s.mux.Handle("POST /api/v1/ask", s.require(RoleViewer, s.ask))
 	s.mux.Handle("POST /api/v1/annotations", s.require(RoleOperator, s.createAnnotation))
 	s.mux.Handle("DELETE /api/v1/annotations/{id}", s.require(RoleOperator, s.deleteAnnotation))

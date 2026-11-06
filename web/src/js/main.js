@@ -2287,7 +2287,7 @@ function wirePolicy() {
 // --- manage --------------------------------------------------------------------------
 
 async function renderManage(seq) {
-  const [policies, blocklists, profiles, triggers, decisions, audit, purposes, network] = await Promise.all([
+  const [policies, blocklists, profiles, triggers, decisions, audit, purposes, network, agents] = await Promise.all([
     api("policies").catch(() => []),
     api("blocklists").catch(() => []),
     api("profiles").catch(() => []),
@@ -2296,9 +2296,10 @@ async function renderManage(seq) {
     api("policy/audit").catch(() => ({ findings: [] })),
     api("purposes").catch(() => []),
     api("network").catch(() => null),
+    api("agents").catch(() => []),
   ]);
   if (seq !== refreshSeq) return;
-  $("#manage-body").innerHTML = manageHTML({ policies, blocklists, profiles, triggers, decisions, audit, purposes, network });
+  $("#manage-body").innerHTML = manageHTML({ policies, blocklists, profiles, triggers, decisions, audit, purposes, network, agents });
 }
 
 function wireManage() {

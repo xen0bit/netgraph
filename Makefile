@@ -32,6 +32,8 @@ SENSOR_TARGETS := amd64: arm64: arm:GOARM=5 arm:GOARM=6 arm:GOARM=7 386:GO386=so
 # goos/goarch for the server. No mips: modernc.org/sqlite does not build there.
 SERVER_TARGETS := linux/amd64 linux/arm64 linux/arm linux/riscv64 \
 	darwin/amd64 darwin/arm64 windows/amd64 windows/arm64
+# The optional host agent: Linux only, built by make build-agent, not released yet.
+AGENT_TARGETS := amd64 arm64 arm riscv64
 
 .DEFAULT_GOAL := help
 
@@ -48,6 +50,11 @@ build-server:
 .PHONY: build-sensor
 build-sensor:
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/netgraph-sensor ./cmd/netgraph-sensor
+
+## build-agent: build ./bin/netgraph-agent (Linux host agent)
+.PHONY: build-agent
+build-agent:
+	CGO_ENABLED=0 GOOS=linux $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/netgraph-agent ./cmd/netgraph-agent
 
 ## web.build: assemble the web UI into web/dist
 .PHONY: web.build
@@ -132,7 +139,7 @@ lint:
 vulncheck:
 	$(GOVULNCHECK) ./...
 
-## cross: compile every release architecture of both binaries
+## cross: compile every release architecture of the sensor and server, and the agent
 .PHONY: cross
 cross:
 	@fail=0; \
@@ -144,6 +151,10 @@ cross:
 	for t in $(SERVER_TARGETS); do \
 		if env CGO_ENABLED=0 GOOS=$${t%/*} GOARCH=$${t#*/} $(GO) build -o /dev/null ./cmd/netgraph; \
 		then echo "ok    server $$t"; else echo "FAIL  server $$t"; fail=1; fi; \
+	done; \
+	for a in $(AGENT_TARGETS); do \
+		if env CGO_ENABLED=0 GOOS=linux GOARCH=$$a $(GO) build -o /dev/null ./cmd/netgraph-agent; \
+		then echo "ok    agent linux/$$a"; else echo "FAIL  agent linux/$$a"; fail=1; fi; \
 	done; \
 	exit $$fail
 

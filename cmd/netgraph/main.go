@@ -58,6 +58,8 @@ func main() {
 		err = runDecisions(os.Args[2:])
 	case "purpose":
 		err = runPurpose(os.Args[2:])
+	case "agents":
+		err = runAgents(os.Args[2:])
 	case "archive":
 		err = runArchive(os.Args[2:])
 	case "mcp":
@@ -99,6 +101,7 @@ commands:
   profile    manage profiles and the network triggers that activate them
   decisions  review passive would-ask decisions
   purpose    import and look up application purpose metadata
+  agents     list optional host agents, their processes and connections
   archive    read the long-term archive
   ask        answer a question from recorded evidence, with citations
   mcp        serve read-only tools to an AI assistant, on stdin and stdout

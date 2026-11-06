@@ -29,6 +29,8 @@ that are easy to break.
 - **Other sources run on the server** (`internal/sources`): decoders bound what they read
   and have `Fuzz*` targets, as the sensor's do, and UDP exports need an allow-list. Conntrack is the exception, since only the router's
   kernel knows it: `internal/conntrack` runs in the sensor, off by default.
+- **The host agent is not the sensor.** `cmd/netgraph-agent` is Linux only and optional; nothing
+  else depends on it. It sends a program's name, not its arguments, unless `-cmdlines`.
 - **The sensor persists nothing.** It writes no file: no database, spool,
   cache or keyring on disk. Its only inputs from disk are the token and CA
   files it is pointed at. (The kernel's connection table comes over netlink.)
@@ -59,7 +61,11 @@ that are easy to break.
 - **The map keeps its places** (`web/src/js/map/`). A node with a known
   position never moves unless a person moves it or asks to re-arrange: new
   nodes give way. Don't add a layout step that shifts what is already placed.
-- **netgraph never touches a firewall.** `internal/policy` only reads and writes text. An export
+- **netgraph never touches a firewall** — with one opt-in exception. `internal/policy` only reads and writes text.
+  The optional host agent (`netgraph-agent -enforce=nftables -apply`) may change its own host's
+  firewall, and only in one table it owns and replaces whole: it drops only what an explicit,
+  host-wide deny rule matched (never a default, never a rule for one program, never the server's
+  address), dry-runs unless `-apply`, and removes its table on exit. An export
   is built from what's parsed or reduced to a safe alphabet, so a hostname can't add a rule, and
   anything it can't express is commented out and warned about: a dropped deny is a hole.
 - **The archive follows erasure.** `internal/archive` holds what retention would delete, and
@@ -76,7 +82,8 @@ that are easy to break.
   neither MCP nor the LLM mode can change anything; keep it that way. A model's
   statement with no real tool call behind it is dropped (`llm.finish`). LLM use is off
   unless configured, and asked for per question, and a model off the network warns first.
-- **Every route but ingest goes through `Server.require`** with the least role it
+- **Every route but ingest and the host agent's goes through `Server.require`** (the agent's use
+  `requireAgent` and their own token, off when it's unset) with the least role it
   needs: reads are `RoleViewer`, changes `RoleOperator`. Until an operator or admin token
   exists, the read token does everything, so upgrading never changes who can do what. A
   proxy's user header counts only from `-trusted-proxy` addresses, and cookie-borne

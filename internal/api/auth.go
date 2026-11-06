@@ -457,3 +457,31 @@ func author(r *http.Request, given string) string {
 	}
 	return given
 }
+
+// SetAgentToken replaces the host-agent token, such as on SIGHUP.
+func (s *Server) SetAgentToken(tok string) { s.agentTok.Store(&tok) }
+
+func (s *Server) agentToken() string {
+	if p := s.agentTok.Load(); p != nil {
+		return *p
+	}
+	return ""
+}
+
+// requireAgent accepts only the dedicated agent token. An empty token means
+// the agent surface is off, not open.
+func (s *Server) requireAgent(h http.HandlerFunc) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		want := s.agentToken()
+		if want == "" {
+			httpError(w, http.StatusForbidden, errors.New("host agent is not configured"))
+			return
+		}
+		if subtle.ConstantTimeCompare([]byte(bearer(r)), []byte(want)) != 1 {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="netgraph-agent"`)
+			httpError(w, http.StatusUnauthorized, errors.New("missing or wrong agent token"))
+			return
+		}
+		h(w, r)
+	})
+}

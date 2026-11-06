@@ -41,6 +41,7 @@ func runServe(args []string) error {
 	readTokenFile := fs.String("read-token-file", etcCredential("read.token"), "file holding the token for queries and the web UI (default $NETGRAPH_READ_TOKEN; under the systemd unit, /etc/netgraph/read.token; none: open)")
 	operatorTokenFile := fs.String("operator-token-file", "", "file holding the token for changing things: labels, notes, findings. With this set, the read token only reads; default $NETGRAPH_OPERATOR_TOKEN")
 	adminTokenFile := fs.String("admin-token-file", "", "file holding the token for the audit log and test notifications; default $NETGRAPH_ADMIN_TOKEN")
+	agentTokenFile := fs.String("agent-token-file", "", "file holding the optional host agent's token; default $NETGRAPH_AGENT_TOKEN")
 	trustedProxy := fs.String("trusted-proxy", "", "comma-separated addresses or CIDRs of a reverse proxy to trust to say who someone is")
 	proxyHeader := fs.String("proxy-user-header", "Remote-User", "the header a -trusted-proxy names the user in")
 	proxyRoles := fs.String("proxy-roles-file", "", `with -trusted-proxy, lines of "user role" (viewer, operator or admin); "* role" sets the default, otherwise viewer`)
@@ -102,6 +103,10 @@ func runServe(args []string) error {
 		return err
 	}
 	adminTok, err := readSecret(*adminTokenFile, "NETGRAPH_ADMIN_TOKEN")
+	if err != nil {
+		return err
+	}
+	agentTok, err := readSecret(*agentTokenFile, "NETGRAPH_AGENT_TOKEN")
 	if err != nil {
 		return err
 	}
@@ -274,7 +279,7 @@ func runServe(args []string) error {
 	}
 	defer st.Close()
 
-	cfg := api.Config{Store: st, IngestToken: ingestTok, ReadToken: readTok, OperatorToken: operatorTok, AdminToken: adminTok, Proxy: proxy, WiFi: wifiKeys, Web: web.FS, Logger: log}
+	cfg := api.Config{Store: st, IngestToken: ingestTok, ReadToken: readTok, OperatorToken: operatorTok, AdminToken: adminTok, AgentToken: agentTok, Proxy: proxy, WiFi: wifiKeys, Web: web.FS, Logger: log}
 	if notifier != nil { // not a nil pointer in an interface
 		cfg.Notify = notifier
 	}
@@ -302,7 +307,7 @@ func runServe(args []string) error {
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	go reloadTokens(ctx, apiSrv, *tokenFile, *readTokenFile, *operatorTokenFile, *adminTokenFile, *noAuth, log)
+	go reloadTokens(ctx, apiSrv, *tokenFile, *readTokenFile, *operatorTokenFile, *adminTokenFile, *agentTokenFile, *noAuth, log)
 	go st.RunRetention(ctx, time.Hour)
 	sink := func(ctx context.Context, sensor, boot string, evs []wire.Event) error {
 		_, err := st.Ingest(ctx, sensor, boot, evs)
@@ -696,7 +701,7 @@ func readLLM(file string, log *slog.Logger) (*llm.Config, error) {
 // reloadTokens re-reads the token files on SIGHUP. A failed read keeps the
 // previous credentials; a flag with no file and no environment variable is
 // left alone rather than silently becoming open.
-func reloadTokens(ctx context.Context, srv *api.Server, ingestFile, readFile, operatorFile, adminFile string, noAuth bool, log *slog.Logger) {
+func reloadTokens(ctx context.Context, srv *api.Server, ingestFile, readFile, operatorFile, adminFile, agentFile string, noAuth bool, log *slog.Logger) {
 	hup := make(chan os.Signal, 1)
 	signal.Notify(hup, syscall.SIGHUP)
 	defer signal.Stop(hup)
@@ -734,6 +739,14 @@ func reloadTokens(ctx context.Context, srv *api.Server, ingestFile, readFile, op
 				continue
 			}
 			srv.SetRoleTokens(operator, admin)
+			if agentFile != "" || os.Getenv("NETGRAPH_AGENT_TOKEN") != "" {
+				agent, err := readSecret(agentFile, "NETGRAPH_AGENT_TOKEN")
+				if err != nil {
+					log.Error("reload agent token; keeping the previous one", "err", err)
+				} else {
+					srv.SetAgentToken(agent)
+				}
+			}
 			log.Info("reloaded tokens")
 		}
 	}

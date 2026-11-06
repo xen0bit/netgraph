@@ -46,6 +46,9 @@ var tableErasure = map[string]string{
 	"network_triggers":  "configuration: forget and purge leave it",
 	"policy_decisions":  "forget, purge, retention (raw); too small for the disk guard to matter",
 	"app_purposes":      "configuration: what an application uses a host for, not about any device here",
+	"agents":            "operational: a host agent's name and counters, not about any device here",
+	"agent_processes":   "retention (raw), purge; a host's processes, which no MAC names, so forget can't find them",
+	"agent_connections": "retention (raw), purge; a host's sockets, which no MAC names, so forget can't find them",
 }
 
 func TestEveryTableHasAnErasureDecision(t *testing.T) {

@@ -871,3 +871,32 @@ func (c *Client) ImportBundle(ctx context.Context, b *backup.Bundle) (map[string
 	}
 	return v.Imported, nil
 }
+
+// Agents lists host agents the server has heard from.
+func (c *Client) Agents(ctx context.Context) ([]model.Agent, error) {
+	var v []model.Agent
+	err := c.getJSON(ctx, "/api/v1/agents", nil, &v)
+	return v, err
+}
+
+// AgentProcesses lists one agent's processes.
+func (c *Client) AgentProcesses(ctx context.Context, name string, limit int) ([]model.AgentProcess, error) {
+	q := url.Values{}
+	if limit > 0 {
+		q.Set("limit", strconv.Itoa(limit))
+	}
+	var v []model.AgentProcess
+	err := c.getJSON(ctx, "/api/v1/agents/"+url.PathEscape(name)+"/processes", q, &v)
+	return v, err
+}
+
+// AgentConnections lists one agent's attributed connections.
+func (c *Client) AgentConnections(ctx context.Context, name string, limit int) ([]model.AgentConnection, error) {
+	q := url.Values{}
+	if limit > 0 {
+		q.Set("limit", strconv.Itoa(limit))
+	}
+	var v []model.AgentConnection
+	err := c.getJSON(ctx, "/api/v1/agents/"+url.PathEscape(name)+"/connections", q, &v)
+	return v, err
+}
