@@ -30,6 +30,7 @@ type Bundle struct {
 	Policies   []*policy.Policy       `json:"policies"`
 	Profiles   []model.Profile        `json:"profiles"`
 	Triggers   []model.NetworkTrigger `json:"network_triggers"`
+	RuleGroups []model.RuleGroup      `json:"rule_groups,omitempty"`
 	Blocklists []BlocklistBundle      `json:"blocklists"`
 	Purposes   []model.Purpose        `json:"purposes"`
 }

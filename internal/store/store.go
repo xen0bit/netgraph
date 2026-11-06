@@ -112,8 +112,9 @@ type Store struct {
 	r    *sql.DB // read-only pool
 	log  *slog.Logger
 
-	mu  sync.Mutex // serialises ingest; guards ing
-	ing *ingester
+	mu     sync.Mutex // serialises ingest; guards ing and netSig
+	ing    *ingester
+	netSig string // the network signature profile triggers last acted on
 
 	nets *localNets
 	sub  *broker

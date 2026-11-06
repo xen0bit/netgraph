@@ -2,8 +2,10 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
+	"net/netip"
 	"strconv"
 	"strings"
 
@@ -91,20 +93,24 @@ func (s *Store) ScanDecisions(ctx context.Context, f model.Filter, limit int) (i
 		if action == "" {
 			continue
 		}
-		var open int
-		err := s.r.QueryRowContext(ctx, `SELECT count(*) FROM policy_decisions WHERE flow_key = ? AND status = 'open'`, fl.Key).Scan(&open)
+		// One decision per connection, whatever became of it: an answered
+		// one must not come back on the next scan.
+		var seen int
+		err := s.r.QueryRowContext(ctx, `SELECT count(*) FROM policy_decisions WHERE flow_key = ?`, fl.Key).Scan(&seen)
 		if err != nil {
 			return created, err
 		}
-		if open > 0 {
+		if seen > 0 {
 			continue
 		}
+		s.mu.Lock()
 		_, err = s.w.ExecContext(ctx, `INSERT INTO policy_decisions
 			(ts, device, device_name, flow_key, direction, remote, port, proto, action, status, rule_id, rule_name,
 			 profile, mode, stalled, unconfirmed, created, modified)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?, 0, 1, ?, ?)`,
-			fl.FirstSeen, fl.Device, label, fl.Key, fl.Direction, dst, portString(fl), fl.Proto, action,
-			d.RuleID, d.Rule, profileName, mode, now, now)
+			fl.FirstSeen, fl.Device, clip(label, 256), fl.Key, fl.Direction, clip(dst, 256), portString(fl), fl.Proto, action,
+			d.RuleID, clip(d.Rule, 256), profileName, mode, now, now)
+		s.mu.Unlock()
 		if err != nil {
 			return created, err
 		}
@@ -113,14 +119,16 @@ func (s *Store) ScanDecisions(ctx context.Context, f model.Filter, limit int) (i
 	return created, nil
 }
 
+const decisionSelect = `SELECT id, ts, device, device_name, flow_key, direction, remote, port, proto, action, status,
+		rule_id, rule_name, profile, mode, stalled, unconfirmed, decided_at, decided_by, note, created, modified
+		FROM policy_decisions`
+
 // Decisions lists decisions, newest first. status empty lists all.
 func (s *Store) Decisions(ctx context.Context, status string, limit int) ([]model.PolicyDecision, error) {
 	if limit <= 0 || limit > 1000 {
 		limit = 200
 	}
-	q := `SELECT id, ts, device, device_name, flow_key, direction, remote, port, proto, action, status,
-		rule_id, rule_name, profile, mode, stalled, unconfirmed, decided_at, decided_by, note, created, modified
-		FROM policy_decisions`
+	q := decisionSelect
 	var args []any
 	if status != "" {
 		q += ` WHERE status = ?`
@@ -132,6 +140,10 @@ func (s *Store) Decisions(ctx context.Context, status string, limit int) ([]mode
 	if err != nil {
 		return nil, err
 	}
+	return scanDecisions(rows)
+}
+
+func scanDecisions(rows *sql.Rows) ([]model.PolicyDecision, error) {
 	defer rows.Close()
 	out := []model.PolicyDecision{}
 	for rows.Next() {
@@ -150,42 +162,85 @@ func (s *Store) Decisions(ctx context.Context, status string, limit int) ([]mode
 
 // Decision loads one decision.
 func (s *Store) Decision(ctx context.Context, id int64) (*model.PolicyDecision, error) {
-	list, err := s.Decisions(ctx, "", 1000)
+	rows, err := s.r.QueryContext(ctx, decisionSelect+` WHERE id = ?`, id)
 	if err != nil {
 		return nil, err
 	}
-	for i := range list {
-		if list[i].ID == id {
-			return &list[i], nil
-		}
+	list, err := scanDecisions(rows)
+	if err != nil {
+		return nil, err
 	}
-	return nil, fmt.Errorf("%w: decision %d", ErrNotFound, id)
+	if len(list) == 0 {
+		return nil, fmt.Errorf("%w: decision %d", ErrNotFound, id)
+	}
+	return &list[0], nil
 }
 
-// DecideDecision records a person's answer. It never claims that a passive
-// server enforced anything; only an agent can do that.
-func (s *Store) DecideDecision(ctx context.Context, id int64, status, by, note string) error {
-	switch status {
-	case DecisionAllowed, DecisionDenied, DecisionRuleCreated, DecisionExpired:
+// AnswerDecision records a person's answer: allow or deny once, or rule,
+// which adds a rule for this connection to the active policy (ruleAction is
+// that rule's allow or deny). It never claims that a passive server enforced
+// anything; only an agent can do that.
+func (s *Store) AnswerDecision(ctx context.Context, id int64, answer, ruleAction, by, note string) (*model.PolicyDecision, error) {
+	var status string
+	switch answer {
+	case "allow":
+		status = DecisionAllowed
+	case "deny":
+		status = DecisionDenied
+	case "rule":
+		status = DecisionRuleCreated
 	default:
-		return fmt.Errorf("%w: decision status %q", ErrInvalid, status)
+		return nil, fmt.Errorf("%w: answer %q is not allow, deny or rule", ErrInvalid, answer)
+	}
+	d, err := s.Decision(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if answer == "rule" {
+		if ruleAction == "" {
+			ruleAction = policy.ActionDeny
+		}
+		if ruleAction != policy.ActionAllow && ruleAction != policy.ActionDeny {
+			return nil, fmt.Errorf("%w: a rule from a decision is allow or deny, not %q", ErrInvalid, ruleAction)
+		}
+		p, err := s.ActivePolicy(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if p == nil || p.Version != 2 {
+			return nil, fmt.Errorf("%w: a rule can only be added to an active version 2 policy", ErrInvalid)
+		}
+		r := DecisionRule(*d)
+		r.Action = ruleAction
+		p.RulesV2 = append(p.RulesV2, *r)
+		saved, err := s.SavePolicy(ctx, p)
+		if err != nil {
+			return nil, err
+		}
+		added := saved.RulesV2[len(saved.RulesV2)-1]
+		d.RuleID, d.RuleName = added.ID, added.Name
 	}
 	now := s.cfg.Now().UTC().UnixMilli()
+	s.mu.Lock()
 	res, err := s.w.ExecContext(ctx, `UPDATE policy_decisions
-		SET status = ?, decided_at = ?, decided_by = ?, note = ?, unconfirmed = 0, modified = ? WHERE id = ?`,
-		status, now, clip(by, 128), clip(note, 500), now, id)
+		SET status = ?, decided_at = ?, decided_by = ?, note = ?, unconfirmed = 0, modified = ?,
+		rule_id = ?, rule_name = ? WHERE id = ?`,
+		status, now, clip(by, 128), clip(note, 500), now, d.RuleID, d.RuleName, id)
+	s.mu.Unlock()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if n, _ := res.RowsAffected(); n == 0 {
-		return fmt.Errorf("%w: decision %d", ErrNotFound, id)
+		return nil, fmt.Errorf("%w: decision %d", ErrNotFound, id)
 	}
-	return nil
+	return s.Decision(ctx, id)
 }
 
 // ResetDecision puts a decision back in the open queue.
 func (s *Store) ResetDecision(ctx context.Context, id int64) error {
 	now := s.cfg.Now().UTC().UnixMilli()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	res, err := s.w.ExecContext(ctx, `UPDATE policy_decisions SET status = 'open', decided_at = 0, decided_by = '', unconfirmed = 1, modified = ? WHERE id = ?`, now, id)
 	if err != nil {
 		return err
@@ -201,25 +256,39 @@ func (s *Store) ExpireDecisions(ctx context.Context, before int64) (int64, error
 	if before <= 0 {
 		return 0, fmt.Errorf("%w: expiry time", ErrInvalid)
 	}
+	now := s.cfg.Now().UTC().UnixMilli()
+	s.mu.Lock()
+	defer s.mu.Unlock()
 	res, err := s.w.ExecContext(ctx, `UPDATE policy_decisions SET status = 'expired', decided_at = ?, unconfirmed = 0, modified = ?
-		WHERE status = 'open' AND ts < ?`, s.cfg.Now().UTC().UnixMilli(), s.cfg.Now().UTC().UnixMilli(), before)
+		WHERE status = 'open' AND ts < ?`, now, now, before)
 	if err != nil {
 		return 0, err
 	}
 	return res.RowsAffected()
 }
 
-// DecisionRule builds a version 2 rule from a decision, for a prefilled
-// create-rule action.
+// DecisionRule builds the version 2 rule a decision would become: this
+// device, this exact destination (an address, or the host name it used),
+// this port. The caller sets the action.
 func DecisionRule(d model.PolicyDecision) *policy.RuleV2 {
-	r := &policy.RuleV2{Name: "review " + d.Remote, Action: policy.ActionAsk, Local: policy.Selector{Type: "any"}, Remote: policy.Selector{Type: "domain", Values: []string{d.Remote}}}
-	if d.Direction == "in" {
-		r.Direction = "in"
+	r := &policy.RuleV2{
+		Name: "decision " + strconv.FormatInt(d.ID, 10) + ": " + d.Remote, Origin: "decision",
+		Action: policy.ActionAsk, Local: policy.Selector{Type: "any"},
 	}
-	if d.Port != "" {
-		if p, _, ok := strings.Cut(d.Port, "/"); ok {
-			r.Ports = []string{p}
-		}
+	if d.Device != "" {
+		r.Local = policy.Selector{Type: "device", Values: []string{d.Device}}
+	}
+	if _, err := netip.ParseAddr(d.Remote); err == nil {
+		r.Remote = policy.Selector{Type: "ip", Values: []string{d.Remote}}
+	} else {
+		r.Remote = policy.Selector{Type: "host", Values: []string{d.Remote}}
+	}
+	switch d.Direction {
+	case "in", "out", "local":
+		r.Direction = d.Direction
+	}
+	if port, proto, ok := strings.Cut(d.Port, "/"); ok && port != "0" {
+		r.Ports = []string{port + "/" + proto}
 	}
 	return r
 }

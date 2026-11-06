@@ -27,10 +27,17 @@ func runPolicyBackup(args []string) error {
 	var b backendFlags
 	b.register(fs)
 	out := fs.String("out", "-", "output file; - writes stdout")
-	password := fs.String("password", "", "encrypt the bundle with this password")
-	signKey := fs.String("sign-key", "", "hex Ed25519 private key file")
+	passwordFile := fs.String("password-file", "", "encrypt the bundle with the password in this file; default $NETGRAPH_BUNDLE_PASSWORD")
+	signKey := fs.String("sign-key", "", "hex Ed25519 private key file: sign the bundle instead of encrypting it")
 	if err := parseInterspersed(fs, args); err != nil {
 		return err
+	}
+	password, err := readSecret(*passwordFile, "NETGRAPH_BUNDLE_PASSWORD")
+	if err != nil {
+		return err
+	}
+	if password != "" && *signKey != "" {
+		return errors.New("a bundle is either encrypted (-password-file) or signed (-sign-key), not both")
 	}
 	be, closeFn, err := openPolicyBackend(&b)
 	if err != nil {
@@ -47,8 +54,8 @@ func runPolicyBackup(args []string) error {
 	}
 	var data []byte
 	switch {
-	case *password != "":
-		env, err := backup.Encrypt(raw, *password)
+	case password != "":
+		env, err := backup.Encrypt(raw, password)
 		if err != nil {
 			return err
 		}
@@ -98,37 +105,58 @@ func readEd25519Key(path string) (ed25519.PrivateKey, error) {
 	}
 }
 
+// openBundleFile reads a plain, encrypted or signed bundle. It fails closed:
+// given a verify key, only a bundle with a good signature is accepted.
 func openBundleFile(path, password, verifyKey string) (*backup.Bundle, error) {
 	raw, err := readOrStdin(path)
 	if err != nil {
 		return nil, err
 	}
 	var env backup.Envelope
-	if json.Unmarshal(raw, &env) == nil && env.Encoding != "" {
-		switch env.Encoding {
-		case "encrypted":
-			payload, err := backup.Decrypt(&env, password)
-			if err != nil {
-				return nil, err
-			}
-			return backup.Parse(strings.NewReader(string(payload)))
-		case "signed":
-			keyRaw, err := os.ReadFile(verifyKey)
-			if err != nil {
-				return nil, err
-			}
-			key, err := hex.DecodeString(strings.TrimSpace(string(keyRaw)))
-			if err != nil || len(key) != ed25519.PublicKeySize {
-				return nil, errors.New("verify key must be 32 hex-encoded bytes")
-			}
-			payload, err := backup.Verify(&env, ed25519.PublicKey(key))
-			if err != nil {
-				return nil, err
-			}
-			return backup.Parse(strings.NewReader(string(payload)))
-		}
+	isEnvelope := json.Unmarshal(raw, &env) == nil && env.Encoding != ""
+	if verifyKey != "" && (!isEnvelope || env.Encoding != "signed") {
+		return nil, errors.New("-verify-key given, but the bundle is not signed")
 	}
-	return backup.Parse(strings.NewReader(string(raw)))
+	if !isEnvelope {
+		return backup.Parse(strings.NewReader(string(raw)))
+	}
+	switch env.Encoding {
+	case "encrypted":
+		if password == "" {
+			return nil, errors.New("the bundle is encrypted: give -password-file or $NETGRAPH_BUNDLE_PASSWORD")
+		}
+		payload, err := backup.Decrypt(&env, password)
+		if err != nil {
+			return nil, errors.New("the bundle does not decrypt with that password, or was changed")
+		}
+		return backup.Parse(strings.NewReader(string(payload)))
+	case "signed":
+		if verifyKey == "" {
+			return nil, errors.New("the bundle is signed: give -verify-key to check it")
+		}
+		pub, err := readEd25519Public(verifyKey)
+		if err != nil {
+			return nil, err
+		}
+		payload, err := backup.Verify(&env, pub)
+		if err != nil {
+			return nil, err
+		}
+		return backup.Parse(strings.NewReader(string(payload)))
+	}
+	return nil, fmt.Errorf("unknown bundle encoding %q", env.Encoding)
+}
+
+func readEd25519Public(path string) (ed25519.PublicKey, error) {
+	keyRaw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	key, err := hex.DecodeString(strings.TrimSpace(string(keyRaw)))
+	if err != nil || len(key) != ed25519.PublicKeySize {
+		return nil, errors.New("verify key must be 32 hex-encoded bytes")
+	}
+	return ed25519.PublicKey(key), nil
 }
 
 func runPolicyRestore(args []string) error {
@@ -136,15 +164,19 @@ func runPolicyRestore(args []string) error {
 	var b backendFlags
 	b.register(fs)
 	path := fs.String("file", "", "bundle file; - reads stdin")
-	password := fs.String("password", "", "decrypt with this password")
-	verifyKey := fs.String("verify-key", "", "hex Ed25519 public key file")
+	passwordFile := fs.String("password-file", "", "decrypt with the password in this file; default $NETGRAPH_BUNDLE_PASSWORD")
+	verifyKey := fs.String("verify-key", "", "hex Ed25519 public key file; with it, only a bundle signed by that key is restored")
 	if err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
 	if *path == "" {
 		return errors.New("usage: netgraph policy restore -file bundle.json")
 	}
-	bundle, err := openBundleFile(*path, *password, *verifyKey)
+	password, err := readSecret(*passwordFile, "NETGRAPH_BUNDLE_PASSWORD")
+	if err != nil {
+		return err
+	}
+	bundle, err := openBundleFile(*path, password, *verifyKey)
 	if err != nil {
 		return err
 	}
@@ -170,28 +202,9 @@ func runPolicyVerify(args []string) error {
 	if *path == "" || *verifyKey == "" {
 		return errors.New("usage: netgraph policy verify -file signed.json -verify-key pub.hex")
 	}
-	raw, err := os.ReadFile(*path)
+	bundle, err := openBundleFile(*path, "", *verifyKey)
 	if err != nil {
 		return err
 	}
-	var env backup.Envelope
-	if err := json.Unmarshal(raw, &env); err != nil {
-		return err
-	}
-	keyRaw, err := os.ReadFile(*verifyKey)
-	if err != nil {
-		return err
-	}
-	key, err := hex.DecodeString(strings.TrimSpace(string(keyRaw)))
-	if err != nil || len(key) != ed25519.PublicKeySize {
-		return errors.New("verify key must be 32 hex-encoded bytes")
-	}
-	payload, err := backup.Verify(&env, ed25519.PublicKey(key))
-	if err != nil {
-		return err
-	}
-	if _, err := backup.Parse(strings.NewReader(string(payload))); err != nil {
-		return err
-	}
-	return encode(map[string]any{"valid": true, "bytes": len(payload)})
+	return encode(map[string]any{"valid": true, "policies": len(bundle.Policies), "blocklists": len(bundle.Blocklists)})
 }

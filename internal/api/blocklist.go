@@ -159,18 +159,16 @@ func (s *Server) blocklistImport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, b)
 }
 
+// blocklistUpdate fetches a blocklist's URL now, over HTTPS to a public address.
 func (s *Server) blocklistUpdate(w http.ResponseWriter, r *http.Request) {
 	id, err := blocklistID(r)
 	if err != nil {
 		httpError(w, http.StatusBadRequest, err)
 		return
 	}
-	var in struct {
-		AllowPrivate bool `json:"allow_private"`
-		AllowHTTP    bool `json:"allow_http"`
-	}
-	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in)
-	f := &blocklist.Fetcher{AllowPrivate: in.AllowPrivate, AllowHTTP: in.AllowHTTP}
+	// Always the default fetcher: an HTTP client may not turn off the check
+	// that keeps the server from fetching addresses on its own network.
+	f := &blocklist.Fetcher{}
 	b, err := s.cfg.Store.UpdateBlocklist(r.Context(), id, f)
 	if err != nil {
 		s.fail(w, err)

@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 
 	"github.com/xen0bit/netgraph/internal/model"
@@ -33,9 +34,11 @@ func (s *Store) RuleGroups(ctx context.Context) ([]model.RuleGroup, error) {
 	return out, rows.Err()
 }
 
-// SaveRuleGroup inserts or replaces a group.
+// SaveRuleGroup inserts a group, or updates the fields a person sets on one
+// (by AUID). Update bookkeeping is the server's and is never taken from the caller.
 func (s *Store) SaveRuleGroup(ctx context.Context, g *model.RuleGroup) (*model.RuleGroup, error) {
-	if strings.TrimSpace(g.Name) == "" {
+	g.Name = strings.TrimSpace(g.Name)
+	if g.Name == "" {
 		return nil, fmt.Errorf("%w: a group needs a name", ErrInvalid)
 	}
 	if g.Type == "" {
@@ -43,6 +46,9 @@ func (s *Store) SaveRuleGroup(ctx context.Context, g *model.RuleGroup) (*model.R
 	}
 	if g.Type != "local" && g.Type != "remote" && g.Type != "factory" {
 		return nil, fmt.Errorf("%w: group type %q", ErrInvalid, g.Type)
+	}
+	if err := checkFeedURL(g.URL); err != nil {
+		return nil, err
 	}
 	if g.AUID == "" {
 		id, err := newPolicyID("grp_")
@@ -52,28 +58,43 @@ func (s *Store) SaveRuleGroup(ctx context.Context, g *model.RuleGroup) (*model.R
 		g.AUID = id
 	}
 	now := s.cfg.Now().UTC().UnixMilli()
-	if g.Created == 0 {
-		g.Created = now
-	}
-	g.Modified = now
 	if g.UpdateInterval <= 0 {
 		g.UpdateInterval = 86400
 	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	_, err := s.w.ExecContext(ctx, `INSERT INTO rule_groups
-		(auid, name, description, type, url, enabled, update_interval, last_success, last_failure, last_error, invalid_entries, created, modified)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		(auid, name, description, type, url, enabled, update_interval, created, modified)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(auid) DO UPDATE SET name=excluded.name, description=excluded.description, type=excluded.type,
-		url=excluded.url, enabled=excluded.enabled, update_interval=excluded.update_interval,
-		last_success=excluded.last_success, last_failure=excluded.last_failure, last_error=excluded.last_error,
-		invalid_entries=excluded.invalid_entries, modified=excluded.modified`,
-		g.AUID, g.Name, g.Description, g.Type, g.URL, boolInt(g.Enabled), g.UpdateInterval,
-		g.LastSuccess, g.LastFailure, g.LastError, g.InvalidEntries, g.Created, g.Modified)
+		url=excluded.url, enabled=excluded.enabled, update_interval=excluded.update_interval, modified=excluded.modified`,
+		g.AUID, g.Name, g.Description, g.Type, g.URL, boolInt(g.Enabled), g.UpdateInterval, now, now)
+	s.mu.Unlock()
 	if err != nil {
 		return nil, err
 	}
-	return g, nil
+	groups, err := s.RuleGroups(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for i := range groups {
+		if groups[i].AUID == g.AUID {
+			return &groups[i], nil
+		}
+	}
+	return nil, fmt.Errorf("%w: group %s", ErrNotFound, g.AUID)
+}
+
+// checkFeedURL accepts an empty URL (a list filled by import) or an https one.
+// Whether the address is public is checked when it is fetched.
+func checkFeedURL(raw string) error {
+	if raw == "" {
+		return nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
+		return fmt.Errorf("%w: feed URL must be an http(s) URL", ErrInvalid)
+	}
+	return nil
 }
 
 // Blocklists lists blocklists, newest first.
@@ -119,18 +140,41 @@ func (s *Store) Blocklist(ctx context.Context, id int64) (*model.Blocklist, erro
 	return &b, nil
 }
 
-// SaveBlocklist inserts or replaces a blocklist.
+// SaveBlocklist inserts a blocklist, or updates the fields a person sets on
+// one: name, URL, format, group, enabled and update interval. It is found by
+// AUID, else by ID, which must then exist. Fetch state and counts are the
+// server's and are never taken from the caller.
 func (s *Store) SaveBlocklist(ctx context.Context, b *model.Blocklist) (*model.Blocklist, error) {
-	if strings.TrimSpace(b.Name) == "" {
+	b.Name = strings.TrimSpace(b.Name)
+	if b.Name == "" {
 		return nil, fmt.Errorf("%w: a blocklist needs a name", ErrInvalid)
 	}
-	if b.AUID == "" && b.ID != 0 {
-		if existing, err := s.Blocklist(ctx, b.ID); err == nil {
-			b.AUID = existing.AUID
-			if b.Created == 0 {
-				b.Created = existing.Created
-			}
+	if b.Format == "" {
+		b.Format = blocklist.FormatAuto
+	}
+	switch b.Format {
+	case blocklist.FormatAuto, blocklist.FormatHosts, blocklist.FormatDomains, blocklist.FormatIPs, blocklist.FormatLSRules:
+	default:
+		return nil, fmt.Errorf("%w: format %q", ErrInvalid, b.Format)
+	}
+	if err := checkFeedURL(b.URL); err != nil {
+		return nil, err
+	}
+	if b.UpdateInterval <= 0 {
+		b.UpdateInterval = 86400
+	}
+	if b.GroupID > 0 {
+		var one int
+		if err := s.r.QueryRowContext(ctx, `SELECT 1 FROM rule_groups WHERE id = ?`, b.GroupID).Scan(&one); err != nil {
+			return nil, fmt.Errorf("%w: group %d", ErrNotFound, b.GroupID)
 		}
+	}
+	if b.AUID == "" && b.ID != 0 {
+		existing, err := s.Blocklist(ctx, b.ID)
+		if err != nil {
+			return nil, err
+		}
+		b.AUID = existing.AUID
 	}
 	if b.AUID == "" {
 		id, err := newPolicyID("bl_")
@@ -139,35 +183,18 @@ func (s *Store) SaveBlocklist(ctx context.Context, b *model.Blocklist) (*model.B
 		}
 		b.AUID = id
 	}
-	if b.Format == "" {
-		b.Format = blocklist.FormatAuto
-	}
 	now := s.cfg.Now().UTC().UnixMilli()
-	if b.Created == 0 {
-		b.Created = now
-	}
-	b.Modified = now
-	if b.UpdateInterval <= 0 {
-		b.UpdateInterval = 86400
-	}
 	s.mu.Lock()
-	defer s.mu.Unlock()
-	res, err := s.w.ExecContext(ctx, `INSERT INTO blocklists
-		(auid, group_id, name, url, format, enabled, update_interval, last_success, last_failure, last_error,
-		 etag, last_modified, entry_count, invalid_entries, created, modified)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	_, err := s.w.ExecContext(ctx, `INSERT INTO blocklists
+		(auid, group_id, name, url, format, enabled, update_interval, created, modified)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(auid) DO UPDATE SET group_id=excluded.group_id, name=excluded.name, url=excluded.url,
 		format=excluded.format, enabled=excluded.enabled, update_interval=excluded.update_interval,
-		last_success=excluded.last_success, last_failure=excluded.last_failure, last_error=excluded.last_error,
-		etag=excluded.etag, last_modified=excluded.last_modified, entry_count=excluded.entry_count,
-		invalid_entries=excluded.invalid_entries, modified=excluded.modified`,
-		b.AUID, nullableID(b.GroupID), b.Name, b.URL, b.Format, boolInt(b.Enabled), b.UpdateInterval,
-		b.LastSuccess, b.LastFailure, b.LastError, b.ETag, b.LastModified, b.EntryCount, b.InvalidEntries, b.Created, b.Modified)
+		modified=excluded.modified`,
+		b.AUID, nullableID(b.GroupID), b.Name, b.URL, b.Format, boolInt(b.Enabled), b.UpdateInterval, now, now)
+	s.mu.Unlock()
 	if err != nil {
 		return nil, err
-	}
-	if id, err := res.LastInsertId(); err == nil && b.ID == 0 {
-		b.ID = id
 	}
 	return s.blocklistByAUID(ctx, b.AUID)
 }
@@ -266,6 +293,13 @@ func (s *Store) ReplaceBlocklistEntries(ctx context.Context, id int64, parsed *b
 		return err
 	}
 	defer tx.Rollback()
+	var one int
+	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM blocklists WHERE id = ?`, id).Scan(&one); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("%w: blocklist %d", ErrNotFound, id)
+		}
+		return err
+	}
 	type state struct {
 		enabled    bool
 		unapproved bool
@@ -304,6 +338,8 @@ func (s *Store) ReplaceBlocklistEntries(ctx context.Context, id int64, parsed *b
 		en, un, uc, lu, notes := true, false, int64(0), int64(0), ""
 		if ok {
 			en, un, uc, lu, notes = st.enabled, st.unapproved, st.useCount, st.lastUsed, st.notes
+		} else if e.Disabled {
+			en = false // a restored entry someone had turned off stays off
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO blocklist_entries
 			(blocklist_id, kind, value, enabled, unapproved, use_count, last_used, notes)

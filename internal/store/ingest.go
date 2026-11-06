@@ -68,7 +68,7 @@ func (s *Store) Ingest(ctx context.Context, sensor, boot string, events []wire.E
 	s.nameLive(ctx, live)
 	s.sub.publish(live)
 	if profileRelevant(events) {
-		if _, perr := s.evaluateProfileLocked(ctx); perr != nil {
+		if _, perr := s.evaluateProfileLocked(ctx, false); perr != nil {
 			s.log.Error("evaluate network profile", "err", perr)
 		}
 	}

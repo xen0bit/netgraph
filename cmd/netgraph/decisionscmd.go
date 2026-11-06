@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"os"
 
 	"github.com/xen0bit/netgraph/internal/model"
 )
@@ -12,7 +13,7 @@ import (
 type decisionBackend interface {
 	Decisions(context.Context, string) ([]model.PolicyDecision, error)
 	ScanDecisions(context.Context, model.Filter, int) (int, error)
-	DecideDecision(context.Context, int64, string, string, string) error
+	AnswerDecision(context.Context, int64, string, string, string, string) (*model.PolicyDecision, error)
 	ResetDecision(context.Context, int64) error
 }
 
@@ -102,29 +103,32 @@ func runDecisionsScan(args []string) error {
 	return encode(map[string]int{"created": n})
 }
 
-func runDecisionAnswer(args []string, action string) error {
-	fs := flag.NewFlagSet("decision answer", flag.ContinueOnError)
+func runDecisionAnswer(args []string, answer string) error {
+	fs := flag.NewFlagSet("decisions "+answer, flag.ContinueOnError)
 	var b backendFlags
 	b.register(fs)
 	id := fs.Int64("id", 0, "decision ID")
-	by := fs.String("by", "", "who answered")
+	action := fs.String("action", "deny", "with rule: the new rule's action, allow or deny")
 	note := fs.String("note", "", "note")
 	if err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
 	if *id == 0 {
-		return errors.New("usage: netgraph decisions allow|deny|rule -id N")
+		return errors.New("usage: netgraph decisions allow|deny|rule -id N [-action allow|deny]")
 	}
 	be, closeFn, err := openDecisionBackend(&b, true)
 	if err != nil {
 		return err
 	}
 	defer closeFn()
-	status := map[string]string{"allow": "allowed", "deny": "denied", "rule": "rule-created"}[action]
-	if err := be.DecideDecision(context.Background(), *id, status, *by, *note); err != nil {
+	if answer != "rule" {
+		*action = ""
+	}
+	d, err := be.AnswerDecision(context.Background(), *id, answer, *action, localActor(), *note)
+	if err != nil {
 		return err
 	}
-	return nil
+	return encode(d)
 }
 
 func runDecisionReset(args []string) error {
@@ -141,4 +145,13 @@ func runDecisionReset(args []string) error {
 	}
 	defer closeFn()
 	return be.ResetDecision(context.Background(), *id)
+}
+
+// localActor names who answered from this command line when it works on the
+// database directly; through -server, the server records the token's identity.
+func localActor() string {
+	if u := os.Getenv("USER"); u != "" {
+		return "cli:" + u
+	}
+	return "cli"
 }
