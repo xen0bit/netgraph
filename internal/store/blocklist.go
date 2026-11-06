@@ -211,7 +211,7 @@ func (s *Store) DeleteBlocklist(ctx context.Context, id int64) error {
 
 // BlocklistEntries lists entries, optionally only enabled ones.
 func (s *Store) BlocklistEntries(ctx context.Context, id int64, enabledOnly bool, limit, offset int) ([]model.BlocklistEntry, error) {
-	if limit <= 0 || limit > 100000 {
+	if limit <= 0 || limit > 500000 {
 		limit = 5000
 	}
 	q := `SELECT id, blocklist_id, kind, value, enabled, unapproved, use_count, last_used, notes

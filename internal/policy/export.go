@@ -249,7 +249,11 @@ func compile(p *Policy, obs Observed) plan {
 		}
 		return set, "the addresses seen for " + safe(sel)
 	}
-	for _, r := range p.Rules {
+	rules := p.Rules
+	if p.Version == 2 {
+		rules = exportV2Rules(p, warn)
+	}
+	for _, r := range rules {
 		pr := planRule{name: safe(r.Name), allow: r.Action == "allow"}
 		if pr.name == "" {
 			pr.name = "unnamed"
@@ -298,6 +302,120 @@ func compile(p *Policy, obs Observed) plan {
 		)
 	}
 	return out
+}
+
+// exportV2Rules lowers version 2 rules to the address-oriented rule shape the
+// exporters understand. It warns about anything it cannot faithfully express
+// instead of silently changing an allow into a deny.
+func exportV2Rules(p *Policy, warn func(string, ...any)) []Rule {
+	var out []Rule
+	for _, r := range p.RulesV2 {
+		if !r.EnabledValue() {
+			continue
+		}
+		if r.Action == ActionAsk {
+			warn("rule %q is ask and isn't exported: a firewall has no way to ask", safe(r.Name))
+			continue
+		}
+		if r.Profile != "" {
+			warn("rule %q belongs to profile %q; the export is not profile-aware", safe(r.Name), safe(r.Profile))
+		}
+		if r.Priority != "" && r.Priority != PriorityRegular {
+			warn("rule %q has priority %q; the export keeps file order", safe(r.Name), safe(r.Priority))
+		}
+		locals, ok := exportLocal(r.Local)
+		if !ok {
+			warn("rule %q has a local selector a firewall export can't name", safe(r.Name))
+			continue
+		}
+		remotes, ok := exportRemote(r.Remote)
+		if !ok {
+			warn("rule %q has a remote selector a firewall export can't name", safe(r.Name))
+			continue
+		}
+		ports := append([]string(nil), r.Ports...)
+		if r.Protocol != "" && r.Protocol != "any" {
+			for i, port := range ports {
+				if !strings.Contains(port, "/") {
+					ports[i] = port + "/" + r.Protocol
+				}
+			}
+		}
+		mk := func(name, from, to string) Rule {
+			return Rule{Name: name, From: from, To: to, Ports: ports, Action: r.Action}
+		}
+		switch r.Direction {
+		case "in":
+			for _, local := range locals {
+				for _, remote := range remotes {
+					out = append(out, mk(r.Name, remote, local))
+				}
+			}
+		case "both":
+			for _, local := range locals {
+				for _, remote := range remotes {
+					out = append(out, mk(r.Name+" (out)", local, remote), mk(r.Name+" (in)", remote, local))
+				}
+			}
+		default:
+			for _, local := range locals {
+				for _, remote := range remotes {
+					out = append(out, mk(r.Name, local, remote))
+				}
+			}
+		}
+	}
+	return out
+}
+
+func exportLocal(s Selector) ([]string, bool) {
+	switch s.Type {
+	case "", "any":
+		return []string{"any"}, true
+	case "zone":
+		if len(s.Values) == 0 {
+			return nil, false
+		}
+		out := make([]string, 0, len(s.Values))
+		for _, v := range s.Values {
+			out = append(out, "zone:"+v)
+		}
+		return out, true
+	default:
+		return nil, false
+	}
+}
+
+func exportRemote(s Selector) ([]string, bool) {
+	switch s.Type {
+	case "", "any":
+		return []string{"any"}, true
+	case "ip":
+		if len(s.Values) == 0 {
+			return nil, false
+		}
+		out := make([]string, 0, len(s.Values))
+		for _, v := range s.Values {
+			out = append(out, "ip:"+v)
+		}
+		return out, true
+	case "domain", "dns", "host":
+		if len(s.Values) == 0 {
+			return nil, false
+		}
+		out := make([]string, 0, len(s.Values))
+		for _, v := range s.Values {
+			v = strings.TrimPrefix(v, "*.")
+			if s.Type == "domain" {
+				out = append(out, "site:"+v)
+			} else {
+				out = append(out, "domain:"+v)
+			}
+		}
+		return out, true
+	default:
+		return nil, false
+	}
 }
 
 // ExportPolicy generates a firewall's configuration for a policy.

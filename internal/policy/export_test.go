@@ -243,3 +243,24 @@ func FuzzExport(f *testing.F) {
 		}
 	})
 }
+
+func TestExportVersion2Rules(t *testing.T) {
+	p := &Policy{
+		Version:  2,
+		Zones:    []Zone{{Name: "iot", Devices: []string{"device:aa:bb:cc:00:00:01"}}},
+		Defaults: Defaults{Egress: "deny", Ingress: "deny", IntraZone: "allow", DNS: "allow"},
+		RulesV2: []RuleV2{{
+			Name: "cloud", Action: ActionAllow, Direction: "out",
+			Local:  Selector{Type: "zone", Values: []string{"iot"}},
+			Remote: Selector{Type: "domain", Values: []string{"example.com"}},
+			Ports:  []string{"443"}, Protocol: "tcp",
+		}},
+	}
+	out := export(t, p, FormatNftables, testObserved())
+	if !strings.Contains(out.Config, "tcp dport 443 accept") {
+		t.Fatalf("v2 rule not exported:\n%s", out.Config)
+	}
+	if !strings.Contains(strings.Join(out.Warnings, "\n"), "a firewall can't match names") {
+		t.Fatalf("missing v2 warning: %v", out.Warnings)
+	}
+}

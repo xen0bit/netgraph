@@ -12,7 +12,7 @@ import (
 // the same device, and names sharing an address with a different observed
 // name. It is evidence, not a verdict: CDNs and hard-coded addresses do this.
 func (a *anomalies) nameMismatches(ctx context.Context) error {
-	rows, err := a.s.r.QueryContext(ctx, `SELECT c.client_device, e.key, c.remote_ip, c.sni, c.http_host, c.first_seen
+	rows, err := a.s.r.QueryContext(ctx, `SELECT c.client_device, e.key, c.client_ip, c.remote_ip, c.sni, c.http_host, c.first_seen
 		FROM connections c LEFT JOIN entities e ON e.id = c.client_device
 		WHERE c.first_seen >= ? AND c.first_seen < ? AND (c.sni != '' OR c.http_host != '')
 		ORDER BY c.first_seen DESC LIMIT 500`, a.from, a.to)
@@ -20,13 +20,13 @@ func (a *anomalies) nameMismatches(ctx context.Context) error {
 		return err
 	}
 	type item struct {
-		device, mac, ip, sni, host string
-		ts                         int64
+		device, mac, clientIP, ip, sni, host string
+		ts                                   int64
 	}
 	var items []item
 	for rows.Next() {
 		var it item
-		if err := rows.Scan(&it.device, &it.mac, &it.ip, &it.sni, &it.host, &it.ts); err != nil {
+		if err := rows.Scan(&it.device, &it.mac, &it.clientIP, &it.ip, &it.sni, &it.host, &it.ts); err != nil {
 			rows.Close()
 			return err
 		}
@@ -49,7 +49,7 @@ func (a *anomalies) nameMismatches(ctx context.Context) error {
 		seen[key] = true
 		var n int
 		if err := a.s.r.QueryRowContext(ctx, `SELECT count(*) FROM dns
-			WHERE client_ip = ? AND lower(qname) = lower(?) AND ts <= ?`, it.ip, name, it.ts+60_000).Scan(&n); err != nil {
+			WHERE client_ip = ? AND lower(qname) = lower(?) AND ts <= ?`, it.clientIP, name, it.ts+60_000).Scan(&n); err != nil {
 			return err
 		}
 		if n > 0 {

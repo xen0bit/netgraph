@@ -137,6 +137,9 @@ func Audit(p *Policy, profiles []string, matcher BlocklistMatcher) *AuditReport 
 }
 
 func overlaps(a, b RuleV2) bool {
+	if a.Profile != "" && b.Profile != "" && a.Profile != b.Profile {
+		return false
+	}
 	if a.Direction != "both" && b.Direction != "both" && a.Direction != b.Direction {
 		return false
 	}
@@ -207,7 +210,13 @@ func portsOverlap(a, b []string) bool {
 
 // covers says every connection b can match is also matched by a.
 func covers(a, b RuleV2) bool {
+	if a.Profile != "" && a.Profile != b.Profile {
+		return false
+	}
 	if a.Direction != "both" && a.Direction != b.Direction {
+		return false
+	}
+	if a.Via.Type != "" && a.Via.Type != "any" && !selectorCovers(a.Via, b.Via) {
 		return false
 	}
 	if !selectorCovers(a.Local, b.Local) || !selectorCovers(a.Remote, b.Remote) {

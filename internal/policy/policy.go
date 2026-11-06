@@ -181,6 +181,9 @@ func (p *Policy) Validate() error {
 		p.Version = 1
 	}
 	if p.Version == 2 {
+		if len(p.Rules) > 0 {
+			return fmt.Errorf("version 2 policy has version 1 rules")
+		}
 		if p.Mode == "" {
 			p.Mode = "precedence"
 		}
