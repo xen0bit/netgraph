@@ -495,6 +495,7 @@ func (s *Store) flowsWhere(ctx context.Context, f model.Filter, extra string, ex
 	if err := s.setASOrgs(ctx, out); err != nil {
 		return nil, err
 	}
+	s.setGeo(out)
 	for i, id := range devIDs {
 		if id != 0 {
 			out[i].Device = model.EntityID(model.KindDevice, macs[id])
@@ -659,6 +660,7 @@ func (s *Store) flowsHourly(ctx context.Context, f model.Filter, from, to int64)
 	if err := s.setASOrgs(ctx, out); err != nil {
 		return nil, err
 	}
+	s.setGeo(out)
 	for i, id := range devIDs {
 		if id != 0 {
 			out[i].Device = model.EntityID(model.KindDevice, macs[id])

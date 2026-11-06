@@ -4,6 +4,7 @@ import (
 	"net/netip"
 
 	"github.com/xen0bit/netgraph/internal/geo"
+	"github.com/xen0bit/netgraph/internal/model"
 )
 
 // GeoLookup returns the local geo table's answer for one address.
@@ -28,4 +29,28 @@ func (s *Store) GeoStatus() (loaded bool, ranges int) {
 		return false, 0
 	}
 	return true, db.Len()
+}
+
+// setGeo fills each flow's remote location from the local table. It is a
+// no-op when no table is loaded, so the feature needs no schema or backfill.
+func (s *Store) setGeo(flows []model.Flow) {
+	if s.cfg.Geo == nil {
+		return
+	}
+	db := s.cfg.Geo()
+	if db == nil {
+		return
+	}
+	for i := range flows {
+		a, err := netip.ParseAddr(flows[i].RemoteIP)
+		if err != nil {
+			continue
+		}
+		if info, ok := db.Lookup(a); ok {
+			flows[i].Continent = info.Continent
+			flows[i].Region = info.Region
+			flows[i].City = info.City
+			flows[i].GeoOrg = info.Org
+		}
+	}
 }

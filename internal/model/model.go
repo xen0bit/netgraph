@@ -399,6 +399,10 @@ type Flow struct {
 	ASN       uint32 `json:"asn,omitempty"`
 	ASOrg     string `json:"as_org,omitempty"`
 	Country   string `json:"country,omitempty"`
+	Continent string `json:"continent,omitempty"`
+	Region    string `json:"region,omitempty"`
+	City      string `json:"city,omitempty"`
+	GeoOrg    string `json:"geo_org,omitempty"`
 	FirstSeen int64  `json:"first_seen"` // ms; when the connection opened
 	LastSeen  int64  `json:"last_seen"`  // ms; its last record
 	State     string `json:"state"`
