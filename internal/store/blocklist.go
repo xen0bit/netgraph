@@ -124,6 +124,14 @@ func (s *Store) SaveBlocklist(ctx context.Context, b *model.Blocklist) (*model.B
 	if strings.TrimSpace(b.Name) == "" {
 		return nil, fmt.Errorf("%w: a blocklist needs a name", ErrInvalid)
 	}
+	if b.AUID == "" && b.ID != 0 {
+		if existing, err := s.Blocklist(ctx, b.ID); err == nil {
+			b.AUID = existing.AUID
+			if b.Created == 0 {
+				b.Created = existing.Created
+			}
+		}
+	}
 	if b.AUID == "" {
 		id, err := newPolicyID("bl_")
 		if err != nil {

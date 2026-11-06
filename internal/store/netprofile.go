@@ -55,6 +55,14 @@ func (s *Store) SaveProfile(ctx context.Context, p *model.Profile) (*model.Profi
 	if strings.TrimSpace(p.Name) == "" {
 		return nil, fmt.Errorf("%w: a profile needs a name", ErrInvalid)
 	}
+	if p.AUID == "" && p.ID != 0 {
+		if existing, err := s.Profile(ctx, p.ID); err == nil {
+			p.AUID = existing.AUID
+			if p.Created == 0 {
+				p.Created = existing.Created
+			}
+		}
+	}
 	if p.AUID == "" {
 		id, err := newPolicyID("prof_")
 		if err != nil {

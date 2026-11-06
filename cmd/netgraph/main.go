@@ -94,7 +94,11 @@ commands:
   tui        interactive terminal UI
   label      name a device by hand (or -clear the name)
   whatif     test a proposed policy against observed traffic
-  policy     propose a policy from what a device did, or write one out for a firewall
+  policy     save, audit, explain, export or restore policy (learn/export are still here)
+  blocklist  manage parsed domain/host/address blocklists
+  profile    manage profiles and the network triggers that activate them
+  decisions  review passive would-ask decisions
+  purpose    import and look up application purpose metadata
   archive    read the long-term archive
   ask        answer a question from recorded evidence, with citations
   mcp        serve read-only tools to an AI assistant, on stdin and stdout
