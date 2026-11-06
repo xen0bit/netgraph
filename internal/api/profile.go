@@ -104,11 +104,7 @@ func (s *Server) profileEvaluate(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	if p == nil {
-		writeJSON(w, map[string]any{"profile": nil})
-		return
-	}
-	writeJSON(w, p)
+	writeJSON(w, map[string]any{"profile": p})
 }
 
 func (s *Server) networkContext(w http.ResponseWriter, r *http.Request) {
