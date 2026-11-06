@@ -15,6 +15,12 @@ type ClientHello struct {
 	SNI  string
 	ALPN []string
 	JA4  string
+	// ECH is set when the hello carries the encrypted_client_hello extension.
+	// netgraph observes the outer hello; it never decrypts the inner one.
+	ECH           bool
+	ECHType       uint8
+	ECHConfigID   uint8
+	ECHPayloadLen int
 
 	legacyVersion uint16
 	versions      []uint16 // supported_versions
@@ -140,6 +146,18 @@ func parseHelloBody(b []byte) (*ClientHello, error) {
 				name := list.bytes(int(list.u16()))
 				if nt == 0 && !list.err && ch.SNI == "" {
 					ch.SNI = strings.ToLower(cleanText(name))
+				}
+			}
+		case 0xfe0d: // encrypted_client_hello (RFC 9849 §5)
+			ch.ECH = true
+			ch.ECHType = d.u8()
+			if ch.ECHType == 0 { // outer: the inner type (1) has no more fields
+				d.skip(4) // cipher_suite: KDF id + AEAD id
+				ch.ECHConfigID = d.u8()
+				d.skip(int(d.u16())) // enc<0..2^16-1>
+				payload := d.bytes(int(d.u16()))
+				if !d.err {
+					ch.ECHPayloadLen = len(payload)
 				}
 			}
 		case 16: // ALPN
