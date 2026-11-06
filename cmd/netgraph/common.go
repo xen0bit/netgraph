@@ -61,9 +61,6 @@ func (b *backendFlags) openWritable() (model.Backend, func(), error) {
 	if b.server != "" {
 		return b.open()
 	}
-	if _, err := os.Stat(b.db); err != nil {
-		return nil, nil, fmt.Errorf("no -server given and database %q: %w", b.db, err)
-	}
 	st, err := store.Open(b.db, store.Config{Logger: quietLogger()})
 	if err != nil {
 		return nil, nil, err
