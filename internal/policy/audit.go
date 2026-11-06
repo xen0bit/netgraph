@@ -81,11 +81,12 @@ func Audit(p *Policy, profiles []string, matcher BlocklistMatcher) *AuditReport 
 		}
 		if r.Action == ActionAllow && matcher != nil {
 			for _, v := range r.Remote.Values {
-				if r.Remote.Type == "ip" {
+				switch r.Remote.Type {
+				case "ip":
 					if e, ok := matcher.MatchIP(v); ok {
 						add("blocklist-override", "high", fmt.Sprintf("the allow rule covers blocklisted address %s", e), "")
 					}
-				} else if r.Remote.Type == "domain" || r.Remote.Type == "host" || r.Remote.Type == "dns" {
+				case "domain", "host", "dns":
 					if e, ok := matcher.MatchName(strings.TrimPrefix(v, "*.")); ok {
 						add("blocklist-override", "high", fmt.Sprintf("the allow rule covers blocklisted name %s", e), "")
 					}

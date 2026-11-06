@@ -1,7 +1,6 @@
 package api
 
 import (
-	"encoding/json"
 	"io"
 	"net/http"
 
@@ -33,5 +32,5 @@ func (s *Server) importBundle(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, err)
 		return
 	}
-	json.NewEncoder(w).Encode(map[string]any{"imported": counts})
+	writeJSON(w, map[string]any{"imported": counts})
 }

@@ -132,7 +132,7 @@ func (p *Policy) defaultDecision(c Conn) Decision {
 	if c.Direction == "external" {
 		return Decision{Action: ActionDeny, Reason: "outside the observed network"}
 	}
-	action := ActionDeny
+	var action string
 	switch c.Direction {
 	case "out":
 		action = p.Defaults.Egress
