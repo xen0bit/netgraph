@@ -2287,16 +2287,17 @@ function wirePolicy() {
 // --- manage --------------------------------------------------------------------------
 
 async function renderManage(seq) {
-  const [policies, blocklists, profiles, triggers, decisions, audit] = await Promise.all([
+  const [policies, blocklists, profiles, triggers, decisions, audit, purposes] = await Promise.all([
     api("policies").catch(() => []),
     api("blocklists").catch(() => []),
     api("profiles").catch(() => []),
     api("network-triggers").catch(() => []),
     api("decisions", new URLSearchParams({ status: "open" })).catch(() => []),
     api("policy/audit").catch(() => ({ findings: [] })),
+    api("purposes").catch(() => []),
   ]);
   if (seq !== refreshSeq) return;
-  $("#manage-body").innerHTML = manageHTML({ policies, blocklists, profiles, triggers, decisions, audit });
+  $("#manage-body").innerHTML = manageHTML({ policies, blocklists, profiles, triggers, decisions, audit, purposes });
 }
 
 function wireManage() {
