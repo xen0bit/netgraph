@@ -28,4 +28,9 @@ func TestNftablesApply(t *testing.T) {
 	if !strings.Contains(strings.Join(calls, "\n"), "daddr 203.0.113.9 drop") {
 		t.Fatalf("no drop rule: %v", calls)
 	}
+	dry := &Nftables{DryRun: true, Run: func(context.Context, ...string) error { return nil }}
+	got, err := dry.Apply(context.Background(), []agent.Connection{{Key: "d", RemoteIP: "203.0.113.9", Predicted: "deny"}})
+	if err != nil || got[0].Action != "none" || !strings.Contains(got[0].Reason, "dry run") {
+		t.Fatalf("dry run = %+v, %v", got, err)
+	}
 }

@@ -9,6 +9,7 @@ import (
 	"net/netip"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/xen0bit/netgraph/internal/agent"
 )
@@ -19,6 +20,7 @@ type Nftables struct {
 	Table  string
 	DryRun bool
 	Run    func(context.Context, ...string) error // tests replace this
+	seen   map[string]bool
 }
 
 // NewNftables returns an enforcer using the given table name.
@@ -58,15 +60,22 @@ func (n *Nftables) Apply(ctx context.Context, conns []agent.Connection) ([]agent
 		"{", "type", "filter", "hook", "output", "priority", "0", ";", "}"); err != nil {
 		return nil, err
 	}
+	if n.seen == nil {
+		n.seen = map[string]bool{}
+	}
 	var out []agent.Actual
-	seen := map[string]bool{}
 	for _, c := range conns {
 		a := agent.Actual{Key: c.Key, Rule: c.Rule, Reason: c.Reason, At: 0}
 		switch c.Predicted {
 		case "deny":
 			ip := c.RemoteIP
-			if _, err := netip.ParseAddr(ip); err == nil && !seen[ip] {
-				seen[ip] = true
+			if n.DryRun {
+				a.Action = "none"
+				a.Reason = "dry run: would deny"
+				break
+			}
+			if _, err := netip.ParseAddr(ip); err == nil && !n.seen[ip] {
+				n.seen[ip] = true
 				fam := "ip"
 				if strings.Contains(ip, ":") {
 					fam = "ip6"
@@ -91,5 +100,8 @@ func (n *Nftables) Close() error {
 	if n.Table == "" {
 		return nil
 	}
-	return n.command(context.Background(), "delete", "table", "inet", n.Table)
+	n.seen = nil
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	return n.command(ctx, "delete", "table", "inet", n.Table)
 }

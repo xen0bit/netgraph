@@ -112,7 +112,9 @@ func (s *Store) IngestAgentBatch(ctx context.Context, b *agent.Batch) (map[strin
 		}
 		counts["actuals"]++
 	}
-	if _, err := tx.ExecContext(ctx, `UPDATE agents SET seq=max(seq, ?), last_seen=? WHERE name=?`, b.Seq, now, b.Agent); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO agents (name, boot, seq, first_seen, last_seen) VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(name) DO UPDATE SET boot=CASE WHEN excluded.boot != '' THEN excluded.boot ELSE boot END,
+		seq=max(seq, excluded.seq), last_seen=excluded.last_seen`, b.Agent, b.Boot, b.Seq, now, now); err != nil {
 		return nil, err
 	}
 	return counts, tx.Commit()

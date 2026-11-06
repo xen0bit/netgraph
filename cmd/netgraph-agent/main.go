@@ -78,6 +78,9 @@ func run(args []string) error {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if *once {
+		if runner.Enforcer != nil {
+			defer runner.Enforcer.Close()
+		}
 		return runner.Once(ctx)
 	}
 	return runner.Run(ctx)

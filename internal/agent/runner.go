@@ -37,6 +37,9 @@ func (r *Runner) Run(ctx context.Context) error {
 	if r.Interval <= 0 {
 		r.Interval = 10 * time.Second
 	}
+	if r.Enforcer != nil {
+		defer r.Enforcer.Close()
+	}
 	if r.Logf == nil {
 		r.Logf = func(string, ...any) {}
 	}
