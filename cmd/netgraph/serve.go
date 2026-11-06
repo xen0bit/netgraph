@@ -22,6 +22,7 @@ import (
 	"github.com/xen0bit/netgraph/internal/api"
 	"github.com/xen0bit/netgraph/internal/asn"
 	"github.com/xen0bit/netgraph/internal/buildinfo"
+	"github.com/xen0bit/netgraph/internal/geo"
 	"github.com/xen0bit/netgraph/internal/hass"
 	"github.com/xen0bit/netgraph/internal/llm"
 	"github.com/xen0bit/netgraph/internal/model"
@@ -66,6 +67,7 @@ func runServe(args []string) error {
 	reportEvery := fs.String("report-every", envOr("NETGRAPH_REPORT_EVERY", ""), "POST a summary report at this interval, e.g. 24h (needs -alert-webhook); $NETGRAPH_REPORT_EVERY")
 	// Not a systemd credential like the files above: credentials are
 	// capped at about 1 MB together, and the table is several.
+	geoFile := fs.String("geo-file", envOr("NETGRAPH_GEO_FILE", ""), "a local CSV of address ranges to city/region/organisation; empty: no geo lookup. $NETGRAPH_GEO_FILE")
 	asnFile := fs.String("asn-file", envOr("NETGRAPH_ASN_FILE", ""), "an iptoasn.com ip2asn-combined.tsv(.gz): name the network and country of remote addresses; reloaded on SIGHUP and when the file changes. Default: the table built into release binaries, if any; none: no table. $NETGRAPH_ASN_FILE")
 	webDir := fs.String("web-dir", "", "serve the web UI from this directory instead of the embedded copy")
 	maxDB := fs.Int("max-db-mb", 0, "run emergency retention when the database exceeds this many MiB (0: off)")
@@ -248,11 +250,25 @@ func runServe(args []string) error {
 		debug.FreeOSMemory() // parsing left several times the table's size behind
 		log.Info("loaded asn table", "file", *asnFile, "ranges", table.Len(), "took", time.Since(t0).Round(time.Millisecond))
 	}
+	var geoTable atomic.Pointer[geo.DB]
+	if *geoFile != "" {
+		f, err := os.Open(*geoFile)
+		if err != nil {
+			return fmt.Errorf("-geo-file: %w", err)
+		}
+		db, err := geo.Parse(f)
+		f.Close()
+		if err != nil {
+			return fmt.Errorf("-geo-file: %w", err)
+		}
+		geoTable.Store(db)
+		log.Info("loaded geo table", "file", *geoFile, "ranges", db.Len())
+	}
 	if (*archiveRaw || *archiveMax > 0) && *archiveDir == "" {
 		return errors.New("-archive-raw and -archive-max-mb need -archive-dir")
 	}
 	st, err := store.Open(*db, store.Config{ArchiveDir: *archiveDir, ArchiveRaw: *archiveRaw, ArchiveMaxBytes: int64(*archiveMax) << 20, RawRetention: rawD, RollupRetention: rollD, MinuteRetention: minuteD, FactGap: gapD, ExactMax: exactD, Logger: log, OnNewDevice: onNew,
-		ASN: networks.Load})
+		ASN: networks.Load, Geo: geoTable.Load})
 	if err != nil {
 		return err
 	}

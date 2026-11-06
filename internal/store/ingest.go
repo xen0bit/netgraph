@@ -67,6 +67,11 @@ func (s *Store) Ingest(ctx context.Context, sensor, boot string, events []wire.E
 	}
 	s.nameLive(ctx, live)
 	s.sub.publish(live)
+	if profileRelevant(events) {
+		if _, perr := s.evaluateProfileLocked(ctx, false); perr != nil {
+			s.log.Error("evaluate network profile", "err", perr)
+		}
+	}
 	s.invalidateAnomaliesThrottled()
 	if s.cfg.OnNewDevice != nil {
 		for _, d := range res.NewDevices {

@@ -70,6 +70,8 @@ func (s *Store) Retain(ctx context.Context) (RetentionResult, error) {
 		// until someone or a quiet week closes them.
 		{&r.Mutes, `DELETE FROM audit_log WHERE ts < ?`, roll, true},
 		{&r.Mutes, `DELETE FROM findings WHERE status IN ('resolved', 'dismissed') AND last_seen < ?`, roll, true},
+		// A decision names a device and a destination: it follows the raw records it was made from.
+		{&r.Mutes, `DELETE FROM policy_decisions WHERE rowid IN (SELECT rowid FROM policy_decisions WHERE ts < ? LIMIT 5000)`, raw, true},
 	}
 	// Each chunk takes the ingest lock for itself, so ingest runs between
 	// them. Deleting a fact ingest still has open is harmless: a fact past

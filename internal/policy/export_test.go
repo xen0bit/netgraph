@@ -243,3 +243,49 @@ func FuzzExport(f *testing.F) {
 		}
 	})
 }
+
+func TestExportVersion2Rules(t *testing.T) {
+	p := &Policy{
+		Version:  2,
+		Zones:    []Zone{{Name: "iot", Devices: []string{"device:aa:bb:cc:00:00:01"}}},
+		Defaults: Defaults{Egress: "deny", Ingress: "deny", IntraZone: "allow", DNS: "allow"},
+		RulesV2: []RuleV2{{
+			Name: "cloud", Action: ActionAllow, Direction: "out",
+			Local:  Selector{Type: "zone", Values: []string{"iot"}},
+			Remote: Selector{Type: "domain", Values: []string{"example.com"}},
+			Ports:  []string{"443"}, Protocol: "tcp",
+		}},
+	}
+	out := export(t, p, FormatNftables, testObserved())
+	if !strings.Contains(out.Config, "tcp dport 443 accept") {
+		t.Fatalf("v2 rule not exported:\n%s", out.Config)
+	}
+	if !strings.Contains(strings.Join(out.Warnings, "\n"), "a firewall can't match names") {
+		t.Fatalf("missing v2 warning: %v", out.Warnings)
+	}
+}
+
+// A firewall takes the first match, a version 2 policy the highest-ranked
+// rule: the narrow deny written after a broad allow must come out first, and
+// a domain covers its subdomains as it does when evaluated.
+func TestExportVersion2Precedence(t *testing.T) {
+	p := &Policy{
+		Version:  2,
+		Zones:    []Zone{{Name: "iot", Devices: []string{"device:aa:bb:cc:00:00:01"}}},
+		Defaults: Defaults{Egress: "deny", Ingress: "deny", IntraZone: "allow", DNS: "allow"},
+		RulesV2: []RuleV2{
+			{Name: "web", Action: ActionAllow, Direction: "out", Local: Selector{Type: "zone", Values: []string{"iot"}}, Ports: []string{"443/tcp"}},
+			{Name: "not that", Action: ActionDeny, Direction: "out", Local: Selector{Type: "zone", Values: []string{"iot"}}, Remote: Selector{Type: "domain", Values: []string{"example.com"}}},
+		},
+	}
+	conn := Conn{Zone: "iot", Direction: "out", Name: "api.example.com", IP: "93.184.216.34", Port: "443", Proto: "tcp"}
+	if d := p.Evaluate(conn); d.Action != ActionDeny {
+		t.Fatalf("evaluated %+v", d)
+	}
+	out := export(t, p, FormatNftables, testObserved())
+	deny := strings.Index(out.Config, "93.184.216.34")
+	allow := strings.Index(out.Config, "tcp dport 443 accept")
+	if deny < 0 || allow < 0 || deny > allow {
+		t.Fatalf("the deny for api.example.com must precede the broad allow:\n%s", out.Config)
+	}
+}

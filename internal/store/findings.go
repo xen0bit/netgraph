@@ -435,6 +435,10 @@ var findingTexts = map[string]findingText{
 		"Two devices held the same address at once.",
 		"Often a static address clashing with DHCP. It can also be someone intercepting traffic, so check you recognise both.",
 	},
+	model.AnomalyNameMismatch: {
+		"A connection asked for a name the device never looked up, or a different name shares the address.",
+		"Usually a CDN, proxy or hard-coded address. If it is unexpected, inspect the destination and the device.",
+	},
 	model.AnomalyRogueDHCP: {
 		"A device other than the router answered DHCP requests on your network.",
 		"Devices listening to it can be sent anywhere. Unplug or reconfigure it, unless it's meant to be your DHCP server.",
