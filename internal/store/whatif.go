@@ -47,6 +47,18 @@ func (s *Store) WhatIf(ctx context.Context, p *policy.Policy, f model.Filter, sc
 			}
 		}
 	}
+	matcher, err := s.BlocklistMatcher(ctx)
+	if err != nil {
+		return nil, err
+	}
+	activeProfile, err := s.ActiveProfile(ctx)
+	if err != nil {
+		return nil, err
+	}
+	profileName := ""
+	if activeProfile != nil {
+		profileName = activeProfile.Name
+	}
 	blocked := map[string]*model.ImpactGroup{}
 	destGroups := map[string]*model.ImpactGroup{}
 	ruleGroups := map[string]*model.ImpactGroup{}
@@ -116,14 +128,55 @@ func (s *Store) WhatIf(ctx context.Context, p *policy.Policy, f model.Filter, sc
 			peer := byID[fl.PeerDevice]
 			peerZone = p.ZoneFor(fl.PeerDevice, firstNonEmpty(fl.PeerName, peer.label, fl.PeerDevice), peer.role)
 		}
-		rule, allow, _ := p.Decide(policy.Conn{
-			Zone: zone, PeerZone: peerZone, Direction: fl.Direction, Name: dst, IP: fl.RemoteIP,
-			Port: strconv.Itoa(servicePort(fl)), Proto: fl.Proto, ASN: fl.ASN, Country: fl.Country,
+		if matcher != nil {
+			if e, ok := matcher.MatchName(dst); ok {
+				imp := model.Impact{
+					Kind: "connection", Device: fl.Device, DeviceName: firstNonEmpty(fl.DeviceName, dev.label),
+					Zone: zone, Destination: dst, Port: portString(fl), Direction: fl.Direction,
+					BytesOut: fl.BytesOut, BytesIn: fl.BytesIn, Connections: 1,
+					Rule: "blocklist", Reason: "blocked by blocklist entry " + e.Value,
+					Critical: criticalFlow(fl, routers, dst),
+					Evidence: []model.EvidenceRef{{Kind: "flow", ID: fl.Key, TS: fl.FirstSeen, Text: dst}},
+				}
+				add(imp, imp.Critical)
+				continue
+			}
+			if e, ok := matcher.MatchIP(fl.RemoteIP); ok {
+				imp := model.Impact{
+					Kind: "connection", Device: fl.Device, DeviceName: firstNonEmpty(fl.DeviceName, dev.label),
+					Zone: zone, Destination: dst, Port: portString(fl), Direction: fl.Direction,
+					BytesOut: fl.BytesOut, BytesIn: fl.BytesIn, Connections: 1,
+					Rule: "blocklist", Reason: "blocked by blocklist entry " + e.Value,
+					Critical: criticalFlow(fl, routers, dst),
+					Evidence: []model.EvidenceRef{{Kind: "flow", ID: fl.Key, TS: fl.FirstSeen, Text: dst}},
+				}
+				add(imp, imp.Critical)
+				continue
+			}
+		}
+		decision := p.Evaluate(policy.Conn{
+			Zone: zone, PeerZone: peerZone, Device: fl.Device, Label: firstNonEmpty(fl.DeviceName, dev.label),
+			Role: dev.role, Direction: fl.Direction, Profile: profileName, Name: dst, Host: fl.Name, QName: fl.QName,
+			IP: fl.RemoteIP, Port: strconv.Itoa(servicePort(fl)), Proto: fl.Proto,
+			ASN: fl.ASN, Country: fl.Country,
 		})
-		if allow {
+		if decision.Action == policy.ActionAsk {
+			imp := model.Impact{
+				Kind: "connection", Device: fl.Device, DeviceName: firstNonEmpty(fl.DeviceName, dev.label),
+				Zone: zone, Destination: dst, Port: portString(fl), Direction: fl.Direction,
+				BytesOut: fl.BytesOut, BytesIn: fl.BytesIn, Connections: 1, Rule: decision.Rule,
+				Reason:   "would ask by rule " + decision.Rule,
+				Evidence: []model.EvidenceRef{{Kind: "flow", ID: fl.Key, TS: fl.FirstSeen, Text: dst}},
+			}
+			out.WouldAsk = append(out.WouldAsk, imp)
+			out.Summary.WouldAsk++
+			continue
+		}
+		if decision.Action != policy.ActionDeny {
 			out.Summary.Unchanged++
 			continue
 		}
+		rule := decision.Rule
 		reason := "denied by default"
 		if rule != "" {
 			reason = "denied by rule " + rule

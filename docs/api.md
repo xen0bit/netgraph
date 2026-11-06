@@ -62,6 +62,36 @@ are unix milliseconds.
 | `POST /api/v1/whatif` | `{policy, from, to}`: what a policy would have done to the window's traffic. Viewer |
 | `GET /api/v1/policy/learn?device=device:MAC&from=-14d` | `{device, from, to, connections, policy, gaps}`: the least a device needs, from what it did. Saves nothing. Viewer |
 | `POST /api/v1/policy/export` | `{policy, format, from, to}`, with `format` as `nftables`, `openwrt` or `opnsense`: `{format, filename, config, warnings}`. Changes nothing. Viewer |
+| `GET/POST /api/v1/policies` | list or create saved policies. `GET` returns `[{id,name,version,mode,active,rules,notes,created,modified}]`; `POST` takes a policy JSON. Operator for writes |
+| `GET/PUT/DELETE /api/v1/policies/{id}` | load, replace or delete one policy |
+| `POST /api/v1/policies/{id}/activate` | make one policy active (`204`). Operator |
+| `GET /api/v1/policies/active` | the active policy, or `404` |
+| `POST /api/v1/policy/explain` | `{policy}` or `{id}` plus `{conn}`: the winning decision and every other matching rule |
+| `GET /api/v1/policy/audit?id=` | conservative audit: redundant/shadowed/contradictory/invalid/blocklist-override findings |
+| `GET /api/v1/blocklists` | configured blocklists and entry counts |
+| `POST /api/v1/blocklists` | create a blocklist: `{name,url,format,enabled}`. Operator |
+| `GET/PUT/DELETE /api/v1/blocklists/{id}` | load, replace or delete one blocklist |
+| `GET /api/v1/blocklists/{id}/entries` | parsed entries; `enabled=1` for only enabled rows |
+| `PATCH /api/v1/blocklists/{id}/entries/{entry}` | `{enabled}` (`204`). Operator |
+| `POST /api/v1/blocklists/{id}/import` | `{text,format}`: parse and replace entries. Operator |
+| `POST /api/v1/blocklists/{id}/update` | fetch the URL now; `{allow_private,allow_http}` for local feeds. Operator |
+| `GET/POST /api/v1/rule-groups` | blocklist groups |
+| `GET/POST /api/v1/profiles` | policy profiles; writes are Operator |
+| `GET/PUT/DELETE /api/v1/profiles/{id}` | load, replace or delete one profile |
+| `POST /api/v1/profiles/{id}/activate` | activate a profile (`204`) |
+| `POST /api/v1/profiles/evaluate` | apply the first matching network trigger and return the active profile |
+| `GET /api/v1/network` | the current network signature: `{signature,ssid,bssid,router,interface,profile}` |
+| `GET/POST /api/v1/network-triggers` | list or create triggers; `DELETE /network-triggers/{id}` removes one |
+| `GET /api/v1/decisions?status=open` | policy decisions, newest first |
+| `GET /api/v1/decisions/{id}` | one decision plus a `prefilled_rule` |
+| `POST /api/v1/decisions/scan` | `{from,to,limit}`: record would-ask decisions for a window |
+| `POST /api/v1/decisions/{id}/allow|deny|rule|reset` | answer a decision; never claims passive enforcement |
+| `POST /api/v1/decisions/expire` | `{before}`: expire old open decisions |
+| `GET /api/v1/connections?group=device\|app\|domain\|host\|destination\|remote` | connections folded into monitor groups |
+| `GET /api/v1/geo?ip=` | local geo table lookup; `GET /api/v1/geo/status` says whether one is loaded |
+| `GET /api/v1/purposes?host=` | purpose metadata for a host |
+| `POST /api/v1/purposes` | import an application manifest; `DELETE /purposes/{id}` removes one entry |
+| `GET/POST /api/v1/policy/bundle` | export or restore a configuration bundle (no history, decisions, tokens or keys) |
 | `GET /api/v1/archive` | `{enabled, bytes, files, oldest, newest}`: the long-term archive. Viewer |
 | `GET /api/v1/sensors` | `[{name, version, os, arch, interfaces, first_seen, last_seen, stats, status, problems, upgrade_to, settable, config, in_effect, config_applied, takes_config}]`. `status` is `ok`, `quiet` or `struggling`; `problems` says what's going wrong now, from the difference between its last two reports; `upgrade_to` is set if it's older than the server |
 | `GET /api/v1/sensors/{name}/config` | what's been asked of this name alone, `%2A` for all sensors: `{log_level, rdns, active_timeout_s, flush_s}`. Viewer |

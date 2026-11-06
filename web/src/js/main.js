@@ -11,6 +11,7 @@ import { Privacy } from "./privacy.js";
 import { findingsHTML, findingDetail } from "./findings.js";
 import { airspaceHTML } from "./airspace.js";
 import { emptyPolicy, loadDraft, saveDraft, addEdge, policyHTML, impactHTML, readRule } from "./policy.js";
+import { manageHTML } from "./manage.js";
 import { sensorStatus, sensorDetail, fleetSettingsHTML, readSettings } from "./fleet.js";
 import { typeBadge, typeWhy, profileForm, presenceHTML, linksHTML, qualityHTML } from "./devices.js";
 import { Pulse } from "./pulse.js";
@@ -61,7 +62,7 @@ const areas = {
   map: { tabs: [["graph", "Map"]] },
   devices: { tabs: [["devices", "Devices"], ["presence", "Presence"], ["links", "To confirm"], ["passport", "Passport"]] },
   activity: { tabs: [["flows", "Connections"], ["destinations", "Destinations"], ["dns", "DNS"], ["facts", "Facts"], ["pulse", "Pulse"], ["quality", "Internet"]] },
-  findings: { tabs: [["findings", "Inbox"], ["anomalies", "This window"], ["incidents", "Incidents"], ["insights", "Insights"], ["policy", "Policy"]], tools: `<button id="whatif-open" type="button" title="Test a proposed policy against observed traffic">What-if</button>` },
+  findings: { tabs: [["findings", "Inbox"], ["anomalies", "This window"], ["incidents", "Incidents"], ["insights", "Insights"], ["policy", "Policy"], ["manage", "Manage"]], tools: `<button id="whatif-open" type="button" title="Test a proposed policy against observed traffic">What-if</button>` },
   wifi: { tabs: [["wifi", "Networks"], ["airspace", "Airspace"]] },
   settings: { tabs: [["settings", "General"], ["sensors", "Sensors"]] },
 };
@@ -792,6 +793,7 @@ async function renderTab(seq) {
     if (t === "passport") return await renderPassport(seq);
     if (t === "findings") return await renderFindings(seq);
     if (t === "policy") return await renderPolicy(seq);
+    if (t === "manage") return await renderManage(seq);
     if (t === "airspace") {
       const a = await track(api("airspace"));
       if (seq === refreshSeq) $("#airspace-body").innerHTML = airspaceHTML(a);
@@ -2282,6 +2284,70 @@ function wirePolicy() {
   });
 }
 
+// --- manage --------------------------------------------------------------------------
+
+async function renderManage(seq) {
+  const [policies, blocklists, profiles, triggers, decisions, audit] = await Promise.all([
+    api("policies").catch(() => []),
+    api("blocklists").catch(() => []),
+    api("profiles").catch(() => []),
+    api("network-triggers").catch(() => []),
+    api("decisions", new URLSearchParams({ status: "open" })).catch(() => []),
+    api("policy/audit").catch(() => ({ findings: [] })),
+  ]);
+  if (seq !== refreshSeq) return;
+  $("#manage-body").innerHTML = manageHTML({ policies, blocklists, profiles, triggers, decisions, audit });
+}
+
+function wireManage() {
+  const body = $("#manage-body");
+  body.addEventListener("click", async (e) => {
+    const act = async (fn, ok) => {
+      try { await fn(); setStatus(ok); refresh(); } catch (err) { setStatus(err.message, true); }
+    };
+    const b = e.target.closest("button");
+    if (!b) return;
+    if (b.dataset.policyActivate) return act(() => send("POST", `policies/${b.dataset.policyActivate}/activate`), "Policy activated");
+    if (b.dataset.policyDelete) return act(() => send("DELETE", `policies/${b.dataset.policyDelete}`), "Policy deleted");
+    if (b.dataset.blocklistUpdate) return act(() => send("POST", `blocklists/${b.dataset.blocklistUpdate}/update`, {}), "Blocklist updated");
+    if (b.dataset.blocklistDelete) return act(() => send("DELETE", `blocklists/${b.dataset.blocklistDelete}`), "Blocklist deleted");
+    if (b.dataset.profileActivate) return act(() => send("POST", `profiles/${b.dataset.profileActivate}/activate`), "Profile activated");
+    if (b.dataset.profileDelete) return act(() => send("DELETE", `profiles/${b.dataset.profileDelete}`), "Profile deleted");
+    if (b.dataset.triggerDelete) return act(() => send("DELETE", `network-triggers/${b.dataset.triggerDelete}`), "Trigger deleted");
+    if (b.dataset.decisionAllow) return act(() => send("POST", `decisions/${b.dataset.decisionAllow}/allow`, { by: "web" }), "Allowed once");
+    if (b.dataset.decisionDeny) return act(() => send("POST", `decisions/${b.dataset.decisionDeny}/deny`, { by: "web" }), "Denied once");
+    if (b.dataset.decisionRule) return act(() => send("POST", `decisions/${b.dataset.decisionRule}/rule`, { by: "web" }), "Rule recorded");
+    if (b.id === "manage-scan") return act(() => send("POST", "decisions/scan", { ...windowBody(), limit: 2000 }), "Decision scan finished");
+  });
+  body.addEventListener("submit", async (e) => {
+    const f = e.target;
+    e.preventDefault();
+    const data = Object.fromEntries(new FormData(f));
+    try {
+      if (f.id === "manage-blocklist") {
+        await send("POST", "blocklists", { name: data.name, url: data.url, format: data.format, enabled: true });
+        setStatus("Blocklist added");
+      } else if (f.id === "manage-profile") {
+        await send("POST", "profiles", { name: data.name, mode: data.mode, is_default: data.default === "on" });
+        setStatus("Profile added");
+      } else if (f.id === "manage-trigger") {
+        await send("POST", "network-triggers", { profile_id: Number(data.profile), signature: data.signature, action: data.action, enabled: true });
+        setStatus("Trigger added");
+      }
+      refresh();
+    } catch (err) { setStatus(err.message, true); }
+  });
+  body.addEventListener("change", async (e) => {
+    if (e.target.id !== "manage-policy-file" || !e.target.files?.length) return;
+    try {
+      const text = await e.target.files[0].text();
+      await send("POST", "policies", JSON.parse(text));
+      setStatus("Policy imported");
+      refresh();
+    } catch (err) { setStatus(err.message, true); }
+  });
+}
+
 // --- ask -----------------------------------------------------------------------------
 
 // askMap is a small map of what an answer's about, made the first time it's needed.
@@ -3368,6 +3434,7 @@ function init() {
   $("#ask-open").onclick = openAsk;
   $("#whatif-run").onclick = runWhatIf;
   wirePolicy();
+  wireManage();
   $("#ask-form").onsubmit = async (e) => {
     e.preventDefault();
     const q = $("#ask-q").value.trim();

@@ -4,6 +4,7 @@
 package policy
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -19,10 +20,111 @@ import (
 
 type Policy struct {
 	Version  int      `json:"version"`
+	ID       string   `json:"id,omitempty"`
+	Name     string   `json:"name,omitempty"`
+	Mode     string   `json:"mode,omitempty"`
+	Notes    string   `json:"notes,omitempty"`
+	Active   bool     `json:"active,omitempty"`
+	Created  int64    `json:"created,omitempty"`
+	Modified int64    `json:"modified,omitempty"`
 	Zones    []Zone   `json:"zones"`
 	Defaults Defaults `json:"defaults"`
-	Rules    []Rule   `json:"rules"`
-	DNS      DNS      `json:"dns"`
+	// Rules is version 1's first-match rule list. RulesV2 is version 2's
+	// precedence list. Only one is populated for a given policy.
+	Rules   []Rule   `json:"-"`
+	RulesV2 []RuleV2 `json:"-"`
+	DNS     DNS      `json:"dns"`
+}
+
+// policyCommon is the part both versions share when marshalling.
+type policyCommon struct {
+	Version  int      `json:"version"`
+	ID       string   `json:"id,omitempty"`
+	Name     string   `json:"name,omitempty"`
+	Mode     string   `json:"mode,omitempty"`
+	Notes    string   `json:"notes,omitempty"`
+	Active   bool     `json:"active,omitempty"`
+	Created  int64    `json:"created,omitempty"`
+	Modified int64    `json:"modified,omitempty"`
+	Zones    []Zone   `json:"zones,omitempty"`
+	Defaults Defaults `json:"defaults"`
+	DNS      DNS      `json:"dns,omitempty"`
+}
+
+// MarshalJSON emits version 1's string selectors or version 2's structured
+// selectors under the same "rules" key.
+func (p Policy) MarshalJSON() ([]byte, error) {
+	c := policyCommon{
+		Version: p.Version, ID: p.ID, Name: p.Name, Mode: p.Mode, Notes: p.Notes,
+		Active: p.Active, Created: p.Created, Modified: p.Modified,
+		Zones: p.Zones, Defaults: p.Defaults, DNS: p.DNS,
+	}
+	if p.Version == 2 {
+		return json.Marshal(struct {
+			policyCommon
+			Rules []RuleV2 `json:"rules"`
+		}{c, append([]RuleV2(nil), p.RulesV2...)})
+	}
+	return json.Marshal(struct {
+		policyCommon
+		Rules []Rule `json:"rules"`
+	}{c, append([]Rule(nil), p.Rules...)})
+}
+
+// UnmarshalJSON reads either policy version strictly, so a misspelled field is
+// an error rather than a rule that silently never matches.
+func (p *Policy) UnmarshalJSON(b []byte) error {
+	var head struct {
+		Version int `json:"version"`
+	}
+	if err := json.Unmarshal(b, &head); err != nil {
+		return err
+	}
+	var raw struct {
+		Version  int             `json:"version"`
+		ID       string          `json:"id"`
+		Name     string          `json:"name"`
+		Mode     string          `json:"mode"`
+		Notes    string          `json:"notes"`
+		Active   bool            `json:"active"`
+		Created  int64           `json:"created"`
+		Modified int64           `json:"modified"`
+		Zones    []Zone          `json:"zones"`
+		Defaults Defaults        `json:"defaults"`
+		Rules    json.RawMessage `json:"rules"`
+		DNS      DNS             `json:"dns"`
+	}
+	dec := json.NewDecoder(bytes.NewReader(b))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&raw); err != nil {
+		return err
+	}
+	p.Version = raw.Version
+	p.ID, p.Name, p.Mode, p.Notes = raw.ID, raw.Name, raw.Mode, raw.Notes
+	p.Active, p.Created, p.Modified = raw.Active, raw.Created, raw.Modified
+	p.Zones, p.Defaults, p.DNS = raw.Zones, raw.Defaults, raw.DNS
+	p.Rules, p.RulesV2 = nil, nil
+	if len(raw.Rules) == 0 || string(raw.Rules) == "null" {
+		return nil
+	}
+	if raw.Version == 2 {
+		var rules []RuleV2
+		rd := json.NewDecoder(bytes.NewReader(raw.Rules))
+		rd.DisallowUnknownFields()
+		if err := rd.Decode(&rules); err != nil {
+			return err
+		}
+		p.RulesV2 = rules
+		return nil
+	}
+	var rules []Rule
+	rd := json.NewDecoder(bytes.NewReader(raw.Rules))
+	rd.DisallowUnknownFields()
+	if err := rd.Decode(&rules); err != nil {
+		return err
+	}
+	p.Rules = rules
+	return nil
 }
 
 type Zone struct {
@@ -72,11 +174,21 @@ func Parse(r io.Reader) (*Policy, error) {
 // Validate fills in the defaults and rejects anything that could never
 // match, so a typo cannot pass for a rule that simply saw no traffic.
 func (p *Policy) Validate() error {
-	if p.Version != 0 && p.Version != 1 {
+	if p.Version != 0 && p.Version != 1 && p.Version != 2 {
 		return fmt.Errorf("policy version %d is not supported", p.Version)
 	}
 	if p.Version == 0 {
 		p.Version = 1
+	}
+	if p.Version == 2 {
+		if p.Mode == "" {
+			p.Mode = "precedence"
+		}
+		if p.Mode != "precedence" && p.Mode != "first-match" {
+			return fmt.Errorf("policy mode %q is not precedence or first-match", p.Mode)
+		}
+	} else if len(p.RulesV2) > 0 {
+		return fmt.Errorf("version 1 policy has version 2 rules")
 	}
 	if p.Defaults.Egress == "" {
 		p.Defaults.Egress = "deny"
@@ -95,7 +207,10 @@ func (p *Policy) Validate() error {
 			return fmt.Errorf("default %q is not allow or deny", d)
 		}
 	}
-	if len(p.Rules) > maxRules {
+	if p.Version == 2 && len(p.RulesV2) > maxRulesV2 {
+		return fmt.Errorf("too many rules (%d, at most %d)", len(p.RulesV2), maxRulesV2)
+	}
+	if p.Version != 2 && len(p.Rules) > maxRules {
 		return fmt.Errorf("too many rules (%d, at most %d)", len(p.Rules), maxRules)
 	}
 	zones := map[string]bool{}
@@ -110,21 +225,27 @@ func (p *Policy) Validate() error {
 			}
 		}
 	}
-	for _, r := range p.Rules {
-		if r.From == "" || r.To == "" {
-			return fmt.Errorf("rule %q needs from and to", r.Name)
+	if p.Version == 2 {
+		if err := p.validateRulesV2(zones); err != nil {
+			return err
 		}
-		if r.Action != "allow" && r.Action != "deny" {
-			return fmt.Errorf("rule %q action %q is not allow or deny", r.Name, r.Action)
-		}
-		for _, sel := range []string{r.From, r.To} {
-			if err := checkSelector(sel, zones); err != nil {
-				return fmt.Errorf("rule %q: %w", r.Name, err)
+	} else {
+		for _, r := range p.Rules {
+			if r.From == "" || r.To == "" {
+				return fmt.Errorf("rule %q needs from and to", r.Name)
 			}
-		}
-		for _, port := range r.Ports {
-			if _, _, err := parsePort(port); err != nil {
-				return fmt.Errorf("rule %q: %w", r.Name, err)
+			if r.Action != "allow" && r.Action != "deny" {
+				return fmt.Errorf("rule %q action %q is not allow or deny", r.Name, r.Action)
+			}
+			for _, sel := range []string{r.From, r.To} {
+				if err := checkSelector(sel, zones); err != nil {
+					return fmt.Errorf("rule %q: %w", r.Name, err)
+				}
+			}
+			for _, port := range r.Ports {
+				if _, _, err := parsePort(port); err != nil {
+					return fmt.Errorf("rule %q: %w", r.Name, err)
+				}
 			}
 		}
 	}
@@ -230,15 +351,26 @@ func matchDevice(pat, id, label, role string) bool {
 
 // Conn is an observed connection, from the point of view of the device here.
 type Conn struct {
-	Zone      string // the device's zone
-	PeerZone  string // the remote end's zone, when it is a device here too
-	Direction string // out, in, local
-	Name      string // the remote end's best name
-	IP        string // the remote end's address
-	Port      string // the port served
-	Proto     string
-	ASN       uint32
-	Country   string
+	Zone      string `json:"zone,omitempty"`      // the device's zone
+	PeerZone  string `json:"peer_zone,omitempty"` // the remote end's zone, when it is a device here too
+	Device    string `json:"device,omitempty"`    // the device here, for device/label/role selectors
+	Label     string `json:"label,omitempty"`
+	Role      string `json:"role,omitempty"`
+	Owner     string `json:"owner,omitempty"`
+	Process   string `json:"process,omitempty"` // app/process identity when known
+	Via       string `json:"via,omitempty"`     // the process that launched it, when known
+	Direction string `json:"direction"`         // out, in, local
+	Name      string `json:"name,omitempty"`    // the remote end's best name
+	Host      string `json:"host,omitempty"`    // a host name, when distinct from Name
+	QName     string `json:"qname,omitempty"`   // a DNS question name
+	Class     string `json:"class,omitempty"`   // broadcast, multicast, local, bonjour
+	IP        string `json:"ip,omitempty"`      // the remote end's address
+	Port      string `json:"port,omitempty"`    // the port served
+	Proto     string `json:"proto,omitempty"`
+	ASN       uint32 `json:"asn,omitempty"`
+	Country   string `json:"country,omitempty"`
+	Profile   string `json:"profile,omitempty"` // the active profile, when profiles exist
+	Now       int64  `json:"now,omitempty"`     // unix ms, for temporary rule expiry
 }
 
 // endpoint is one end of a connection as a rule sees it. Only the remote end
@@ -254,6 +386,16 @@ type endpoint struct {
 // connection is from the remote end to the device's zone, so "from zone:iot"
 // does not cover traffic someone else sent to the zone.
 func (p *Policy) Decide(c Conn) (rule string, allow bool, matched bool) {
+	if p.Version == 2 {
+		d := p.Evaluate(c)
+		return d.Rule, d.Action != ActionDeny, d.Matched
+	}
+	return p.decideV1(c)
+}
+
+// decideV1 is the original first-match evaluator. It stays frozen so a saved
+// version 1 policy keeps behaving exactly as it did.
+func (p *Policy) decideV1(c Conn) (rule string, allow bool, matched bool) {
 	if c.Direction == "external" {
 		return "", false, false
 	}

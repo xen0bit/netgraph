@@ -768,6 +768,7 @@ const (
 	AnomalyInboundSurge   = "inbound_surge"     // far more connections from outside than in any recent hour
 	AnomalyARPConflict    = "arp_conflict"      // two devices held one address at the same time
 	AnomalyRogueDHCP      = "rogue_dhcp"        // a DHCP server that is not the router answered on the LAN
+	AnomalyNameMismatch   = "name_mismatch"     // SNI/Host name was never resolved by the device
 	AnomalyDeauthFlood    = "wifi_deauth_flood" // many deauthentications from one access point
 	AnomalySensorSilent   = "sensor_silent"     // a sensor stopped reporting
 )
@@ -1147,6 +1148,7 @@ type WhatIfSummary struct {
 	Blocked     int `json:"blocked"`   // connections the policy would stop
 	Essential   int `json:"essential"` // of Blocked, ones the network depends on
 	Lookups     int `json:"lookups"`   // DNS lookups the policy would stop
+	WouldAsk    int `json:"would_ask"` // connections an ask rule would have held
 	Unknown     int `json:"unknown"`
 	OutOfScope  int `json:"out_of_scope"`
 	Unchanged   int `json:"unchanged"`
@@ -1160,6 +1162,7 @@ type WhatIfResult struct {
 	Summary       WhatIfSummary `json:"summary"`
 	Blocked       []Impact      `json:"blocked,omitempty"`
 	Essential     []Impact      `json:"essential,omitempty"`
+	WouldAsk      []Impact      `json:"would_ask,omitempty"`
 	Unknown       []Impact      `json:"unknown,omitempty"`
 	ByDevice      []ImpactGroup `json:"by_device,omitempty"`
 	ByDestination []ImpactGroup `json:"by_destination,omitempty"`
@@ -1616,4 +1619,155 @@ func (r *AnomalyReport) At(from, to int64) *AnomalyReport {
 	c := *r
 	c.FromMS, c.ToMS = from, to
 	return &c
+}
+
+// RuleGroup is a collection of blocklists or rules a person enables together.
+type RuleGroup struct {
+	ID             int64  `json:"id"`
+	AUID           string `json:"auid"`
+	Name           string `json:"name"`
+	Description    string `json:"description,omitempty"`
+	Type           string `json:"type"` // factory, remote, local
+	URL            string `json:"url,omitempty"`
+	Enabled        bool   `json:"enabled"`
+	UpdateInterval int64  `json:"update_interval,omitempty"`
+	LastSuccess    int64  `json:"last_success,omitempty"`
+	LastFailure    int64  `json:"last_failure,omitempty"`
+	LastError      string `json:"last_error,omitempty"`
+	InvalidEntries int    `json:"invalid_entries,omitempty"`
+	Created        int64  `json:"created"`
+	Modified       int64  `json:"modified"`
+}
+
+// Blocklist is one parsed source of blocked domains, hosts or addresses.
+type Blocklist struct {
+	ID             int64  `json:"id"`
+	AUID           string `json:"auid"`
+	GroupID        int64  `json:"group_id,omitempty"`
+	Name           string `json:"name"`
+	URL            string `json:"url,omitempty"`
+	Format         string `json:"format,omitempty"`
+	Enabled        bool   `json:"enabled"`
+	UpdateInterval int64  `json:"update_interval,omitempty"`
+	LastSuccess    int64  `json:"last_success,omitempty"`
+	LastFailure    int64  `json:"last_failure,omitempty"`
+	LastError      string `json:"last_error,omitempty"`
+	ETag           string `json:"etag,omitempty"`
+	LastModified   string `json:"last_modified,omitempty"`
+	EntryCount     int    `json:"entry_count"`
+	InvalidEntries int    `json:"invalid_entries,omitempty"`
+	Created        int64  `json:"created"`
+	Modified       int64  `json:"modified"`
+}
+
+// BlocklistEntry is one enabled or disabled line in a blocklist.
+type BlocklistEntry struct {
+	ID         int64  `json:"id"`
+	Blocklist  int64  `json:"blocklist_id"`
+	Kind       string `json:"kind"` // domain, host, ip
+	Value      string `json:"value"`
+	Enabled    bool   `json:"enabled"`
+	Unapproved bool   `json:"unapproved,omitempty"`
+	UseCount   int64  `json:"use_count,omitempty"`
+	LastUsed   int64  `json:"last_used,omitempty"`
+	Notes      string `json:"notes,omitempty"`
+}
+
+// Profile is a policy context activated by a network trigger.
+type Profile struct {
+	ID            int64    `json:"id"`
+	AUID          string   `json:"auid"`
+	Name          string   `json:"name"`
+	Description   string   `json:"description,omitempty"`
+	Active        bool     `json:"active"`
+	Mode          string   `json:"mode"` // alert, silent-allow, silent-deny
+	DNSExceptions []string `json:"dns_exceptions,omitempty"`
+	IsDefault     bool     `json:"is_default,omitempty"`
+	Created       int64    `json:"created"`
+	Modified      int64    `json:"modified"`
+}
+
+// NetworkTrigger activates or changes a profile when a signature matches.
+type NetworkTrigger struct {
+	ID            int64  `json:"id"`
+	AUID          string `json:"auid"`
+	ProfileID     int64  `json:"profile_id"`
+	ProfileName   string `json:"profile_name,omitempty"`
+	Signature     string `json:"signature"`
+	Action        string `json:"action"` // activate, deactivate, ask, none
+	Mode          string `json:"mode,omitempty"`
+	Enabled       bool   `json:"enabled"`
+	LastTriggered int64  `json:"last_triggered,omitempty"`
+	Created       int64  `json:"created"`
+	Modified      int64  `json:"modified"`
+}
+
+// NetworkContext is what netgraph currently sees as the local network.
+type NetworkContext struct {
+	Signature string `json:"signature"`
+	SSID      string `json:"ssid,omitempty"`
+	BSSID     string `json:"bssid,omitempty"`
+	Router    string `json:"router,omitempty"`
+	Interface string `json:"interface,omitempty"`
+	Profile   string `json:"profile,omitempty"`
+}
+
+// PolicyDecision is a connection that matched an ask rule or a silent mode.
+// Open means "would have asked"; it is not proof that traffic was blocked.
+type PolicyDecision struct {
+	ID          int64  `json:"id"`
+	TS          int64  `json:"ts"`
+	Device      string `json:"device,omitempty"`
+	DeviceName  string `json:"device_name,omitempty"`
+	FlowKey     string `json:"flow_key,omitempty"`
+	Direction   string `json:"direction,omitempty"`
+	Remote      string `json:"remote,omitempty"`
+	Port        string `json:"port,omitempty"`
+	Proto       string `json:"proto,omitempty"`
+	Action      string `json:"action"` // ask, silent-allow, silent-deny
+	Status      string `json:"status"` // open, allowed, denied, rule-created, expired
+	RuleID      string `json:"rule_id,omitempty"`
+	RuleName    string `json:"rule_name,omitempty"`
+	Profile     string `json:"profile,omitempty"`
+	Mode        string `json:"mode,omitempty"`
+	Stalled     bool   `json:"stalled,omitempty"`
+	Unconfirmed bool   `json:"unconfirmed,omitempty"`
+	DecidedAt   int64  `json:"decided_at,omitempty"`
+	DecidedBy   string `json:"decided_by,omitempty"`
+	Note        string `json:"note,omitempty"`
+	Created     int64  `json:"created"`
+	Modified    int64  `json:"modified"`
+}
+
+// ConnectionGroup is connections folded by device, app, site, host or
+// destination. It is the monitor's daily-use view, not a per-flow list.
+type ConnectionGroup struct {
+	Key          string   `json:"key"`
+	Label        string   `json:"label,omitempty"`
+	Kind         string   `json:"kind"` // device, app, domain, host, destination
+	Devices      []string `json:"devices,omitempty"`
+	DeviceNames  []string `json:"device_names,omitempty"`
+	Destinations []string `json:"destinations,omitempty"`
+	Ports        []string `json:"ports,omitempty"`
+	RemoteIPs    []string `json:"remote_ips,omitempty"`
+	Connections  int      `json:"connections"`
+	BytesOut     uint64   `json:"bytes_out"`
+	BytesIn      uint64   `json:"bytes_in"`
+	FirstSeen    int64    `json:"first_seen"`
+	LastSeen     int64    `json:"last_seen"`
+	Names        []string `json:"names,omitempty"`
+}
+
+// Purpose explains what an application uses a host for. It is metadata, not
+// an allow/deny decision.
+type Purpose struct {
+	ID               int64  `json:"id"`
+	Application      string `json:"application"`
+	Developer        string `json:"developer,omitempty"`
+	Website          string `json:"website,omitempty"`
+	Host             string `json:"host"`
+	Purpose          string `json:"purpose,omitempty"`
+	DenyConsequences string `json:"deny_consequences,omitempty"`
+	Source           string `json:"source,omitempty"`
+	Updated          int64  `json:"updated"`
 }

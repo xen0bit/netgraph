@@ -53,7 +53,7 @@ func TestWhatIfAccounting(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := res.Summary
-	if s.Blocked+s.Unknown+s.Unchanged+s.OutOfScope != s.Connections {
+	if s.Blocked+s.Unknown+s.Unchanged+s.OutOfScope+s.WouldAsk != s.Connections {
 		t.Errorf("connections do not add up: %+v", s)
 	}
 	if s.Unknown == 0 || s.Lookups == 0 {

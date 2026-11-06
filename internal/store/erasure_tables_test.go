@@ -37,6 +37,15 @@ var tableErasure = map[string]string{
 	"map_pins":          "forget, purge; too small for the disk guard to matter",
 	"findings":          "forget, purge; too small for the disk guard to matter",
 	"audit_log":         "forget, purge; too small for the disk guard to matter",
+	"policies":          "forget, purge; configuration, not observations",
+	"policy_rules":      "forget, purge; configuration, not observations",
+	"rule_groups":       "forget, purge; configuration, not observations",
+	"blocklists":        "forget, purge; configuration, not observations",
+	"blocklist_entries": "forget, purge; configuration, not observations",
+	"profiles":          "forget, purge; configuration, not observations",
+	"network_triggers":  "forget, purge; configuration, not observations",
+	"policy_decisions":  "forget, purge; decisions are observations of traffic",
+	"app_purposes":      "forget, purge; metadata, not observations",
 }
 
 func TestEveryTableHasAnErasureDecision(t *testing.T) {

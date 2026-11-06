@@ -50,6 +50,14 @@ func main() {
 		err = runWhatIf(os.Args[2:])
 	case "policy":
 		err = runPolicy(os.Args[2:])
+	case "blocklist":
+		err = runBlocklist(os.Args[2:])
+	case "profile":
+		err = runProfile(os.Args[2:])
+	case "decisions":
+		err = runDecisions(os.Args[2:])
+	case "purpose":
+		err = runPurpose(os.Args[2:])
 	case "archive":
 		err = runArchive(os.Args[2:])
 	case "mcp":
