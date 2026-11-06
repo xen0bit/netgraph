@@ -19,7 +19,8 @@ func hello() []byte {
 	list := append([]byte{byte(len(entry) >> 8), byte(len(entry))}, entry...)
 	exts := append([]byte{0, 0, byte(len(list) >> 8), byte(len(list))}, list...)
 	payload := []byte("inner")
-	data := []byte{0, 0, 1, 0, 1, 7, 0, 0, byte(len(payload))}
+	// outer, HKDF-SHA256 + AES-128-GCM, config 7, an empty enc, the payload
+	data := []byte{0, 0, 1, 0, 1, 7, 0, 0, 0, byte(len(payload))}
 	data = append(data, payload...)
 	exts = append(exts, 0xfe, 0x0d, byte(len(data)>>8), byte(len(data)))
 	exts = append(exts, data...)
@@ -46,7 +47,7 @@ func TestInspectFrame(t *testing.T) {
 		t.Fatal(err)
 	}
 	r, ok := inspectFrame(buf.Bytes(), capture.LinkEthernet, time.Now())
-	if !ok || !r.Obs.ECH || r.Obs.OuterSNI != "outer.example" || r.Src != "10.0.0.2" {
+	if !ok || !r.Obs.ECH || r.Obs.OuterSNI != "outer.example" || r.Obs.PayloadLen != 5 || r.Src != "10.0.0.2" {
 		t.Fatalf("result = %+v ok=%v", r, ok)
 	}
 }
