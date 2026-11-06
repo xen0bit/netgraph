@@ -57,7 +57,21 @@ func TestParitySurfaces(t *testing.T) {
 	if err != nil || len(ds) == 0 {
 		t.Fatalf("decisions = %+v, %v", ds, err)
 	}
-	if err := c.DecideDecision(ctx, ds[0].ID, "allow", "test", ""); err != nil {
+	d, err := c.AnswerDecision(ctx, ds[0].ID, "rule", "deny", "claimed-by-body", "")
+	if err != nil {
 		t.Fatal(err)
+	}
+	if d.Status != "rule-created" || d.RuleID == "" || d.DecidedBy == "claimed-by-body" {
+		t.Fatalf("answered = %+v", d)
+	}
+	active, err := c.Policy(ctx, pol.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n := len(active.RulesV2); n != 2 || active.RulesV2[1].ID != d.RuleID || active.RulesV2[1].Action != "deny" {
+		t.Fatalf("rule not added: %+v", active.RulesV2)
+	}
+	if _, err := c.AnswerDecision(ctx, ds[0].ID, "maybe", "", "", ""); err == nil {
+		t.Fatal("an unknown answer was accepted")
 	}
 }

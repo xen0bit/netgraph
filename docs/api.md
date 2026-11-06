@@ -70,22 +70,24 @@ are unix milliseconds.
 | `GET /api/v1/policy/audit?id=` | conservative audit: redundant/shadowed/contradictory/invalid/blocklist-override findings |
 | `GET /api/v1/blocklists` | configured blocklists and entry counts |
 | `POST /api/v1/blocklists` | create a blocklist: `{name,url,format,enabled}`. Operator |
-| `GET/PUT/DELETE /api/v1/blocklists/{id}` | load, replace or delete one blocklist |
+| `GET/PUT/DELETE /api/v1/blocklists/{id}` | load, update (name, URL, format, group, enabled, interval; fetch state and counts are kept) or delete one blocklist |
 | `GET /api/v1/blocklists/{id}/entries` | parsed entries; `enabled=1` for only enabled rows |
 | `PATCH /api/v1/blocklists/{id}/entries/{entry}` | `{enabled}` (`204`). Operator |
 | `POST /api/v1/blocklists/{id}/import` | `{text,format}`: parse and replace entries. Operator |
-| `POST /api/v1/blocklists/{id}/update` | fetch the URL now; `{allow_private,allow_http}` for local feeds. Operator |
+| `POST /api/v1/blocklists/{id}/update` | fetch the URL now, over HTTPS to a public address only. Operator |
 | `GET/POST /api/v1/rule-groups` | blocklist groups |
 | `GET/POST /api/v1/profiles` | policy profiles; writes are Operator |
 | `GET/PUT/DELETE /api/v1/profiles/{id}` | load, replace or delete one profile |
 | `POST /api/v1/profiles/{id}/activate` | activate a profile (`204`) |
 | `POST /api/v1/profiles/evaluate` | apply the first matching network trigger and return the active profile |
-| `GET /api/v1/network` | the current network signature: `{signature,ssid,bssid,router,interface,profile}` |
+| `GET /api/v1/network` | the current network signature: `{signature,ssid,bssid,router,interface}`; triggers are globs over `signature` |
 | `GET/POST /api/v1/network-triggers` | list or create triggers; `DELETE /network-triggers/{id}` removes one |
 | `GET /api/v1/decisions?status=open` | policy decisions, newest first |
 | `GET /api/v1/decisions/{id}` | one decision plus a `prefilled_rule` |
 | `POST /api/v1/decisions/scan` | `{from,to,limit}`: record would-ask decisions for a window |
-| `POST /api/v1/decisions/{id}/allow|deny|rule|reset` | answer a decision; never claims passive enforcement |
+| `POST /api/v1/decisions/{id}/allow\|deny` | record an answer once, `{note}`; returns the decision. Operator |
+| `POST /api/v1/decisions/{id}/rule` | `{action: allow\|deny, note}`: add a rule for this device and destination to the active version 2 policy; returns the decision with its `rule_id`. Operator |
+| `POST /api/v1/decisions/{id}/reset` | reopen a decision. Operator |
 | `POST /api/v1/decisions/expire` | `{before}`: expire old open decisions |
 | `GET /api/v1/connections?group=device\|app\|domain\|host\|destination\|remote` | connections folded into monitor groups |
 | `GET /api/v1/geo?ip=` | local geo table lookup; `GET /api/v1/geo/status` says whether one is loaded |

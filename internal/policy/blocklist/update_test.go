@@ -45,3 +45,18 @@ func TestFetchRejectsHTTPAndPrivateByDefault(t *testing.T) {
 		t.Fatal("loopback accepted")
 	}
 }
+
+// A public name that resolves to a private address must be refused where the
+// connection is made. Redirects dial through the same check.
+func TestFetchChecksTheAddressItDials(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = w.Write([]byte("ads.example\n"))
+	}))
+	defer srv.Close()
+	// localhost is a name, so the early literal check can't catch it.
+	u := strings.Replace(srv.URL, "127.0.0.1", "localhost", 1)
+	f := &Fetcher{AllowHTTP: true}
+	if _, err := f.Fetch(context.Background(), u, "", ""); err == nil || !strings.Contains(err.Error(), "private") {
+		t.Fatalf("dial to loopback by name: %v", err)
+	}
+}

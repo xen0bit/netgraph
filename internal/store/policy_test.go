@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 
@@ -70,5 +71,30 @@ func TestPolicyCRUDAndActive(t *testing.T) {
 	}
 	if _, err := st.Policy(ctx, saved.ID); err == nil {
 		t.Fatal("deleted policy still loads")
+	}
+}
+
+func TestPolicyRuleIDsAreChecked(t *testing.T) {
+	st, err := Open(filepath.Join(t.TempDir(), "ng.db"), Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	mk := func(ids ...string) *policy.Policy {
+		p := &policy.Policy{Version: 2, Name: "p", Defaults: policy.Defaults{Egress: "allow", Ingress: "deny", IntraZone: "allow", DNS: "allow"}}
+		for _, id := range ids {
+			p.RulesV2 = append(p.RulesV2, policy.RuleV2{ID: id, Name: id, Action: policy.ActionDeny, Remote: policy.Selector{Type: "ip", Values: []string{"203.0.113.1"}}})
+		}
+		return p
+	}
+	if _, err := st.SavePolicy(ctx, mk("rule_a", "rule_a")); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("duplicate rule IDs = %v", err)
+	}
+	if _, err := st.SavePolicy(ctx, mk("rule_b")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.SavePolicy(ctx, mk("rule_b")); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("another policy's rule ID = %v", err)
 	}
 }

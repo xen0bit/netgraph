@@ -597,8 +597,10 @@ func (c *Client) ImportBlocklist(ctx context.Context, id int64, text, format str
 
 // UpdateBlocklist fetches a blocklist's URL now.
 func (c *Client) UpdateBlocklist(ctx context.Context, id int64, allowPrivate, allowHTTP bool) (*model.Blocklist, error) {
-	body, _ := json.Marshal(map[string]bool{"allow_private": allowPrivate, "allow_http": allowHTTP})
-	out, err := c.do(ctx, http.MethodPost, fmt.Sprintf("/api/v1/blocklists/%d/update", id), nil, body)
+	if allowPrivate || allowHTTP {
+		return nil, errors.New("-allow-private and -allow-http work only on the database directly (-db), not through -server")
+	}
+	out, err := c.do(ctx, http.MethodPost, fmt.Sprintf("/api/v1/blocklists/%d/update", id), nil, []byte("{}"))
 	if err != nil {
 		return nil, err
 	}
@@ -761,11 +763,19 @@ func (c *Client) ScanDecisions(ctx context.Context, f model.Filter, limit int) (
 	return v.Created, nil
 }
 
-// DecideDecision answers a decision.
-func (c *Client) DecideDecision(ctx context.Context, id int64, action, by, note string) error {
-	body, _ := json.Marshal(map[string]string{"by": by, "note": note})
-	_, err := c.do(ctx, http.MethodPost, fmt.Sprintf("/api/v1/decisions/%d/%s", id, action), nil, body)
-	return err
+// AnswerDecision answers a decision: allow, deny or rule (ruleAction is the
+// new rule's allow or deny). The server records who answered.
+func (c *Client) AnswerDecision(ctx context.Context, id int64, answer, ruleAction, _, note string) (*model.PolicyDecision, error) {
+	body, _ := json.Marshal(map[string]string{"action": ruleAction, "note": note})
+	out, err := c.do(ctx, http.MethodPost, fmt.Sprintf("/api/v1/decisions/%d/%s", id, url.PathEscape(answer)), nil, body)
+	if err != nil {
+		return nil, err
+	}
+	var d model.PolicyDecision
+	if err := json.Unmarshal(out, &d); err != nil {
+		return nil, err
+	}
+	return &d, nil
 }
 
 // ResetDecision reopens a decision.

@@ -2,15 +2,19 @@ package blocklist
 
 import (
 	"net/netip"
+	"sort"
 	"strings"
 )
 
-// Matcher is an immutable snapshot of enabled blocklist entries. Build one
-// per evaluation, or keep one cached until entries change.
+// Matcher is a snapshot of enabled blocklist entries. Build one per
+// evaluation; it is not safe to Add to while another goroutine matches.
 type Matcher struct {
 	domains map[string]Entry
 	hosts   map[string]Entry
 	ips     []ipRange
+	// maxHi[i] is the highest end among ips[:i+1], once sorted.
+	maxHi  []netip.Addr
+	sorted bool
 }
 
 type ipRange struct {
@@ -42,6 +46,7 @@ func (m *Matcher) Add(e Entry) {
 		if r, ok := parseRange(e.Value); ok {
 			r.entry = e
 			m.ips = append(m.ips, r)
+			m.sorted = false
 		}
 	}
 }
@@ -91,12 +96,30 @@ func (m *Matcher) MatchIP(ip string) (Entry, bool) {
 		return Entry{}, false
 	}
 	a = a.Unmap()
-	for _, r := range m.ips {
-		if a.Compare(r.lo) >= 0 && a.Compare(r.hi) <= 0 {
-			return r.entry, true
+	if !m.sorted {
+		m.index()
+	}
+	// The last range starting at or before a, then back while a range that
+	// starts earlier could still reach it.
+	i := sort.Search(len(m.ips), func(i int) bool { return m.ips[i].lo.Compare(a) > 0 }) - 1
+	for ; i >= 0 && m.maxHi[i].Compare(a) >= 0; i-- {
+		if m.ips[i].hi.Compare(a) >= 0 {
+			return m.ips[i].entry, true
 		}
 	}
 	return Entry{}, false
+}
+
+func (m *Matcher) index() {
+	sort.SliceStable(m.ips, func(i, j int) bool { return m.ips[i].lo.Less(m.ips[j].lo) })
+	m.maxHi = make([]netip.Addr, len(m.ips))
+	for i, r := range m.ips {
+		m.maxHi[i] = r.hi
+		if i > 0 && m.maxHi[i-1].Compare(r.hi) > 0 {
+			m.maxHi[i] = m.maxHi[i-1]
+		}
+	}
+	m.sorted = true
 }
 
 func parseRange(s string) (ipRange, bool) {
@@ -145,7 +168,7 @@ func lastAddr(p netip.Prefix) netip.Addr {
 	for i := 0; i < 16; i++ {
 		host := 128 - bits - (15-i)*8
 		if host <= 0 {
-			break
+			continue
 		}
 		if host > 8 {
 			host = 8

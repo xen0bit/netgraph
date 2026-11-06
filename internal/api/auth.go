@@ -284,7 +284,7 @@ func (s *Server) gate(min Role, allowQuery bool, h http.HandlerFunc) http.Handle
 // isChange: these POST to ask something, and change nothing.
 func isChange(r *http.Request) bool {
 	switch r.Pattern {
-	case "POST /api/v1/ask", "POST /api/v1/whatif":
+	case "POST /api/v1/ask", "POST /api/v1/whatif", "POST /api/v1/policy/explain", "POST /api/v1/policy/export":
 		return false
 	}
 	return true

@@ -64,29 +64,32 @@ func (s *Server) decisionsScan(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"created": n})
 }
 
+// decisionAnswer records allow or deny once, or (rule) adds a rule for the
+// connection to the active policy. Who answered is the caller's identity, not
+// something the body can claim.
 func (s *Server) decisionAnswer(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(r.PathValue("id"), 10, 64)
 	if err != nil {
 		httpError(w, http.StatusBadRequest, err)
 		return
 	}
-	status := store.DecisionAllowed
-	switch {
-	case strings.HasSuffix(r.URL.Path, "/deny"):
-		status = store.DecisionDenied
-	case strings.HasSuffix(r.URL.Path, "/rule"):
-		status = store.DecisionRuleCreated
-	}
+	answer := r.URL.Path[strings.LastIndexByte(r.URL.Path, '/')+1:]
 	var in struct {
-		By   string `json:"by"`
-		Note string `json:"note"`
+		Action string `json:"action"` // for rule: allow or deny
+		Note   string `json:"note"`
 	}
-	_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in)
-	if err := s.cfg.Store.DecideDecision(r.Context(), id, status, in.By, in.Note); err != nil {
+	if r.ContentLength != 0 {
+		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&in); err != nil && err != io.EOF {
+			httpError(w, http.StatusBadRequest, err)
+			return
+		}
+	}
+	d, err := s.cfg.Store.AnswerDecision(r.Context(), id, answer, in.Action, identityOf(r.Context()).Actor(), in.Note)
+	if err != nil {
 		s.fail(w, err)
 		return
 	}
-	w.WriteHeader(http.StatusNoContent)
+	writeJSON(w, d)
 }
 
 func (s *Server) decisionReset(w http.ResponseWriter, r *http.Request) {

@@ -16,39 +16,40 @@ export function manageHTML(d) {
   const audit = d.audit || { findings: [], summary: {} };
 
   const policyRows = policies.map((p) => `<tr>
-    <td class="mono">${esc(p.id)}</td><td>${esc(p.name)}</td><td>v${p.version} ${esc(p.mode)}</td>
-    <td>${p.rules}</td><td>${p.active ? badge("active", "ok") : ""}</td>
+    <td class="mono">${esc(p.id)}</td><td>${esc(p.name)}</td><td>v${Number(p.version)} ${esc(p.mode)}</td>
+    <td>${Number(p.rules)}</td><td>${p.active ? badge("active", "ok") : ""}</td>
     <td><button type="button" data-policy-activate="${esc(p.id)}">Activate</button>
         <button type="button" data-policy-delete="${esc(p.id)}">Delete</button></td>
   </tr>`).join("");
 
   const listRows = lists.map((b) => `<tr>
-    <td>${esc(b.name)}</td><td class="mono">${esc(b.format)}</td><td>${b.entry_count}</td>
+    <td>${esc(b.name)}</td><td class="mono">${esc(b.format)}</td><td>${Number(b.entry_count)}</td>
     <td>${b.enabled ? badge("enabled", "ok") : badge("disabled")}</td>
     <td>${esc(b.last_error || when(b.last_success))}</td>
-    <td><button type="button" data-blocklist-update="${b.id}">Update</button>
-        <button type="button" data-blocklist-delete="${b.id}">Delete</button></td>
+    <td><button type="button" data-blocklist-update="${Number(b.id)}">Update</button>
+        <button type="button" data-blocklist-delete="${Number(b.id)}">Delete</button></td>
   </tr>`).join("");
 
   const profileRows = profiles.map((p) => `<tr>
     <td>${esc(p.name)}</td><td>${esc(p.mode)}</td><td>${p.is_default ? badge("default") : ""}</td>
     <td>${p.active ? badge("active", "ok") : ""}</td>
-    <td><button type="button" data-profile-activate="${p.id}">Activate</button>
-        <button type="button" data-profile-delete="${p.id}">Delete</button></td>
+    <td><button type="button" data-profile-activate="${Number(p.id)}">Activate</button>
+        <button type="button" data-profile-delete="${Number(p.id)}">Delete</button></td>
   </tr>`).join("");
 
   const triggerRows = triggers.map((t) => `<tr>
     <td>${esc(t.profile_name || t.profile_id)}</td><td class="mono">${esc(t.signature)}</td>
-    <td>${esc(t.action)} ${t.enabled ? "" : badge("off")}</td><td>${when(t.last_triggered)}</td>
-    <td><button type="button" data-trigger-delete="${t.id}">Delete</button></td>
+    <td>${esc(t.action)} ${t.enabled ? "" : badge("off")}</td><td>${esc(when(t.last_triggered))}</td>
+    <td><button type="button" data-trigger-delete="${Number(t.id)}">Delete</button></td>
   </tr>`).join("");
 
   const decisionRows = decisions.map((x) => `<tr>
-    <td>${when(x.ts)}</td><td>${esc(x.device_name || x.device)}</td><td>${esc(x.remote)}</td>
+    <td>${esc(when(x.ts))}</td><td>${esc(x.device_name || x.device)}</td><td>${esc(x.remote)}</td>
     <td class="mono">${esc(x.port)}</td><td>${badge(x.action)}</td><td>${esc(x.rule_name || "")}</td>
-    <td><button type="button" data-decision-allow="${x.id}">Allow</button>
-        <button type="button" data-decision-deny="${x.id}">Deny</button>
-        <button type="button" data-decision-rule="${x.id}">Rule</button></td>
+    <td><button type="button" data-decision="${Number(x.id)}:allow" title="Record that this was fine; nothing changes">Allow once</button>
+        <button type="button" data-decision="${Number(x.id)}:deny" title="Record that this should not have happened; nothing changes">Deny once</button>
+        <button type="button" data-decision="${Number(x.id)}:rule:allow" title="Add an allow rule for this device and destination to the active policy">Always allow</button>
+        <button type="button" data-decision="${Number(x.id)}:rule:deny" title="Add a deny rule for this device and destination to the active policy">Always deny</button></td>
   </tr>`).join("");
 
   const auditRows = (audit.findings || []).map((f) => `<tr>
@@ -68,14 +69,15 @@ export function manageHTML(d) {
       <button type="submit">Add blocklist</button></form>
   </section>
   <section class="card"><h3>Profiles and triggers</h3>
+    <p class="muted">This network: <code>${esc(d.network?.signature || "unknown")}</code>. A trigger's signature is a glob over it, such as <code>*"ssid":"home"*</code>.</p>
     ${profileRows ? `<table class="mini"><thead><tr><th>Name</th><th>Mode</th><th></th><th></th><th></th></tr></thead><tbody>${profileRows}</tbody></table>` : `<p class="muted">No profiles.</p>`}
     <form id="manage-profile" class="policy-line"><input name="name" placeholder="name" required>
       <select name="mode"><option>alert</option><option>silent-allow</option><option>silent-deny</option></select>
       <label><input type="checkbox" name="default"> default for unknown networks</label>
       <button type="submit">Add profile</button></form>
     ${triggerRows ? `<table class="mini"><thead><tr><th>Profile</th><th>Signature</th><th>Action</th><th>Last</th><th></th></tr></thead><tbody>${triggerRows}</tbody></table>` : `<p class="muted">No network triggers.</p>`}
-    <form id="manage-trigger" class="policy-line"><select name="profile">${profiles.map((p) => `<option value="${p.id}">${esc(p.name)}</option>`).join("")}</select>
-      <input name="signature" placeholder='{"ssid":"home"}' size="40" required>
+    <form id="manage-trigger" class="policy-line"><select name="profile">${profiles.map((p) => `<option value="${Number(p.id)}">${esc(p.name)}</option>`).join("")}</select>
+      <input name="signature" placeholder='*"ssid":"home"*' size="40" required title="A glob over this network's signature, shown above">
       <select name="action"><option>activate</option><option>deactivate</option><option>ask</option><option>none</option></select>
       <button type="submit">Add trigger</button></form>
   </section>

@@ -2287,7 +2287,7 @@ function wirePolicy() {
 // --- manage --------------------------------------------------------------------------
 
 async function renderManage(seq) {
-  const [policies, blocklists, profiles, triggers, decisions, audit, purposes] = await Promise.all([
+  const [policies, blocklists, profiles, triggers, decisions, audit, purposes, network] = await Promise.all([
     api("policies").catch(() => []),
     api("blocklists").catch(() => []),
     api("profiles").catch(() => []),
@@ -2295,9 +2295,10 @@ async function renderManage(seq) {
     api("decisions", new URLSearchParams({ status: "open" })).catch(() => []),
     api("policy/audit").catch(() => ({ findings: [] })),
     api("purposes").catch(() => []),
+    api("network").catch(() => null),
   ]);
   if (seq !== refreshSeq) return;
-  $("#manage-body").innerHTML = manageHTML({ policies, blocklists, profiles, triggers, decisions, audit, purposes });
+  $("#manage-body").innerHTML = manageHTML({ policies, blocklists, profiles, triggers, decisions, audit, purposes, network });
 }
 
 function wireManage() {
@@ -2308,16 +2309,20 @@ function wireManage() {
     };
     const b = e.target.closest("button");
     if (!b) return;
-    if (b.dataset.policyActivate) return act(() => send("POST", `policies/${b.dataset.policyActivate}/activate`), "Policy activated");
-    if (b.dataset.policyDelete) return act(() => send("DELETE", `policies/${b.dataset.policyDelete}`), "Policy deleted");
+    const sure = (what) => confirm(`Delete ${what}? This can't be undone.`);
+    if (b.dataset.policyActivate) return act(() => send("POST", `policies/${encodeURIComponent(b.dataset.policyActivate)}/activate`), "Policy activated");
+    if (b.dataset.policyDelete) return sure("this policy") && act(() => send("DELETE", `policies/${encodeURIComponent(b.dataset.policyDelete)}`), "Policy deleted");
     if (b.dataset.blocklistUpdate) return act(() => send("POST", `blocklists/${b.dataset.blocklistUpdate}/update`, {}), "Blocklist updated");
-    if (b.dataset.blocklistDelete) return act(() => send("DELETE", `blocklists/${b.dataset.blocklistDelete}`), "Blocklist deleted");
+    if (b.dataset.blocklistDelete) return sure("this blocklist") && act(() => send("DELETE", `blocklists/${b.dataset.blocklistDelete}`), "Blocklist deleted");
     if (b.dataset.profileActivate) return act(() => send("POST", `profiles/${b.dataset.profileActivate}/activate`), "Profile activated");
-    if (b.dataset.profileDelete) return act(() => send("DELETE", `profiles/${b.dataset.profileDelete}`), "Profile deleted");
-    if (b.dataset.triggerDelete) return act(() => send("DELETE", `network-triggers/${b.dataset.triggerDelete}`), "Trigger deleted");
-    if (b.dataset.decisionAllow) return act(() => send("POST", `decisions/${b.dataset.decisionAllow}/allow`, { by: "web" }), "Allowed once");
-    if (b.dataset.decisionDeny) return act(() => send("POST", `decisions/${b.dataset.decisionDeny}/deny`, { by: "web" }), "Denied once");
-    if (b.dataset.decisionRule) return act(() => send("POST", `decisions/${b.dataset.decisionRule}/rule`, { by: "web" }), "Rule recorded");
+    if (b.dataset.profileDelete) return sure("this profile and its triggers") && act(() => send("DELETE", `profiles/${b.dataset.profileDelete}`), "Profile deleted");
+    if (b.dataset.triggerDelete) return sure("this trigger") && act(() => send("DELETE", `network-triggers/${b.dataset.triggerDelete}`), "Trigger deleted");
+    // Once records an answer; Always adds a rule for this device and destination to the active policy.
+    if (b.dataset.decision) {
+      const [id, answer, action] = b.dataset.decision.split(":");
+      const ok = { allow: "Allowed once", deny: "Denied once", rule: `Rule added: always ${action}` }[answer];
+      return act(() => send("POST", `decisions/${id}/${answer}`, action ? { action } : {}), ok);
+    }
     if (b.id === "manage-scan") return act(() => send("POST", "decisions/scan", { ...windowBody(), limit: 2000 }), "Decision scan finished");
   });
   body.addEventListener("submit", async (e) => {

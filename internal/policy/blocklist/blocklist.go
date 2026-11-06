@@ -28,6 +28,9 @@ const (
 type Entry struct {
 	Kind  string `json:"kind"` // domain, host, ip
 	Value string `json:"value"`
+	// Disabled is only set when restoring a list someone had edited; a parsed
+	// feed never disables anything.
+	Disabled bool `json:"disabled,omitempty"`
 }
 
 // Parsed is a blocklist document.
@@ -116,18 +119,17 @@ func parseLines(b []byte, allowIP, allowDomain bool) (*Parsed, error) {
 		if len(fields) == 0 {
 			continue
 		}
-		// A hosts file has an address first, then one or more names.
-		if allowIP {
-			if _, err := netip.ParseAddr(fields[0]); err == nil {
-				if !addIP(out, seen, fields[0]) {
-					out.Invalid++
-				}
+		// A hosts file has an address first, then one or more names. The
+		// address is where the names are sent (0.0.0.0, 127.0.0.1), not
+		// something blocked, and each name blocks that host exactly.
+		if allowDomain && len(fields) > 1 {
+			if _, err := netip.ParseAddr(stripZone(fields[0])); err == nil {
 				for _, name := range fields[1:] {
-					if addDomain(out, seen, name) {
+					if hostsBoilerplate[strings.ToLower(name)] || strings.HasPrefix(strings.ToLower(name), "ip6-") {
 						continue
 					}
-					if addHost(out, seen, name) {
-						continue
+					if !addHost(out, seen, name) {
+						out.Invalid++
 					}
 				}
 				continue
@@ -137,10 +139,7 @@ func parseLines(b []byte, allowIP, allowDomain bool) (*Parsed, error) {
 			if allowIP && addIP(out, seen, f) {
 				continue
 			}
-			if allowDomain && addDomain(out, seen, f) {
-				continue
-			}
-			if addHost(out, seen, f) {
+			if allowDomain && !looksNumeric(f) && addDomain(out, seen, f) {
 				continue
 			}
 			out.Invalid++
@@ -153,6 +152,30 @@ func parseLines(b []byte, allowIP, allowDomain bool) (*Parsed, error) {
 		return nil, fmt.Errorf("blocklist has no entries")
 	}
 	return out, nil
+}
+
+// hostsBoilerplate are the names every hosts file maps to itself.
+var hostsBoilerplate = map[string]bool{
+	"localhost": true, "localhost.localdomain": true, "local": true, "broadcasthost": true,
+	"0.0.0.0": true, "localhost4": true, "localhost6": true,
+}
+
+func stripZone(s string) string {
+	if i := strings.IndexByte(s, '%'); i >= 0 {
+		return s[:i]
+	}
+	return s
+}
+
+// looksNumeric is an address-like token that failed to parse as one: it is
+// not a domain either.
+func looksNumeric(s string) bool {
+	for _, r := range s {
+		if !(r >= '0' && r <= '9' || r == '.' || r == '/' || r == ':' || r == '-') {
+			return false
+		}
+	}
+	return true
 }
 
 func header(line, prefix string) (string, bool) {
@@ -266,10 +289,30 @@ type lsRules struct {
 type lsRule struct {
 	Action string          `json:"action"`
 	Remote json.RawMessage `json:"remote"`
+	// Little Snitch's own keys: a string or a list of strings.
+	RemoteDomains   json.RawMessage `json:"remote-domains"`
+	RemoteHosts     json.RawMessage `json:"remote-hosts"`
+	RemoteAddresses json.RawMessage `json:"remote-addresses"`
 	// Some exporters put the values at the rule level.
 	Domains   []string `json:"denied-remote-domains"`
 	Hosts     []string `json:"denied-remote-hosts"`
 	Addresses []string `json:"denied-remote-addresses"`
+}
+
+// stringOrList reads a JSON string or list of strings, and nothing else.
+func stringOrList(raw json.RawMessage) []string {
+	if len(raw) == 0 {
+		return nil
+	}
+	var s string
+	if json.Unmarshal(raw, &s) == nil {
+		return []string{s}
+	}
+	var list []string
+	if json.Unmarshal(raw, &list) == nil {
+		return list
+	}
+	return nil
 }
 
 func parseLSRules(b []byte) (*Parsed, error) {
@@ -309,11 +352,15 @@ func parseLSRules(b []byte) (*Parsed, error) {
 		addValues(kind, values)
 	}
 	for _, r := range doc.Rules {
-		if r.Action != "" && !strings.EqualFold(r.Action, "deny") {
+		// Only explicit denies: an allow or an unlabelled rule is not a block.
+		if !strings.EqualFold(r.Action, "deny") {
 			continue
 		}
 		kind, values := remoteValues(r.Remote)
 		addValues(kind, values)
+		addValues("domain", stringOrList(r.RemoteDomains))
+		addValues("host", stringOrList(r.RemoteHosts))
+		addValues("ip", stringOrList(r.RemoteAddresses))
 		addValues("domain", r.Domains)
 		addValues("host", r.Hosts)
 		addValues("ip", r.Addresses)
@@ -330,7 +377,9 @@ func remoteValues(raw json.RawMessage) (string, []string) {
 	}
 	var s string
 	if err := json.Unmarshal(raw, &s); err == nil {
-		return "domain", []string{s}
+		// A bare string is one of Little Snitch's keywords (any, local-net,
+		// bonjour, ...), not a name: a blocklist can't express those.
+		return "domain", nil
 	}
 	var obj struct {
 		Type   string   `json:"type"`
