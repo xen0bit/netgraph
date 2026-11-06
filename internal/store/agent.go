@@ -81,18 +81,18 @@ func (s *Store) IngestAgentBatch(ctx context.Context, b *agent.Batch) (map[strin
 		_, err := tx.ExecContext(ctx, `INSERT INTO agent_connections
 			(agent, key, proto, local_ip, local_port, remote_ip, remote_port, direction, state, pid, uid,
 			 app, path, code_id, sha256, bytes_out, bytes_in, first_seen, last_seen, sni, http_host,
-			 predicted, actual, rule, reason, stalled)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			 predicted, scope, actual, rule, reason, stalled)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(agent, key) DO UPDATE SET state=excluded.state, pid=excluded.pid, uid=excluded.uid,
 			app=excluded.app, path=excluded.path, code_id=excluded.code_id, sha256=excluded.sha256,
 			bytes_out=max(bytes_out, excluded.bytes_out), bytes_in=max(bytes_in, excluded.bytes_in),
 			last_seen=max(last_seen, excluded.last_seen), sni=excluded.sni, http_host=excluded.http_host,
-			predicted=excluded.predicted, actual=excluded.actual, rule=excluded.rule, reason=excluded.reason,
+			predicted=excluded.predicted, scope=excluded.scope, actual=excluded.actual, rule=excluded.rule, reason=excluded.reason,
 			stalled=excluded.stalled`,
 			b.Agent, clip(c.Key, 256), c.Proto, c.LocalIP, c.LocalPort, c.RemoteIP, c.RemotePort, c.Direction, c.State,
 			c.PID, c.UID, clip(c.App, 256), clip(c.Path, 1024), clip(c.CodeID, 128), clip(c.SHA256, 128),
 			c.BytesOut, c.BytesIn, first, last, clip(c.SNI, 255), clip(c.HTTPHost, 255),
-			c.Predicted, c.Actual, clip(c.Rule, 256), clip(c.Reason, 512), boolInt(c.Stalled))
+			clip(c.Predicted, 16), clip(c.Scope, 16), clip(c.Actual, 16), clip(c.Rule, 256), clip(c.Reason, 512), boolInt(c.Stalled))
 		if err != nil {
 			return nil, err
 		}
@@ -171,7 +171,7 @@ func (s *Store) AgentConnections(ctx context.Context, agentName string, limit in
 	}
 	rows, err := s.r.QueryContext(ctx, `SELECT agent, key, proto, local_ip, local_port, remote_ip, remote_port, direction, state,
 		pid, uid, app, path, code_id, sha256, bytes_out, bytes_in, first_seen, last_seen, sni, http_host,
-		predicted, actual, rule, reason, stalled
+		predicted, scope, actual, rule, reason, stalled
 		FROM agent_connections WHERE agent=? ORDER BY last_seen DESC LIMIT ?`, agentName, limit)
 	if err != nil {
 		return nil, err
@@ -183,7 +183,7 @@ func (s *Store) AgentConnections(ctx context.Context, agentName string, limit in
 		var stalled int
 		if err := rows.Scan(&c.Agent, &c.Key, &c.Proto, &c.LocalIP, &c.LocalPort, &c.RemoteIP, &c.RemotePort, &c.Direction, &c.State,
 			&c.PID, &c.UID, &c.App, &c.Path, &c.CodeID, &c.SHA256, &c.BytesOut, &c.BytesIn, &c.FirstSeen, &c.LastSeen,
-			&c.SNI, &c.HTTPHost, &c.Predicted, &c.Actual, &c.Rule, &c.Reason, &stalled); err != nil {
+			&c.SNI, &c.HTTPHost, &c.Predicted, &c.Scope, &c.Actual, &c.Rule, &c.Reason, &stalled); err != nil {
 			return nil, err
 		}
 		c.Stalled = stalled != 0

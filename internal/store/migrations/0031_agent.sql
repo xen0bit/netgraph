@@ -53,6 +53,7 @@ CREATE TABLE agent_connections (
     sni         TEXT NOT NULL DEFAULT '',
     http_host   TEXT NOT NULL DEFAULT '',
     predicted   TEXT NOT NULL DEFAULT '',
+    scope       TEXT NOT NULL DEFAULT '',
     actual      TEXT NOT NULL DEFAULT '',
     rule        TEXT NOT NULL DEFAULT '',
     reason      TEXT NOT NULL DEFAULT '',

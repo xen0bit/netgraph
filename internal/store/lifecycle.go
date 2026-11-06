@@ -261,6 +261,8 @@ func (s *Store) purgeInDatabase(ctx context.Context, before time.Time, opts Purg
 	count(`DELETE FROM findings WHERE last_seen < ?`, cut)
 	count(`DELETE FROM audit_log WHERE ts < ?`, cut)
 	count(`DELETE FROM policy_decisions WHERE ts < ?`, cut)
+	r.Connections += count(`DELETE FROM agent_connections WHERE last_seen < ?`, cut)
+	r.Observations += count(`DELETE FROM agent_processes WHERE last_seen < ?`, cut)
 	// A purge is for a period that must not remain in the history, so unlike
 	// retention it takes notes, bookmarks and finished incidents with it.
 	r.Timeline = count(`DELETE FROM timeline_events WHERE ts < ?`, cut)

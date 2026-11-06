@@ -1833,6 +1833,7 @@ type AgentConnection struct {
 	SNI        string `json:"sni,omitempty"`
 	HTTPHost   string `json:"http_host,omitempty"`
 	Predicted  string `json:"predicted,omitempty"`
+	Scope      string `json:"scope,omitempty"` // host, process or default: what decided Predicted
 	Actual     string `json:"actual,omitempty"`
 	Rule       string `json:"rule,omitempty"`
 	Reason     string `json:"reason,omitempty"`

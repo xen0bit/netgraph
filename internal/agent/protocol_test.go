@@ -89,3 +89,30 @@ func TestRunnerOnce(t *testing.T) {
 		t.Fatalf("batch = %+v", got)
 	}
 }
+
+func TestPredictScope(t *testing.T) {
+	p := &policy.Policy{Version: 2, Defaults: policy.Defaults{Egress: "deny", Ingress: "deny", IntraZone: "allow", DNS: "allow"},
+		RulesV2: []policy.RuleV2{
+			{ID: "r1", Name: "no tracker", Action: policy.ActionDeny, Remote: policy.Selector{Type: "ip", Values: []string{"203.0.113.9"}}},
+			{ID: "r2", Name: "no curl", Action: policy.ActionDeny, Local: policy.Selector{Type: "app", Values: []string{"curl"}}, Remote: policy.Selector{Type: "ip", Values: []string{"203.0.113.10"}}},
+			{ID: "r3", Name: "https", Action: policy.ActionAllow, Ports: []string{"443/tcp"}},
+		}}
+	if err := p.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	pr := &PolicyResponse{Policy: p}
+	for _, tc := range []struct {
+		c             Connection
+		action, scope string
+	}{
+		{Connection{Direction: "out", RemoteIP: "203.0.113.9", RemotePort: 80, Proto: "tcp"}, "deny", ScopeHost},
+		{Connection{Direction: "out", RemoteIP: "203.0.113.10", RemotePort: 80, Proto: "tcp", App: "curl"}, "deny", ScopeProcess},
+		{Connection{Direction: "out", RemoteIP: "198.51.100.1", RemotePort: 22, Proto: "tcp"}, "deny", ScopeDefault},
+		{Connection{Direction: "out", RemoteIP: "198.51.100.1", RemotePort: 443, Proto: "tcp6"}, "allow", ScopeHost},
+	} {
+		action, scope, _, _ := predict(pr, tc.c)
+		if action != tc.action || scope != tc.scope {
+			t.Errorf("%+v: %s %s, want %s %s", tc.c, action, scope, tc.action, tc.scope)
+		}
+	}
+}

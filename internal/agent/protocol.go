@@ -69,11 +69,21 @@ type Connection struct {
 	SNI        string `json:"sni,omitempty"`
 	HTTPHost   string `json:"http_host,omitempty"`
 	Predicted  string `json:"predicted,omitempty"` // allow, deny, ask
-	Actual     string `json:"actual,omitempty"`    // allow, deny, ask
-	Rule       string `json:"rule,omitempty"`
-	Reason     string `json:"reason,omitempty"`
-	Stalled    bool   `json:"stalled,omitempty"`
+	// Scope says what decided Predicted: host (a rule for every program on
+	// this host), process (a rule for one program) or default (no rule).
+	Scope   string `json:"scope,omitempty"`
+	Actual  string `json:"actual,omitempty"` // deny when the agent dropped it, else none
+	Rule    string `json:"rule,omitempty"`
+	Reason  string `json:"reason,omitempty"`
+	Stalled bool   `json:"stalled,omitempty"`
 }
+
+// Scopes of a prediction.
+const (
+	ScopeHost    = "host"
+	ScopeProcess = "process"
+	ScopeDefault = "default"
+)
 
 // Actual is an enforcement result the agent reports back.
 type Actual struct {

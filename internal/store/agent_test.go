@@ -4,6 +4,7 @@ import (
 	"context"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/xen0bit/netgraph/internal/agent"
 	"github.com/xen0bit/netgraph/internal/policy"
@@ -53,5 +54,30 @@ func TestAgentBatch(t *testing.T) {
 	// The active policy is what an agent asks for.
 	if _, err := st.SavePolicy(ctx, &policy.Policy{Version: 2, Name: "agent", Defaults: policy.Defaults{Egress: "deny", Ingress: "deny", IntraZone: "allow", DNS: "allow"}, RulesV2: []policy.RuleV2{{Name: "x", Action: policy.ActionAllow, Local: policy.Selector{Type: "any"}, Remote: policy.Selector{Type: "any"}}}}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// Agent rows follow raw retention and db purge: every ephemeral port is a new
+// connection row.
+func TestAgentRowsAge(t *testing.T) {
+	now := time.Now()
+	st, err := Open(filepath.Join(t.TempDir(), "ng.db"), Config{Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	if _, err := st.IngestAgentBatch(ctx, &agent.Batch{Version: agent.Version, Agent: "laptop",
+		Processes:   []agent.Process{{PID: 7, Path: "/usr/bin/curl"}},
+		Connections: []agent.Connection{{Key: "tcp|a|b", RemoteIP: "203.0.113.1"}}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.PurgeBefore(ctx, now.Add(time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	procs, _ := st.AgentProcesses(ctx, "laptop", 10)
+	conns, _ := st.AgentConnections(ctx, "laptop", 10)
+	if len(procs) != 0 || len(conns) != 0 {
+		t.Fatalf("purge left %d processes, %d connections", len(procs), len(conns))
 	}
 }

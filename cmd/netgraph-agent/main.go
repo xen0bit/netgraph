@@ -11,6 +11,9 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
+	"net/netip"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -40,6 +43,7 @@ func run(args []string) error {
 	enforceMode := fs.String("enforce", "off", "off or nftables")
 	apply := fs.Bool("apply", false, "with -enforce=nftables, actually change the host firewall (default dry run)")
 	nftTable := fs.String("nft-table", "netgraph_agent", "nftables table for enforcement")
+	cmdlines := fs.Bool("cmdlines", false, "send each process's full command line; off, only the program (arguments can hold secrets)")
 	version := fs.Bool("version", false, "print version and exit")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -66,12 +70,22 @@ func run(args []string) error {
 		*name = "host-agent"
 	}
 	client := &agent.Client{Base: strings.TrimRight(*server, "/"), Token: tok, Agent: *name, Boot: bootID()}
-	runner := &agent.Runner{Client: client, Scanner: &linux.Scanner{}, Interval: *interval,
+	runner := &agent.Runner{Client: client, Scanner: &linux.Scanner{Cmdlines: *cmdlines}, Interval: *interval,
 		Logf: func(format string, a ...any) { fmt.Fprintf(os.Stderr, "netgraph-agent: "+format+"\n", a...) }}
 	switch *enforceMode {
 	case "off", "":
 	case "nftables":
-		runner.Enforcer = &enforce.Nftables{Table: *nftTable, DryRun: !*apply}
+		n, err := enforce.NewNftables(*nftTable)
+		if err != nil {
+			return err
+		}
+		n.DryRun = !*apply
+		// Never drop the way back to the server.
+		n.Protect, err = serverAddrs(*server)
+		if err != nil {
+			return err
+		}
+		runner.Enforcer = n
 	default:
 		return fmt.Errorf("-enforce %q is not off or nftables", *enforceMode)
 	}
@@ -84,6 +98,28 @@ func run(args []string) error {
 		return runner.Once(ctx)
 	}
 	return runner.Run(ctx)
+}
+
+// serverAddrs resolves the server's host, for the addresses enforcement must
+// never drop.
+func serverAddrs(server string) ([]netip.Addr, error) {
+	u, err := url.Parse(server)
+	if err != nil || u.Hostname() == "" {
+		return nil, fmt.Errorf("-server %q is not a URL", server)
+	}
+	if a, err := netip.ParseAddr(u.Hostname()); err == nil {
+		return []netip.Addr{a.Unmap()}, nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	addrs, err := net.DefaultResolver.LookupNetIP(ctx, "ip", u.Hostname())
+	if err != nil {
+		return nil, fmt.Errorf("resolve the server, whose addresses enforcement must not drop: %w", err)
+	}
+	for i := range addrs {
+		addrs[i] = addrs[i].Unmap()
+	}
+	return addrs, nil
 }
 
 func bootID() string {
