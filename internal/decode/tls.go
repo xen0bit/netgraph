@@ -148,13 +148,18 @@ func parseHelloBody(b []byte) (*ClientHello, error) {
 					ch.SNI = strings.ToLower(cleanText(name))
 				}
 			}
-		case 0xfe0d: // encrypted_client_hello
+		case 0xfe0d: // encrypted_client_hello (RFC 9849 §5)
 			ch.ECH = true
 			ch.ECHType = d.u8()
-			d.skip(4) // cipher_suite: KDF id + AEAD id
-			ch.ECHConfigID = d.u8()
-			d.skip(int(d.u8())) // enc
-			ch.ECHPayloadLen = len(d.bytes(int(d.u16())))
+			if ch.ECHType == 0 { // outer: the inner type (1) has no more fields
+				d.skip(4) // cipher_suite: KDF id + AEAD id
+				ch.ECHConfigID = d.u8()
+				d.skip(int(d.u16())) // enc<0..2^16-1>
+				payload := d.bytes(int(d.u16()))
+				if !d.err {
+					ch.ECHPayloadLen = len(payload)
+				}
+			}
 		case 16: // ALPN
 			list := reader{b: d.bytes(int(d.u16()))}
 			for list.left() > 0 && !list.err {
