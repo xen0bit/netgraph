@@ -143,7 +143,7 @@ func (s *Store) computeAnomalies(ctx context.Context, f model.Filter, from, to i
 	history := rep.SinceMS != 0 && from-rep.SinceMS >= AnomalyHistory.Milliseconds()
 	rep.Learning = !history
 	a := &anomalies{s: s, from: from, to: to, since: rep.SinceMS, devs: map[int64]*anomalyDevice{}}
-	checks := []func(context.Context) error{a.newDevices, a.beacons, a.dns, a.accessPoints, a.deauthFloods, a.sensorSilence, a.scans, a.bruteForce, a.arpConflicts, a.rogueDHCP}
+	checks := []func(context.Context) error{a.newDevices, a.beacons, a.dns, a.accessPoints, a.deauthFloods, a.sensorSilence, a.scans, a.bruteForce, a.arpConflicts, a.rogueDHCP, a.nameMismatches}
 	if history {
 		checks = append(checks, a.newDestinations, a.uploadSpikes, a.newServices, a.inboundSurges)
 	}
