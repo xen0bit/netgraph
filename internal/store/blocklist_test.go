@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -35,8 +36,8 @@ func TestBlocklistStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := m.MatchName("x.ads.example"); !ok {
-		t.Fatal("domain not matched")
+	if _, ok := m.MatchName("ads.example"); !ok {
+		t.Fatal("host not matched")
 	}
 	if _, ok := m.MatchIP("1.2.3.7"); !ok {
 		t.Fatal("address not matched")
@@ -52,7 +53,50 @@ func TestBlocklistStore(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := m.MatchName("x.ads.example"); ok && entries[0].Kind == "domain" {
+	if entries[0].Kind != "host" {
+		t.Fatalf("first entry = %+v", entries[0])
+	}
+	if _, ok := m.MatchName("ads.example"); ok {
 		t.Fatal("disabled entry still matched")
+	}
+	// Renaming a list keeps what the server knows about it.
+	renamed, err := st.SaveBlocklist(ctx, &model.Blocklist{ID: b.ID, Name: "renamed", Enabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if renamed.ID != b.ID || renamed.EntryCount != 2 || renamed.LastSuccess == 0 || renamed.Created != b.Created {
+		t.Fatalf("rename lost state: %+v", renamed)
+	}
+	if _, err := st.SaveBlocklist(ctx, &model.Blocklist{ID: 999, Name: "x"}); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("save to a missing ID = %v", err)
+	}
+	if err := st.ReplaceBlocklistEntries(ctx, 999, parsed); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("import to a missing list = %v", err)
+	}
+	if _, err := st.SaveBlocklist(ctx, &model.Blocklist{Name: "x", URL: "file:///etc/passwd"}); !errors.Is(err, ErrInvalid) {
+		t.Fatalf("file URL = %v", err)
+	}
+	// A backup carries the disabled entry, and restoring it keeps it off.
+	bundle, err := st.ExportBundle(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	st2, err := Open(filepath.Join(t.TempDir(), "ng2.db"), Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st2.Close()
+	if _, err := st2.ImportBundle(ctx, bundle); err != nil {
+		t.Fatal(err)
+	}
+	m2, err := st2.BlocklistMatcher(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := m2.MatchName("ads.example"); ok {
+		t.Fatal("restore re-enabled a disabled entry")
+	}
+	if _, ok := m2.MatchIP("1.2.3.7"); !ok {
+		t.Fatal("restore lost an entry")
 	}
 }

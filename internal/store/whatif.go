@@ -10,6 +10,7 @@ import (
 
 	"github.com/xen0bit/netgraph/internal/model"
 	"github.com/xen0bit/netgraph/internal/policy"
+	"github.com/xen0bit/netgraph/internal/policy/blocklist"
 )
 
 // WhatIf evaluates a proposed policy against the traffic observed in a
@@ -112,7 +113,10 @@ func (s *Store) WhatIf(ctx context.Context, p *policy.Policy, f model.Filter, sc
 		dev := byID[fl.Device]
 		zone := p.ZoneFor(fl.Device, firstNonEmpty(fl.DeviceName, dev.label, fl.Device), dev.role)
 		dst := firstNonEmpty(fl.Name, fl.RemoteIP)
-		if zone == "" {
+		// Version 1 rules only select zones; version 2 rules can select a
+		// device, its label or anything, so a device without a zone is still
+		// decided there.
+		if zone == "" && p.Version != 2 {
 			imp := model.Impact{
 				Kind: "connection", Device: fl.Device, DeviceName: firstNonEmpty(fl.DeviceName, dev.label),
 				Destination: dst, Port: portString(fl), Direction: fl.Direction,
@@ -128,38 +132,27 @@ func (s *Store) WhatIf(ctx context.Context, p *policy.Policy, f model.Filter, sc
 			peer := byID[fl.PeerDevice]
 			peerZone = p.ZoneFor(fl.PeerDevice, firstNonEmpty(fl.PeerName, peer.label, fl.PeerDevice), peer.role)
 		}
-		if matcher != nil {
-			if e, ok := matcher.MatchName(dst); ok {
-				imp := model.Impact{
-					Kind: "connection", Device: fl.Device, DeviceName: firstNonEmpty(fl.DeviceName, dev.label),
-					Zone: zone, Destination: dst, Port: portString(fl), Direction: fl.Direction,
-					BytesOut: fl.BytesOut, BytesIn: fl.BytesIn, Connections: 1,
-					Rule: "blocklist", Reason: "blocked by blocklist entry " + e.Value,
-					Critical: criticalFlow(fl, routers, dst),
-					Evidence: []model.EvidenceRef{{Kind: "flow", ID: fl.Key, TS: fl.FirstSeen, Text: dst}},
-				}
-				add(imp, imp.Critical)
-				continue
-			}
-			if e, ok := matcher.MatchIP(fl.RemoteIP); ok {
-				imp := model.Impact{
-					Kind: "connection", Device: fl.Device, DeviceName: firstNonEmpty(fl.DeviceName, dev.label),
-					Zone: zone, Destination: dst, Port: portString(fl), Direction: fl.Direction,
-					BytesOut: fl.BytesOut, BytesIn: fl.BytesIn, Connections: 1,
-					Rule: "blocklist", Reason: "blocked by blocklist entry " + e.Value,
-					Critical: criticalFlow(fl, routers, dst),
-					Evidence: []model.EvidenceRef{{Kind: "flow", ID: fl.Key, TS: fl.FirstSeen, Text: dst}},
-				}
-				add(imp, imp.Critical)
-				continue
-			}
-		}
 		decision := p.Evaluate(policy.Conn{
 			Zone: zone, PeerZone: peerZone, Device: fl.Device, Label: firstNonEmpty(fl.DeviceName, dev.label),
 			Role: dev.role, Direction: fl.Direction, Profile: profileName, Name: dst, Host: fl.Name, QName: fl.QName,
 			IP: fl.RemoteIP, Port: strconv.Itoa(servicePort(fl)), Proto: fl.Proto,
 			ASN: fl.ASN, Country: fl.Country,
 		})
+		// A blocklist denies what a device here reaches out to, unless a person
+		// wrote a high or extra-high allow for it: that is how an exception to
+		// a list is made. It never decides inbound connections.
+		if e, ok := blocklisted(matcher, fl.Direction, dst, fl.RemoteIP); ok && !overridesBlocklist(decision) {
+			imp := model.Impact{
+				Kind: "connection", Device: fl.Device, DeviceName: firstNonEmpty(fl.DeviceName, dev.label),
+				Zone: zone, Destination: dst, Port: portString(fl), Direction: fl.Direction,
+				BytesOut: fl.BytesOut, BytesIn: fl.BytesIn, Connections: 1,
+				Rule: "blocklist", Reason: "blocked by blocklist entry " + e.Value,
+				Critical: criticalFlow(fl, routers, dst),
+				Evidence: []model.EvidenceRef{{Kind: "flow", ID: fl.Key, TS: fl.FirstSeen, Text: dst}},
+			}
+			add(imp, imp.Critical)
+			continue
+		}
 		if decision.Action == policy.ActionAsk {
 			imp := model.Impact{
 				Kind: "connection", Device: fl.Device, DeviceName: firstNonEmpty(fl.DeviceName, dev.label),
@@ -250,6 +243,23 @@ func (s *Store) WhatIf(ctx context.Context, p *policy.Policy, f model.Filter, sc
 		out.Gaps = append(out.Gaps, "the window is answered from hourly rollups")
 	}
 	return out, nil
+}
+
+// blocklisted reports the entry that blocks a connection a device here made.
+func blocklisted(m *blocklist.Matcher, direction, name, ip string) (blocklist.Entry, bool) {
+	if m == nil || direction == model.DirIn {
+		return blocklist.Entry{}, false
+	}
+	if e, ok := m.MatchName(name); ok {
+		return e, true
+	}
+	return m.MatchIP(ip)
+}
+
+// overridesBlocklist: an allow a person ranked above regular wins over a list.
+func overridesBlocklist(d policy.Decision) bool {
+	return d.Matched && d.Action == policy.ActionAllow &&
+		(d.Priority == policy.PriorityHigh || d.Priority == policy.PriorityExtraHigh)
 }
 
 func portString(fl model.Flow) string {

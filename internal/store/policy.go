@@ -116,6 +116,15 @@ func (s *Store) SavePolicy(ctx context.Context, p *policy.Policy) (*policy.Polic
 	}
 	p.Modified = now
 	if p.Version == 2 {
+		ids := map[string]bool{}
+		for i := range p.RulesV2 {
+			if id := p.RulesV2[i].ID; id != "" {
+				if ids[id] {
+					return nil, fmt.Errorf("%w: rule ID %q appears twice", ErrInvalid, id)
+				}
+				ids[id] = true
+			}
+		}
 		for i := range p.RulesV2 {
 			if p.RulesV2[i].ID == "" {
 				id, err := newPolicyID("rule_")
@@ -191,6 +200,9 @@ func (s *Store) SavePolicy(ctx context.Context, p *policy.Policy) (*policy.Polic
 				r.Profile, r.Group, string(local), r.Remote.Type, string(remote), string(ports), r.Protocol, r.Lifetime,
 				r.Expiry, r.CodeRequirement, trusted, p.Created, p.Modified)
 			if err != nil {
+				if strings.Contains(err.Error(), "UNIQUE") {
+					return nil, fmt.Errorf("%w: rule ID %q belongs to another policy", ErrInvalid, r.ID)
+				}
 				return nil, err
 			}
 		}

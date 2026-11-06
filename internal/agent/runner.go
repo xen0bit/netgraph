@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/xen0bit/netgraph/internal/policy"
@@ -76,33 +77,33 @@ func (r *Runner) Run(ctx context.Context) error {
 		actuals := make([]Actual, 0)
 		for i := range conns {
 			if lastPolicy != nil && lastPolicy.Policy != nil {
-				conns[i].Predicted, conns[i].Rule, conns[i].Reason = predict(lastPolicy, conns[i])
+				conns[i].Predicted, conns[i].Scope, conns[i].Rule, conns[i].Reason = predict(lastPolicy, conns[i])
 			}
 			if conns[i].Actual == "" {
 				conns[i].Actual = "none"
 			}
 		}
+		var got []Actual
 		if r.Enforcer != nil {
-			got, err := r.Enforcer.Apply(ctx, conns)
+			var err error
+			got, err = r.Enforcer.Apply(ctx, conns)
 			if err != nil {
 				r.Logf("enforce: %v", err)
-			} else {
-				actuals = append(actuals, got...)
-				for _, a := range got {
-					for i := range conns {
-						if conns[i].Key == a.Key {
-							conns[i].Actual = a.Action
-							conns[i].Stalled = a.Stalled
-						}
-					}
-				}
 			}
+			applyActuals(conns, got)
 		}
 		changed := make([]Connection, 0, len(conns))
+		changedKeys := map[string]bool{}
 		for _, c := range conns {
 			old, ok := last[c.Key]
 			if !ok || old.Predicted != c.Predicted || old.Actual != c.Actual || old.State != c.State || old.Stalled != c.Stalled {
 				changed = append(changed, c)
+				changedKeys[c.Key] = true
+			}
+		}
+		for _, a := range got {
+			if changedKeys[a.Key] {
+				actuals = append(actuals, a)
 			}
 		}
 		last = make(map[string]Connection, len(conns))
@@ -118,15 +119,46 @@ func (r *Runner) Run(ctx context.Context) error {
 	}
 }
 
-func predict(p *PolicyResponse, c Connection) (action, rule, reason string) {
+// predict evaluates the server's policy for one connection, and says whether
+// the decision came from a rule for the whole host, one for a program, or the
+// default. Only the first can be enforced by address.
+func predict(p *PolicyResponse, c Connection) (action, scope, rule, reason string) {
 	if p == nil || p.Policy == nil {
-		return "none", "", "no active policy"
+		return "none", ScopeDefault, "", "no active policy"
 	}
 	d := p.Policy.Evaluate(policy.Conn{
 		Direction: c.Direction, Profile: p.Profile, Name: first(c.SNI, c.HTTPHost), Host: c.HTTPHost,
-		IP: c.RemoteIP, Port: strconv.Itoa(c.RemotePort), Proto: c.Proto, Process: c.App,
+		IP: c.RemoteIP, Port: strconv.Itoa(c.RemotePort), Proto: strings.TrimSuffix(c.Proto, "6"), Process: c.App,
 	})
-	return d.Action, d.Rule, d.Reason
+	scope = ScopeDefault
+	if d.Matched {
+		scope = ScopeHost
+		for _, r := range p.Policy.RulesV2 {
+			if r.ID == d.RuleID && d.RuleID != "" {
+				if (r.Local.Type != "" && r.Local.Type != "any") || (r.Via.Type != "" && r.Via.Type != "any") {
+					scope = ScopeProcess
+				}
+				break
+			}
+		}
+		if p.Policy.Version != 2 {
+			scope = ScopeProcess // version 1 rules select zones of devices, not this host
+		}
+	}
+	return d.Action, scope, d.Rule, d.Reason
+}
+
+// applyActuals records what the enforcer did on each connection.
+func applyActuals(conns []Connection, actuals []Actual) {
+	at := make(map[string]int, len(conns))
+	for i := range conns {
+		at[conns[i].Key] = i
+	}
+	for _, a := range actuals {
+		if i, ok := at[a.Key]; ok {
+			conns[i].Actual, conns[i].Stalled = a.Action, a.Stalled
+		}
+	}
 }
 
 func first(xs ...string) string {
@@ -175,21 +207,15 @@ func (r *Runner) Once(ctx context.Context) error {
 		return err
 	}
 	for i := range conns {
-		conns[i].Predicted, conns[i].Rule, conns[i].Reason = predict(pol, conns[i])
+		conns[i].Predicted, conns[i].Scope, conns[i].Rule, conns[i].Reason = predict(pol, conns[i])
 		conns[i].Actual = "none"
 	}
 	var actuals []Actual
 	if r.Enforcer != nil {
 		actuals, err = r.Enforcer.Apply(ctx, conns)
+		applyActuals(conns, actuals)
 		if err != nil {
 			return err
-		}
-		for _, a := range actuals {
-			for i := range conns {
-				if conns[i].Key == a.Key {
-					conns[i].Actual, conns[i].Stalled = a.Action, a.Stalled
-				}
-			}
 		}
 	}
 	return r.Client.Send(ctx, &Batch{Processes: procs, Connections: conns, Actuals: actuals})

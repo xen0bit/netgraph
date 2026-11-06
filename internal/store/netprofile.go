@@ -195,6 +195,20 @@ func (s *Store) SaveNetworkTrigger(ctx context.Context, t *model.NetworkTrigger)
 	default:
 		return nil, fmt.Errorf("%w: trigger action %q", ErrInvalid, t.Action)
 	}
+	switch t.Mode {
+	case "", "alert", "silent-allow", "silent-deny":
+	default:
+		return nil, fmt.Errorf("%w: trigger mode %q", ErrInvalid, t.Mode)
+	}
+	if len(t.Signature) > 1024 {
+		return nil, fmt.Errorf("%w: signature is too long", ErrInvalid)
+	}
+	if _, err := path.Match(t.Signature, ""); err != nil {
+		return nil, fmt.Errorf("%w: signature pattern: %v", ErrInvalid, err)
+	}
+	if _, err := s.Profile(ctx, t.ProfileID); err != nil {
+		return nil, err
+	}
 	if t.AUID == "" {
 		id, err := newPolicyID("trig_")
 		if err != nil {
@@ -243,46 +257,21 @@ func (s *Store) DeleteNetworkTrigger(ctx context.Context, id int64) error {
 
 // NetworkContext returns the network signature netgraph can see now.
 func (s *Store) NetworkContext(ctx context.Context) (*model.NetworkContext, error) {
-	return s.networkContext(ctx, false)
+	return s.networkContext(ctx, s.r)
 }
 
-func (s *Store) networkContext(ctx context.Context, locked bool) (*model.NetworkContext, error) {
-	q := s.r
-	if locked {
-		q = nil
-	}
-	get := func(query string, args ...any) (string, error) {
-		var v string
-		var err error
-		if locked {
-			err = s.w.QueryRowContext(ctx, query, args...).Scan(&v)
-		} else {
-			err = q.QueryRowContext(ctx, query, args...).Scan(&v)
-		}
-		if errors.Is(err, sql.ErrNoRows) {
-			return "", nil
-		}
-		return v, err
-	}
-	ssid, err := get(`SELECT key FROM entities WHERE kind = 'ssid' ORDER BY last_seen DESC LIMIT 1`)
-	if err != nil {
-		return nil, err
-	}
-	bssid, err := get(`SELECT e.key FROM facts f JOIN entities e ON e.id = f.src
-		WHERE f.rel = 'broadcasts' ORDER BY f.last_seen DESC LIMIT 1`)
-	if err != nil {
-		return nil, err
-	}
+type queryRower interface {
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+// networkContext describes the network the newest sensor is on: its first
+// interface and that interface's MAC, and the SSID one of its own interfaces
+// broadcasts, when the sensor is the access point. Other networks' beacons
+// are only heard, so they never change the signature.
+func (s *Store) networkContext(ctx context.Context, q queryRower) (*model.NetworkContext, error) {
 	var hello string
-	if locked {
-		err = s.w.QueryRowContext(ctx, `SELECT hello FROM sensors ORDER BY last_seen DESC LIMIT 1`).Scan(&hello)
-	} else {
-		err = s.r.QueryRowContext(ctx, `SELECT hello FROM sensors ORDER BY last_seen DESC LIMIT 1`).Scan(&hello)
-	}
-	if errors.Is(err, sql.ErrNoRows) {
-		err = nil
-	}
-	if err != nil {
+	err := q.QueryRowContext(ctx, `SELECT hello FROM sensors ORDER BY last_seen DESC LIMIT 1`).Scan(&hello)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
 	var h wire.Hello
@@ -290,7 +279,25 @@ func (s *Store) networkContext(ctx context.Context, locked bool) (*model.Network
 	iface, router := "", ""
 	if len(h.Interfaces) > 0 {
 		iface = h.Interfaces[0].Name
-		router = h.Interfaces[0].MAC
+		router, _ = normMAC(h.Interfaces[0].MAC)
+	}
+	ssid, bssid := "", ""
+	for _, in := range h.Interfaces {
+		m, ok := normMAC(in.MAC)
+		if !ok {
+			continue
+		}
+		var name string
+		err := q.QueryRowContext(ctx, `SELECT s.key FROM facts f JOIN entities b ON b.id = f.src JOIN entities s ON s.id = f.dst
+			WHERE f.rel = ? AND b.kind = ? AND b.key = ? ORDER BY f.last_seen DESC LIMIT 1`, model.RelBroadcasts, model.KindDevice, m).Scan(&name)
+		if errors.Is(err, sql.ErrNoRows) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		ssid, bssid = name, m
+		break
 	}
 	sig := signature(ssid, bssid, router, iface)
 	return &model.NetworkContext{Signature: sig, SSID: ssid, BSSID: bssid, Router: router, Interface: iface}, nil
@@ -306,31 +313,25 @@ func signature(ssid, bssid, router, iface string) string {
 	return string(b)
 }
 
-// EvaluateProfile applies the first matching network trigger and returns the
-// active profile. It is safe to call from ingest while the write lock is held.
+// EvaluateProfile applies the first trigger matching the current network,
+// even if the network hasn't changed, and returns the profile in effect.
 func (s *Store) EvaluateProfile(ctx context.Context) (*model.Profile, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.evaluateProfileLocked(ctx)
+	return s.evaluateProfileLocked(ctx, true)
 }
 
-func (s *Store) evaluateProfileLocked(ctx context.Context) (*model.Profile, error) {
-	nc, err := s.networkContext(ctx, true)
-	if err != nil {
-		return nil, err
-	}
+// evaluateProfileLocked runs the triggers with s.mu held. Unless forced, it
+// acts only when the network signature has changed since it last looked, so a
+// profile someone chose by hand stays until the network really changes.
+func (s *Store) evaluateProfileLocked(ctx context.Context, force bool) (*model.Profile, error) {
 	rows, err := s.w.QueryContext(ctx, `SELECT id, profile_id, signature, action, mode FROM network_triggers WHERE enabled = 1 ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
-	type trigger struct {
-		id, profileID int64
-		pattern       string
-		action, mode  string
-	}
-	var triggers []trigger
+	var triggers []netTrigger
 	for rows.Next() {
-		var t trigger
+		var t netTrigger
 		if err := rows.Scan(&t.id, &t.profileID, &t.pattern, &t.action, &t.mode); err != nil {
 			rows.Close()
 			return nil, err
@@ -342,31 +343,17 @@ func (s *Store) evaluateProfileLocked(ctx context.Context) (*model.Profile, erro
 		return nil, err
 	}
 	rows.Close()
-	now := s.cfg.Now().UTC().UnixMilli()
-	for _, t := range triggers {
-		if !matchSignature(t.pattern, nc.Signature) {
-			continue
-		}
-		switch t.action {
-		case "activate", "ask":
-			if err := s.activateProfileLocked(ctx, t.profileID); err != nil {
-				return nil, err
-			}
-		case "deactivate":
-			if err := s.activateProfileLocked(ctx, 0); err != nil {
-				return nil, err
-			}
-		case "none":
-		}
-		if t.mode != "" {
-			if _, err := s.w.ExecContext(ctx, `UPDATE profiles SET mode = ?, modified = ? WHERE id = ?`, t.mode, now, t.profileID); err != nil {
-				return nil, err
-			}
-		}
-		if _, err := s.w.ExecContext(ctx, `UPDATE network_triggers SET last_triggered = ? WHERE id = ?`, now, t.id); err != nil {
+	if len(triggers) > 0 {
+		nc, err := s.networkContext(ctx, s.w)
+		if err != nil {
 			return nil, err
 		}
-		break
+		if force || nc.Signature != s.netSig {
+			s.netSig = nc.Signature
+			if err := s.applyTrigger(ctx, nc.Signature, triggers); err != nil {
+				return nil, err
+			}
+		}
 	}
 	var auid string
 	err = s.w.QueryRowContext(ctx, `SELECT auid FROM profiles WHERE active = 1`).Scan(&auid)
@@ -389,10 +376,48 @@ func (s *Store) evaluateProfileLocked(ctx context.Context) (*model.Profile, erro
 	return &p, nil
 }
 
+type netTrigger struct {
+	id, profileID int64
+	pattern       string
+	action, mode  string
+}
+
+// applyTrigger acts on the first trigger matching sig. "ask" changes
+// nothing: it marks the trigger, and the network view shows the match for a
+// person to act on.
+func (s *Store) applyTrigger(ctx context.Context, sig string, triggers []netTrigger) error {
+	now := s.cfg.Now().UTC().UnixMilli()
+	for _, t := range triggers {
+		if !matchSignature(t.pattern, sig) {
+			continue
+		}
+		switch t.action {
+		case "activate":
+			if err := s.activateProfileLocked(ctx, t.profileID); err != nil {
+				return err
+			}
+			if t.mode != "" {
+				if _, err := s.w.ExecContext(ctx, `UPDATE profiles SET mode = ?, modified = ? WHERE id = ?`, t.mode, now, t.profileID); err != nil {
+					return err
+				}
+			}
+		case "deactivate":
+			if err := s.activateProfileLocked(ctx, 0); err != nil {
+				return err
+			}
+		}
+		_, err := s.w.ExecContext(ctx, `UPDATE network_triggers SET last_triggered = ? WHERE id = ?`, now, t.id)
+		return err
+	}
+	return nil
+}
+
 func matchSignature(pattern, sig string) bool {
 	if pattern == "" {
 		return false
 	}
+	// SSIDs are stored lowercased, so a trigger matches whatever its case.
+	pattern, sig = strings.ToLower(pattern), strings.ToLower(sig)
 	if pattern == sig || pattern == "*" {
 		return true
 	}

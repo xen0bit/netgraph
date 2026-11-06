@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/netip"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -305,11 +306,26 @@ func compile(p *Policy, obs Observed) plan {
 }
 
 // exportV2Rules lowers version 2 rules to the address-oriented rule shape the
-// exporters understand. It warns about anything it cannot faithfully express
-// instead of silently changing an allow into a deny.
+// exporters understand. A firewall takes the first rule that matches, while a
+// version 2 policy takes the highest-ranked one, so the rules go out in
+// precedence order: written in file order, a broad allow above a narrow deny
+// would let through what the policy denies. It warns about anything it cannot
+// faithfully express instead of silently changing an allow into a deny.
 func exportV2Rules(p *Policy, warn func(string, ...any)) []Rule {
+	type ranked struct {
+		r    RuleV2
+		rank ruleRank
+	}
+	order := make([]ranked, 0, len(p.RulesV2))
+	for i, r := range p.RulesV2 {
+		rank := rankFor(Conn{}, r, i)
+		rank.ports, rank.portStart = staticPorts(r.Ports)
+		order = append(order, ranked{r, rank})
+	}
+	sort.SliceStable(order, func(i, j int) bool { return better(order[i].rank, order[j].rank) })
 	var out []Rule
-	for _, r := range p.RulesV2 {
+	for _, o := range order {
+		r := o.r
 		if !r.EnabledValue() {
 			continue
 		}
@@ -320,18 +336,18 @@ func exportV2Rules(p *Policy, warn func(string, ...any)) []Rule {
 		if r.Profile != "" {
 			warn("rule %q belongs to profile %q; the export is not profile-aware", safe(r.Name), safe(r.Profile))
 		}
-		if r.Priority != "" && r.Priority != PriorityRegular {
-			warn("rule %q has priority %q; the export keeps file order", safe(r.Name), safe(r.Priority))
-		}
 		locals, ok := exportLocal(r.Local)
 		if !ok {
-			warn("rule %q has a local selector a firewall export can't name", safe(r.Name))
+			warn("rule %q (%s) selects a %s, which a firewall export can't name; it is left out", safe(r.Name), r.Action, safe(r.Local.Type))
 			continue
 		}
 		remotes, ok := exportRemote(r.Remote)
 		if !ok {
-			warn("rule %q has a remote selector a firewall export can't name", safe(r.Name))
+			warn("rule %q (%s) selects a %s remote, which a firewall export can't name; it is left out", safe(r.Name), r.Action, safe(r.Remote.Type))
 			continue
+		}
+		if r.Via.Type != "" && r.Via.Type != "any" {
+			warn("rule %q only applies via %s, which a firewall can't see; it is exported for every process", safe(r.Name), safe(r.Via.Type))
 		}
 		ports := append([]string(nil), r.Ports...)
 		if r.Protocol != "" && r.Protocol != "any" {
@@ -366,6 +382,24 @@ func exportV2Rules(p *Policy, warn func(string, ...any)) []Rule {
 		}
 	}
 	return out
+}
+
+// staticPorts ranks a rule's ports without a connection: the width of what
+// it covers, and where that starts. No ports covers everything.
+func staticPorts(specs []string) (width, start int) {
+	if len(specs) == 0 {
+		return 1 << 20, 0
+	}
+	start = 1 << 20
+	for _, spec := range specs {
+		p, err := parsePortSpec(spec)
+		if err != nil {
+			continue
+		}
+		width += p.hi - p.lo + 1
+		start = min(start, p.lo)
+	}
+	return width, start
 }
 
 func exportLocal(s Selector) ([]string, bool) {
@@ -403,14 +437,15 @@ func exportRemote(s Selector) ([]string, bool) {
 		if len(s.Values) == 0 {
 			return nil, false
 		}
-		out := make([]string, 0, len(s.Values))
+		out := make([]string, 0, 2*len(s.Values))
 		for _, v := range s.Values {
-			v = strings.TrimPrefix(v, "*.")
-			if s.Type == "domain" {
-				out = append(out, "site:"+v)
-			} else {
-				out = append(out, "domain:"+v)
+			if s.Type == "host" {
+				out = append(out, "domain:"+v) // that name exactly
+				continue
 			}
+			// A version 2 domain is the name and everything under it.
+			v = strings.TrimPrefix(strings.TrimPrefix(v, "*."), ".")
+			out = append(out, "domain:"+v, "domain:*."+v)
 		}
 		return out, true
 	default:

@@ -30,6 +30,9 @@ func (s *Store) ExportBundle(ctx context.Context) (*backup.Bundle, error) {
 	if b.Triggers, err = s.NetworkTriggers(ctx); err != nil {
 		return nil, err
 	}
+	if b.RuleGroups, err = s.RuleGroups(ctx); err != nil {
+		return nil, err
+	}
 	lists, err := s.Blocklists(ctx)
 	if err != nil {
 		return nil, err
@@ -63,26 +66,53 @@ func (s *Store) ImportBundle(ctx context.Context, b *backup.Bundle) (map[string]
 		}
 		counts["policies"]++
 	}
+	// Triggers and lists name their profile and group by this server's row
+	// IDs, which mean nothing on another: map them through the AUIDs.
+	profileIDs := map[int64]int64{}
 	for i := range b.Profiles {
-		if _, err := s.SaveProfile(ctx, &b.Profiles[i]); err != nil {
+		old := b.Profiles[i].ID
+		saved, err := s.SaveProfile(ctx, &b.Profiles[i])
+		if err != nil {
 			return counts, fmt.Errorf("profile %q: %w", b.Profiles[i].Name, err)
 		}
+		profileIDs[old] = saved.ID
 		counts["profiles"]++
 	}
 	for i := range b.Triggers {
-		if _, err := s.SaveNetworkTrigger(ctx, &b.Triggers[i]); err != nil {
-			return counts, fmt.Errorf("trigger %q: %w", b.Triggers[i].Signature, err)
+		t := b.Triggers[i]
+		id, ok := profileIDs[t.ProfileID]
+		if !ok {
+			return counts, fmt.Errorf("%w: trigger %q names a profile the bundle doesn't have", ErrInvalid, t.Signature)
+		}
+		t.ProfileID = id
+		if _, err := s.SaveNetworkTrigger(ctx, &t); err != nil {
+			return counts, fmt.Errorf("trigger %q: %w", t.Signature, err)
 		}
 		counts["triggers"]++
 	}
+	groupIDs := map[int64]int64{}
+	for i := range b.RuleGroups {
+		old := b.RuleGroups[i].ID
+		saved, err := s.SaveRuleGroup(ctx, &b.RuleGroups[i])
+		if err != nil {
+			return counts, fmt.Errorf("group %q: %w", b.RuleGroups[i].Name, err)
+		}
+		groupIDs[old] = saved.ID
+		counts["rule_groups"]++
+	}
 	for _, lb := range b.Blocklists {
-		saved, err := s.SaveBlocklist(ctx, &lb.List)
+		list := lb.List
+		list.ID = 0 // found by AUID
+		if list.GroupID != 0 {
+			list.GroupID = groupIDs[list.GroupID] // 0, ungrouped, when the bundle lacks it
+		}
+		saved, err := s.SaveBlocklist(ctx, &list)
 		if err != nil {
 			return counts, fmt.Errorf("blocklist %q: %w", lb.List.Name, err)
 		}
 		parsed := &blocklist.Parsed{Entries: make([]blocklist.Entry, 0, len(lb.Entries))}
 		for _, e := range lb.Entries {
-			parsed.Entries = append(parsed.Entries, blocklist.Entry{Kind: e.Kind, Value: e.Value})
+			parsed.Entries = append(parsed.Entries, blocklist.Entry{Kind: e.Kind, Value: e.Value, Disabled: !e.Enabled})
 		}
 		if err := s.ReplaceBlocklistEntries(ctx, saved.ID, parsed); err != nil {
 			return counts, err

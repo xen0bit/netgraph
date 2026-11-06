@@ -16,6 +16,7 @@ type Decision struct {
 	Matched  bool   `json:"matched"`
 	Rule     string `json:"rule,omitempty"`
 	RuleID   string `json:"rule_id,omitempty"`
+	Priority string `json:"priority,omitempty"` // the matched rule's
 	Reason   string `json:"reason"`
 	WouldAsk bool   `json:"would_ask,omitempty"`
 }
@@ -66,26 +67,21 @@ func (p *Policy) Explain(c Conn) Explanation {
 	}
 	var best *RuleV2
 	var bestRank ruleRank
-	var bestIndex int
 	var matches []rankedRule
 	for i := range p.RulesV2 {
 		r := &p.RulesV2[i]
-		if !p.matchRule(c, r, i) {
+		if !p.matchRule(c, r) {
 			continue
 		}
 		rank := rankFor(c, *r, i)
 		matches = append(matches, rankedRule{rule: r, rank: rank, index: i})
 		if best == nil || better(rank, bestRank) {
-			best, bestRank, bestIndex = r, rank, i
+			best, bestRank = r, rank
 		}
 	}
 	d := p.defaultDecision(c)
 	if best != nil {
-		d = Decision{
-			Action: best.Action, Matched: true, Rule: best.Name, RuleID: best.ID,
-			Reason: "matched " + best.Name, WouldAsk: best.Action == ActionAsk,
-		}
-		_ = bestIndex
+		d = matched(best)
 	}
 	slices.SortStableFunc(matches, func(a, b rankedRule) int {
 		if better(a.rank, b.rank) {
@@ -111,7 +107,7 @@ func (p *Policy) evaluateV2(c Conn) Decision {
 	var bestRank ruleRank
 	for i := range p.RulesV2 {
 		r := &p.RulesV2[i]
-		if !p.matchRule(c, r, i) {
+		if !p.matchRule(c, r) {
 			continue
 		}
 		rank := rankFor(c, *r, i)
@@ -122,9 +118,13 @@ func (p *Policy) evaluateV2(c Conn) Decision {
 	if best == nil {
 		return p.defaultDecision(c)
 	}
+	return matched(best)
+}
+
+func matched(r *RuleV2) Decision {
 	return Decision{
-		Action: best.Action, Matched: true, Rule: best.Name, RuleID: best.ID,
-		Reason: "matched " + best.Name, WouldAsk: best.Action == ActionAsk,
+		Action: r.Action, Matched: true, Rule: r.Name, RuleID: r.ID, Priority: r.Priority,
+		Reason: "matched " + r.Name, WouldAsk: r.Action == ActionAsk,
 	}
 }
 
@@ -153,7 +153,7 @@ func (p *Policy) defaultDecision(c Conn) Decision {
 	return Decision{Action: action, Reason: "default " + c.Direction + " " + action}
 }
 
-func (p *Policy) matchRule(c Conn, r *RuleV2, index int) bool {
+func (p *Policy) matchRule(c Conn, r *RuleV2) bool {
 	if !r.EnabledValue() {
 		return false
 	}
@@ -189,7 +189,6 @@ func (p *Policy) matchRule(c Conn, r *RuleV2, index int) bool {
 			return false
 		}
 	}
-	_ = index
 	return true
 }
 

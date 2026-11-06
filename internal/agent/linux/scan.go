@@ -35,8 +35,11 @@ const (
 // cache avoids re-reading unchanged binaries.
 type Scanner struct {
 	Root string // /proc by default; tests set a fixture root
-	mu   sync.Mutex
-	hash map[string]hashEntry
+	// Cmdlines sends each process's full command line. Off, only the
+	// program's name is sent: arguments can hold passwords and tokens.
+	Cmdlines bool
+	mu       sync.Mutex
+	hash     map[string]hashEntry
 }
 
 type hashEntry struct {
@@ -67,10 +70,15 @@ func (s *Scanner) Scan(ctx context.Context) ([]agent.Process, []agent.Connection
 		return nil, nil, err
 	}
 	inodes := socketInodes(root)
-	listeners := map[int]bool{}
+	// A connection to a port this host listens on was accepted, not made.
+	type listen struct {
+		proto string
+		port  int
+	}
+	listeners := map[listen]bool{}
 	for _, so := range sockets {
 		if so.state == "LISTEN" {
-			listeners[so.localPort] = true
+			listeners[listen{so.proto, so.localPort}] = true
 		}
 	}
 	now := time.Now().UnixMilli()
@@ -91,6 +99,9 @@ func (s *Scanner) Scan(ctx context.Context) ([]agent.Process, []agent.Connection
 		p, ok := procCache[pid]
 		if !ok && pid > 0 {
 			p = readProcess(root, pid)
+			if !s.Cmdlines {
+				p.Cmdline = argv0(p.Cmdline)
+			}
 			p.SHA256, p.CodeID = s.hashExe(p.Path)
 			procCache[pid] = p
 		}
@@ -98,7 +109,7 @@ func (s *Scanner) Scan(ctx context.Context) ([]agent.Process, []agent.Connection
 			seenProc[pid] = true
 		}
 		dir := "out"
-		if listeners[so.localPort] {
+		if listeners[listen{so.proto, so.localPort}] {
 			dir = "in"
 		}
 		if isLocal(so.remoteIP) || so.remoteIP == so.localIP {
@@ -131,6 +142,14 @@ func (s *Scanner) Scan(ctx context.Context) ([]agent.Process, []agent.Connection
 		}
 	}
 	return procs, out, nil
+}
+
+// argv0 is the program part of a command line, without its arguments.
+func argv0(cmdline string) string {
+	if i := strings.IndexByte(cmdline, ' '); i >= 0 {
+		return cmdline[:i]
+	}
+	return cmdline
 }
 
 func isLocal(ip string) bool {

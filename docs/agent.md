@@ -10,8 +10,9 @@ affects sensors or stored network history.
 
 ## What it reports
 
-- process identity: PID, PPID, UID, executable path, command line, executable
-  SHA-256 (`sha256:...` as the current code ID);
+- process identity: PID, PPID, UID, executable path, the program's name (the
+  full command line only with `-cmdlines`: arguments can hold passwords and
+  tokens), executable SHA-256 (`sha256:...` as the current code ID);
 - process-attributed TCP/UDP sockets from `/proc/net/{tcp,tcp6,udp,udp6}`,
   mapped to PIDs through `/proc/<pid>/fd` socket inodes;
 - a stable connection key (protocol, local address/port, remote
@@ -64,25 +65,42 @@ sudo NETGRAPH_AGENT_TOKEN=... netgraph-agent \
 
 ## Enforcement
 
-Prediction is always on. Enforcement is opt-in and currently Linux-only:
+Prediction is always on: each connection is evaluated against the server's
+active policy. `-enforce=nftables` adds enforcement, which is a dry run (it
+reports what it would drop) unless `-apply` is also given:
 
 ```sh
 sudo netgraph-agent -enforce=nftables -apply ...
 ```
 
-Without `-apply`, the nftables enforcer runs in **dry-run** mode and only
-reports what it would do. With `-apply`, it creates a dedicated
-`inet netgraph_agent` table and installs drop rules for denied remote
-addresses. Allow and ask decisions are reported, not silently enforced.
-Stopping the agent removes the dedicated table.
+The agent then owns one table, `inet netgraph_agent` (`-nft-table`), and
+replaces it whole in a single `nft -f` transaction whenever the set of drops
+changes; on exit it deletes it. It drops a destination (address, and protocol
+and port when known) only when:
 
-The server never claims that an agent result was enforced unless the agent
-reports an actual action. The API keeps `predicted` and `actual` separate.
+- an explicit **deny rule** matched: never the policy's default, since a
+  default egress of deny would cut the host off;
+- that rule applies to the whole host (local `any`). A rule for one app,
+  process or owner is reported as not enforced: nftables can't tell programs
+  apart, so a drop by address would block every program;
+- the address is not the netgraph server's.
+
+The agent sees a connection by polling `/proc`, so the first packets of a
+denied connection have already left; the drop stops the rest and later ones.
+Allow and ask are never enforced (nothing can ask), and the agent reports
+`actual: none` with the reason. The API keeps `predicted` and `actual`
+separate, with `scope` (`host`, `process`, `default`) saying what decided.
+
+Rules match what the agent can see: the remote address, port, protocol and
+the program's name. It does not see DNS or TLS names, so `domain` and `host`
+rules don't match on the agent.
 
 ## Privacy and safety
 
 - The agent is opt-in and uses a separate token.
 - It reads `/proc`; it does not dump memory, payloads or credentials.
+- Processes and connections follow the server's raw retention and `db purge`.
+  They name no MAC, so `db forget` can't find them: purge by time instead.
 - The executable hash is bounded and cached.
 - It does not execute paths, commands or URLs from the server.
 - `nftables` changes are confined to one dedicated table and are off by

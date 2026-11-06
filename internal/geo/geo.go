@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
+	"sort"
 	"strings"
 )
 
@@ -23,7 +24,8 @@ type Info struct {
 
 // DB is a loaded geo table. A nil *DB knows nothing.
 type DB struct {
-	ranges []geoRange
+	ranges []geoRange   // sorted by lo
+	maxHi  []netip.Addr // maxHi[i] is the highest end among ranges[:i+1]
 }
 
 type geoRange struct {
@@ -80,6 +82,16 @@ func Parse(r io.Reader) (*DB, error) {
 	}
 	if len(db.ranges) == 0 {
 		return nil, fmt.Errorf("geo table has no ranges")
+	}
+	// Sorted once, so a lookup is a binary search: a full table is millions
+	// of ranges and every listed flow is looked up.
+	sort.SliceStable(db.ranges, func(i, j int) bool { return db.ranges[i].lo.Less(db.ranges[j].lo) })
+	db.maxHi = make([]netip.Addr, len(db.ranges))
+	for i, r := range db.ranges {
+		db.maxHi[i] = r.hi
+		if i > 0 && db.maxHi[i-1].Compare(r.hi) > 0 {
+			db.maxHi[i] = db.maxHi[i-1]
+		}
 	}
 	return db, nil
 }
@@ -176,15 +188,17 @@ func lastAddr(p netip.Prefix) netip.Addr {
 	return netip.AddrFrom16(v)
 }
 
-// Lookup finds the first range containing addr.
+// Lookup finds the range containing addr; where ranges overlap, the one
+// starting closest below it, which is the narrower one in a nested table.
 func (db *DB) Lookup(addr netip.Addr) (Info, bool) {
-	if db == nil {
+	if db == nil || !addr.IsValid() {
 		return Info{}, false
 	}
 	a := addr.Unmap()
-	for _, r := range db.ranges {
-		if a.Compare(r.lo) >= 0 && a.Compare(r.hi) <= 0 {
-			return r.info, true
+	i := sort.Search(len(db.ranges), func(i int) bool { return db.ranges[i].lo.Compare(a) > 0 }) - 1
+	for ; i >= 0 && db.maxHi[i].Compare(a) >= 0; i-- {
+		if db.ranges[i].hi.Compare(a) >= 0 {
+			return db.ranges[i].info, true
 		}
 	}
 	return Info{}, false

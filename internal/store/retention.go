@@ -70,6 +70,12 @@ func (s *Store) Retain(ctx context.Context) (RetentionResult, error) {
 		// until someone or a quiet week closes them.
 		{&r.Mutes, `DELETE FROM audit_log WHERE ts < ?`, roll, true},
 		{&r.Mutes, `DELETE FROM findings WHERE status IN ('resolved', 'dismissed') AND last_seen < ?`, roll, true},
+		// A decision names a device and a destination: it follows the raw records it was made from.
+		{&r.Mutes, `DELETE FROM policy_decisions WHERE rowid IN (SELECT rowid FROM policy_decisions WHERE ts < ? LIMIT 5000)`, raw, true},
+		// A host agent's sockets are new rows for every ephemeral port: without
+		// this the table grows for as long as the agent runs.
+		{&r.Flows, `DELETE FROM agent_connections WHERE rowid IN (SELECT rowid FROM agent_connections WHERE last_seen < ? LIMIT ` + retainChunkSQL + `)`, raw, false},
+		{&r.Observations, `DELETE FROM agent_processes WHERE rowid IN (SELECT rowid FROM agent_processes WHERE last_seen < ? LIMIT 5000)`, raw, true},
 	}
 	// Each chunk takes the ingest lock for itself, so ingest runs between
 	// them. Deleting a fact ingest still has open is harmless: a fact past

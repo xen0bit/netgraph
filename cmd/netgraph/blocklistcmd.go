@@ -189,8 +189,8 @@ func runBlocklistUpdate(args []string) error {
 	var b backendFlags
 	b.register(fs)
 	id := fs.Int64("id", 0, "blocklist ID")
-	allowPrivate := fs.Bool("allow-private", false, "allow a private address (local feed)")
-	allowHTTP := fs.Bool("allow-http", false, "allow plain HTTP (local feed)")
+	allowPrivate := fs.Bool("allow-private", false, "allow a private address, for a feed on your own network (-db only)")
+	allowHTTP := fs.Bool("allow-http", false, "allow plain HTTP (-db only)")
 	if err := parseInterspersed(fs, args); err != nil {
 		return err
 	}
