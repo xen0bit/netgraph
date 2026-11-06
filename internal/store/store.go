@@ -27,6 +27,7 @@ import (
 	_ "modernc.org/sqlite" // registers the "sqlite" driver
 
 	"github.com/xen0bit/netgraph/internal/asn"
+	"github.com/xen0bit/netgraph/internal/geo"
 	"github.com/xen0bit/netgraph/internal/model"
 )
 
@@ -61,6 +62,8 @@ type Config struct {
 	// loaded). Ingest records each remote end's network with it, and
 	// EnrichASN fills in what was stored without one.
 	ASN func() *asn.DB
+	// Geo, when set, returns the current local geo table.
+	Geo func() *geo.DB
 	// Now is the clock; tests set it.
 	Now func() time.Time
 	// ArchiveDir, when set, keeps hourly rollups in files as they pass retention.
