@@ -202,7 +202,11 @@ func (s *Store) WhatIf(ctx context.Context, p *policy.Policy, f model.Filter, sc
 		out.Gaps = append(out.Gaps, fmt.Sprintf("lookup list was capped at %d; more names may be blocked", ff.Limit))
 	}
 	for _, q := range dns {
-		if !p.DNSBlocked(q.QName) {
+		blocked := p.DNSBlocked(q.QName)
+		if !blocked && matcher != nil {
+			_, blocked = matcher.MatchName(q.QName)
+		}
+		if !blocked {
 			continue
 		}
 		add(model.Impact{
