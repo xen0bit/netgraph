@@ -49,6 +49,7 @@ func TestParseTables(t *testing.T) {
 		row4(2, "0.0.0.0", 3389, "0.0.0.0", 0, 900),
 		row4(5, "10.0.0.2", 3389, "10.0.0.9", 51000, 900),
 		row4(5, "10.0.0.2", 50123, "203.0.113.9", 443, 4242),
+		row4(11, "10.0.0.2", 50122, "203.0.113.9", 443, 0), // TIME_WAIT: no program holds it
 	))
 	if err != nil {
 		t.Fatal(err)
@@ -57,7 +58,7 @@ func TestParseTables(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(v4) != 3 || v4[2].LocalIP != "10.0.0.2" || v4[2].LocalPort != 50123 || v4[2].RemoteIP != "203.0.113.9" ||
+	if len(v4) != 4 || v4[2].LocalIP != "10.0.0.2" || v4[2].LocalPort != 50123 || v4[2].RemoteIP != "203.0.113.9" ||
 		v4[2].RemotePort != 443 || v4[2].PID != 4242 || v4[2].State != "ESTABLISHED" || v4[0].State != "LISTEN" {
 		t.Fatalf("v4 = %+v", v4)
 	}

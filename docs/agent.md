@@ -109,9 +109,10 @@ Manage.
 ## Installing
 
 Every platform takes the same flags: `-server URL` (or `$NETGRAPH_SERVER`),
-`-token-file FILE` (or `$NETGRAPH_AGENT_TOKEN`), `-name` (default: the host
-name), `-ca-file` for a private CA, `-interval`, `-refresh`, and `-once`
-(one scan and upload, to test a setup). See [Deployment](deployment.md#host-agents)
+`-token-file FILE` (or `$NETGRAPH_AGENT_TOKEN`), `-name` (or
+`$NETGRAPH_AGENT_NAME`; default: the host name), `-ca-file` for a private
+CA, `-interval`, `-refresh`, and `-once` (one scan and upload, to test a
+setup). See [Deployment](deployment.md#host-agents)
 for where agents fit.
 
 ### Linux with systemd
@@ -144,6 +145,33 @@ NETGRAPH_AGENT_TOKEN=... NETGRAPH_SERVER=https://netgraph.lan:8443 \
 To name one container's programs instead, share that container's
 namespaces, as the lab does: `pid: "service:app"` and
 `network_mode: "service:app"`.
+
+When several containers share one network namespace (backends joined to a
+reverse proxy with `network_mode: service:proxy`, and a sidecar sensor
+capturing its `eth0`), each still has a PID namespace of its own. Join the
+network namespace and the host's PID namespace: the agent reads that
+namespace's sockets and finds their owners among all the host's processes,
+so one agent names every container's programs. `deploy/compose/sidecar.yml`
+has it as the `agent` profile:
+
+```yaml
+netgraph-agent:
+  image: ghcr.io/xen0bit/netgraph-agent:latest
+  network_mode: "service:proxy"
+  pid: host
+  cap_drop: [ALL]
+  cap_add: [SYS_PTRACE, DAC_READ_SEARCH]
+  read_only: true
+  environment:
+    NETGRAPH_AGENT_TOKEN: ...
+    NETGRAPH_AGENT_NAME: proxy
+  command: ["-server", "http://127.0.0.1:8443"]   # a server in the same namespace
+```
+
+Docker's default AppArmor profile lets it read other containers' processes,
+which run under the same profile, but not the host's own: a socket in the
+namespace held by a process outside any container (rare) stays unnamed,
+unless the agent runs with `security_opt: [apparmor=unconfined]`.
 
 ### macOS
 
