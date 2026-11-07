@@ -3,6 +3,8 @@ package agent
 import (
 	"context"
 	"fmt"
+	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -27,7 +29,49 @@ type Runner struct {
 	Scanner  Scanner
 	Enforcer Enforcer
 	Interval time.Duration
-	Logf     func(string, ...any)
+	// Refresh is how often a connection that hasn't changed is sent again,
+	// so the server knows it's still open (default a minute). The server
+	// matches the agent's sockets to the sensor's connections by time.
+	Refresh time.Duration
+	// Hello describes this host; Run fills in what is left empty.
+	Hello Hello
+	Logf  func(string, ...any)
+}
+
+func (r *Runner) defaults() {
+	if r.Interval <= 0 {
+		r.Interval = 10 * time.Second
+	}
+	if r.Refresh <= 0 {
+		r.Refresh = time.Minute
+	}
+	if r.Refresh < r.Interval {
+		r.Refresh = r.Interval
+	}
+	if r.Logf == nil {
+		r.Logf = func(string, ...any) {}
+	}
+}
+
+// hello registers the agent, saying what it can do.
+func (r *Runner) hello(ctx context.Context) error {
+	h := r.Hello
+	h.Name = r.Client.Agent
+	if h.OS == "" {
+		h.OS = runtime.GOOS
+	}
+	if h.Arch == "" {
+		h.Arch = runtime.GOARCH
+	}
+	h.Started = time.Now().UnixMilli()
+	h.Capabilities = slices.Clone(h.Capabilities)
+	if c, ok := r.Scanner.(interface{ Capabilities() []string }); ok {
+		h.Capabilities = append(h.Capabilities, c.Capabilities()...)
+	}
+	if r.Enforcer != nil {
+		h.Capabilities = append(h.Capabilities, "enforce")
+	}
+	return r.Client.Hello(ctx, &h)
 }
 
 // Run registers, then scans and uploads until ctx ends.
@@ -35,27 +79,27 @@ func (r *Runner) Run(ctx context.Context) error {
 	if r.Client == nil || r.Scanner == nil {
 		return fmt.Errorf("agent needs a client and scanner")
 	}
-	if r.Interval <= 0 {
-		r.Interval = 10 * time.Second
-	}
+	r.defaults()
 	if r.Enforcer != nil {
 		defer r.Enforcer.Close()
 	}
-	if r.Logf == nil {
-		r.Logf = func(string, ...any) {}
-	}
-	hello := &Hello{Name: r.Client.Agent, OS: "linux", Started: time.Now().UnixMilli()}
-	if r.Enforcer != nil {
-		hello.Capabilities = append(hello.Capabilities, "enforce")
-	}
-	hello.Capabilities = append(hello.Capabilities, "process-identity", "proc-sockets")
-	if err := r.Client.Hello(ctx, hello); err != nil {
-		return err
+	// Retry registration: an agent started before its server keeps trying.
+	for {
+		err := r.hello(ctx)
+		if err == nil {
+			break
+		}
+		r.Logf("register: %v", err)
+		if !sleep(ctx, r.Interval) {
+			return ctx.Err()
+		}
 	}
 	var lastPolicy *PolicyResponse
-	last := map[string]Connection{}
-	tick := time.NewTicker(r.Interval)
-	defer tick.Stop()
+	type sent struct {
+		c  Connection
+		at time.Time
+	}
+	last := map[string]sent{}
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -74,11 +118,8 @@ func (r *Runner) Run(ctx context.Context) error {
 			}
 			continue
 		}
-		actuals := make([]Actual, 0)
 		for i := range conns {
-			if lastPolicy != nil && lastPolicy.Policy != nil {
-				conns[i].Predicted, conns[i].Scope, conns[i].Rule, conns[i].Reason = predict(lastPolicy, conns[i])
-			}
+			conns[i].Predicted, conns[i].Scope, conns[i].Rule, conns[i].Reason = predict(lastPolicy, conns[i])
 			if conns[i].Actual == "" {
 				conns[i].Actual = "none"
 			}
@@ -92,27 +133,39 @@ func (r *Runner) Run(ctx context.Context) error {
 			}
 			applyActuals(conns, got)
 		}
+		// Send what changed, and what hasn't been sent for a while: an open
+		// connection's last_seen has to keep moving.
+		now := time.Now()
 		changed := make([]Connection, 0, len(conns))
 		changedKeys := map[string]bool{}
 		for _, c := range conns {
 			old, ok := last[c.Key]
-			if !ok || old.Predicted != c.Predicted || old.Actual != c.Actual || old.State != c.State || old.Stalled != c.Stalled {
+			if !ok || old.c.Predicted != c.Predicted || old.c.Actual != c.Actual || old.c.State != c.State ||
+				old.c.Stalled != c.Stalled || now.Sub(old.at) >= r.Refresh {
 				changed = append(changed, c)
 				changedKeys[c.Key] = true
 			}
 		}
+		actuals := make([]Actual, 0)
 		for _, a := range got {
 			if changedKeys[a.Key] {
 				actuals = append(actuals, a)
 			}
 		}
-		last = make(map[string]Connection, len(conns))
-		for _, c := range conns {
-			last[c.Key] = c
-		}
 		if err := r.Client.Send(ctx, &Batch{Processes: procs, Connections: changed, Actuals: actuals}); err != nil {
 			r.Logf("send: %v", err)
+			// Nothing was recorded: send it all again next time.
+			changedKeys = map[string]bool{}
 		}
+		next := make(map[string]sent, len(conns))
+		for _, c := range conns {
+			if changedKeys[c.Key] {
+				next[c.Key] = sent{c, now}
+			} else if old, ok := last[c.Key]; ok {
+				next[c.Key] = old
+			}
+		}
+		last = next
 		if !sleep(ctx, r.Interval) {
 			return ctx.Err()
 		}
@@ -181,21 +234,13 @@ func sleep(ctx context.Context, d time.Duration) bool {
 	}
 }
 
-// LocalZone is a placeholder for a future agent network-context integration.
-// Rules that select only by process or app match without it.
-const LocalZone = ""
-
 // Once registers and performs one scan/upload, for -once and tests.
 func (r *Runner) Once(ctx context.Context) error {
 	if r.Client == nil || r.Scanner == nil {
 		return fmt.Errorf("agent needs a client and scanner")
 	}
-	hello := &Hello{Name: r.Client.Agent, OS: "linux", Started: time.Now().UnixMilli()}
-	if r.Enforcer != nil {
-		hello.Capabilities = append(hello.Capabilities, "enforce")
-	}
-	hello.Capabilities = append(hello.Capabilities, "process-identity", "proc-sockets")
-	if err := r.Client.Hello(ctx, hello); err != nil {
+	r.defaults()
+	if err := r.hello(ctx); err != nil {
 		return err
 	}
 	pol, err := r.Client.Policy(ctx)

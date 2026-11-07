@@ -7,14 +7,14 @@ package linux
 
 import (
 	"bufio"
+	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"fmt"
-	"io"
+	"maps"
 	"net/netip"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -24,11 +24,8 @@ import (
 )
 
 const (
-	maxPIDs        = 20000
-	maxFDsPerPID   = 512
-	maxConnections = 5000
-	maxProcesses   = 2000
-	maxHashBytes   = 64 << 20
+	maxPIDs      = 20000
+	maxFDsPerPID = 512
 )
 
 // Scanner reads /proc. It is safe to reuse across scans; the executable hash
@@ -38,14 +35,9 @@ type Scanner struct {
 	// Cmdlines sends each process's full command line. Off, only the
 	// program's name is sent: arguments can hold passwords and tokens.
 	Cmdlines bool
-	mu       sync.Mutex
-	hash     map[string]hashEntry
-}
-
-type hashEntry struct {
-	size  int64
-	mtime int64
-	sha   string
+	hash     agent.Hasher
+	bootOnce sync.Once
+	boot     int64
 }
 
 type socket struct {
@@ -59,6 +51,9 @@ type socket struct {
 	inode      uint64
 }
 
+// Capabilities says what this scanner reports.
+func (s *Scanner) Capabilities() []string { return []string{"process-identity", "proc-sockets"} }
+
 // Scan returns the current process and connection snapshot.
 func (s *Scanner) Scan(ctx context.Context) ([]agent.Process, []agent.Connection, error) {
 	root := s.Root
@@ -71,103 +66,48 @@ func (s *Scanner) Scan(ctx context.Context) ([]agent.Process, []agent.Connection
 	}
 	inodes := socketInodes(root)
 	// A connection to a port this host listens on was accepted, not made.
-	type listen struct {
-		proto string
-		port  int
-	}
-	listeners := map[listen]bool{}
+	listeners := map[agent.Listener]bool{}
 	for _, so := range sockets {
 		if so.state == "LISTEN" {
-			listeners[listen{so.proto, so.localPort}] = true
+			listeners[agent.Listener{Proto: strings.TrimSuffix(so.proto, "6"), Port: so.localPort}] = true
 		}
 	}
 	now := time.Now().UnixMilli()
 	procCache := map[int]agent.Process{}
-	seenProc := map[int]bool{}
 	var out []agent.Connection
 	for _, so := range sockets {
 		if ctx.Err() != nil {
 			return nil, nil, ctx.Err()
 		}
-		if so.remoteIP == "" || (so.remoteIP == "0.0.0.0" || so.remoteIP == "::") {
+		as := agent.Socket{Proto: so.proto, LocalIP: so.localIP, LocalPort: so.localPort, RemoteIP: so.remoteIP,
+			RemotePort: so.remotePort, State: so.state, UID: so.uid, PID: inodes[so.inode], ID: strconv.FormatUint(so.inode, 10)}
+		if !as.Connected() {
 			continue
 		}
-		pid := 0
-		if p, ok := inodes[so.inode]; ok {
-			pid = p
+		p, ok := procCache[as.PID]
+		if !ok && as.PID > 0 {
+			p = readProcess(root, as.PID, s.bootTime(root))
+			p.Cmdline = agent.ClipCmdline(p.Cmdline, s.Cmdlines)
+			// Through /proc/<pid>/exe: from a container, the path names a
+			// file in the host's mount namespace, not this one.
+			p.SHA256, p.CodeID = s.hash.Hash(p.Path, filepath.Join(root, strconv.Itoa(as.PID), "exe"))
+			procCache[as.PID] = p
 		}
-		p, ok := procCache[pid]
-		if !ok && pid > 0 {
-			p = readProcess(root, pid)
-			if !s.Cmdlines {
-				p.Cmdline = argv0(p.Cmdline)
-			}
-			p.SHA256, p.CodeID = s.hashExe(p.Path)
-			procCache[pid] = p
-		}
-		if pid > 0 {
-			seenProc[pid] = true
-		}
-		dir := "out"
-		if listeners[listen{so.proto, so.localPort}] {
-			dir = "in"
-		}
-		if isLocal(so.remoteIP) || so.remoteIP == so.localIP {
-			dir = "local"
-		}
-		c := agent.Connection{
-			Key:   so.proto + "|" + so.localIP + ":" + strconv.Itoa(so.localPort) + "|" + so.remoteIP + ":" + strconv.Itoa(so.remotePort),
-			Proto: so.proto, LocalIP: so.localIP, LocalPort: so.localPort,
-			RemoteIP: so.remoteIP, RemotePort: so.remotePort, Direction: dir, State: so.state,
-			PID: pid, UID: so.uid, App: appName(p.Path, p.Cmdline), Path: p.Path,
-			CodeID: p.CodeID, SHA256: p.SHA256, FirstSeen: now, LastSeen: now,
-		}
-		out = append(out, c)
-		if len(out) >= maxConnections {
+		out = append(out, agent.NewConnection(as, listeners, p, now))
+		if len(out) >= agent.MaxConnections {
 			break
 		}
 	}
-	var procs []agent.Process
-	for pid := range seenProc {
-		p := procCache[pid]
-		if p.PID == 0 {
-			continue
+	procs := make([]agent.Process, 0, len(procCache))
+	for _, pid := range slices.Sorted(maps.Keys(procCache)) {
+		if p := procCache[pid]; p.PID != 0 {
+			procs = append(procs, p)
 		}
-		if p.SHA256 == "" {
-			p.SHA256, p.CodeID = s.hashExe(p.Path)
-		}
-		procs = append(procs, p)
-		if len(procs) >= maxProcesses {
+		if len(procs) >= agent.MaxProcesses {
 			break
 		}
 	}
 	return procs, out, nil
-}
-
-// argv0 is the program part of a command line, without its arguments.
-func argv0(cmdline string) string {
-	if i := strings.IndexByte(cmdline, ' '); i >= 0 {
-		return cmdline[:i]
-	}
-	return cmdline
-}
-
-func isLocal(ip string) bool {
-	a, err := netip.ParseAddr(ip)
-	if err != nil {
-		return false
-	}
-	return a.IsLoopback() || a.IsLinkLocalUnicast()
-}
-
-func appName(path, cmdline string) string {
-	if path != "" {
-		return filepath.Base(path)
-	}
-	if i := strings.IndexByte(cmdline, ' '); i > 0 {
-		return filepath.Base(cmdline[:i])
-	}
-	return cmdline
 }
 
 func readSockets(root string) ([]socket, error) {
@@ -319,14 +259,22 @@ func socketInodes(root string) map[uint64]int {
 	return out
 }
 
-func readProcess(root string, pid int) agent.Process {
+func readProcess(root string, pid int, boot int64) agent.Process {
 	base := filepath.Join(root, strconv.Itoa(pid))
 	p := agent.Process{PID: pid}
 	if b, err := os.ReadFile(filepath.Join(base, "stat")); err == nil {
-		fields := strings.Fields(string(b))
-		if len(fields) > 21 {
-			p.PPID, _ = strconv.Atoi(fields[3])
-			p.Start, _ = strconv.ParseInt(fields[21], 10, 64)
+		// The command, in parentheses, may hold spaces and parentheses:
+		// count fields from after its last ")".
+		if i := bytes.LastIndexByte(b, ')'); i >= 0 {
+			rest := strings.Fields(string(b[i+1:]))
+			if len(rest) > 19 {
+				p.PPID, _ = strconv.Atoi(rest[1])
+				// Clock ticks after boot, as Unix ms. USER_HZ is 100 on
+				// every architecture Linux exposes to userspace.
+				if ticks, err := strconv.ParseInt(rest[19], 10, 64); err == nil && boot > 0 {
+					p.Start = boot*1000 + ticks*10
+				}
+			}
 		}
 	}
 	if b, err := os.ReadFile(filepath.Join(base, "status")); err == nil {
@@ -350,36 +298,19 @@ func readProcess(root string, pid int) agent.Process {
 	return p
 }
 
-func (s *Scanner) hashExe(path string) (sha, codeID string) {
-	if path == "" {
-		return "", ""
-	}
-	st, err := os.Stat(path)
-	if err != nil || st.IsDir() || st.Size() > maxHashBytes {
-		return "", ""
-	}
-	key := path
-	s.mu.Lock()
-	if s.hash == nil {
-		s.hash = map[string]hashEntry{}
-	}
-	if e, ok := s.hash[key]; ok && e.size == st.Size() && e.mtime == st.ModTime().UnixMilli() {
-		s.mu.Unlock()
-		return e.sha, "sha256:" + e.sha
-	}
-	s.mu.Unlock()
-	f, err := os.Open(path)
-	if err != nil {
-		return "", ""
-	}
-	defer f.Close()
-	h := sha256.New()
-	if _, err := io.Copy(h, io.LimitReader(f, maxHashBytes)); err != nil {
-		return "", ""
-	}
-	sum := hex.EncodeToString(h.Sum(nil))
-	s.mu.Lock()
-	s.hash[key] = hashEntry{size: st.Size(), mtime: st.ModTime().UnixMilli(), sha: sum}
-	s.mu.Unlock()
-	return sum, "sha256:" + sum
+// bootTime is the btime line of /proc/stat: when the system booted, in Unix
+// seconds.
+func (s *Scanner) bootTime(root string) int64 {
+	s.bootOnce.Do(func() {
+		b, err := os.ReadFile(filepath.Join(root, "stat"))
+		if err != nil {
+			return
+		}
+		for _, line := range strings.Split(string(b), "\n") {
+			if v, ok := strings.CutPrefix(line, "btime "); ok {
+				s.boot, _ = strconv.ParseInt(strings.TrimSpace(v), 10, 64)
+			}
+		}
+	})
+	return s.boot
 }
