@@ -32,6 +32,10 @@ func tupleKey(proto, local string, lport int, remote string, rport int) string {
 // reported: a socket with the same protocol and both ends, seen while the
 // connection was open. A LAN connection can be matched at both ends.
 //
+// A socket that names no program (one whose owner the agent couldn't read,
+// or that no program held any more, as agents up to 0.1.9 sent TIME_WAIT
+// sockets) is skipped: it would shadow an earlier sighting that did.
+//
 // The sensor and the agent must see the same addresses: a host behind NAT
 // from the sensor (a VM, a container network) keeps its own, and matches
 // nothing.
@@ -59,7 +63,7 @@ func (s *Store) setProcesses(ctx context.Context, flows []model.Flow, from, to i
 	for chunk := range slices.Chunk(slices.Sorted(maps.Keys(ips)), 500) {
 		cond, arg := inList("remote_ip", chunk)
 		rows, err := s.r.QueryContext(ctx, `SELECT proto, local_ip, local_port, remote_ip, remote_port, agent, app, pid, first_seen, last_seen
-			FROM agent_connections WHERE `+cond+` AND last_seen >= ? AND first_seen < ?`, arg, from-agentSlack, to+agentSlack)
+			FROM agent_connections WHERE `+cond+` AND app != '' AND last_seen >= ? AND first_seen < ?`, arg, from-agentSlack, to+agentSlack)
 		if err != nil {
 			return err
 		}

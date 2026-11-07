@@ -9,6 +9,11 @@
 #
 # The images, ports and tokens can be overridden from the environment; the
 # lab test runs this file with locally built images.
+#
+# To name the program behind each connection too, add the host agent:
+#
+#   export NETGRAPH_AGENT_TOKEN=$(openssl rand -hex 32)
+#   docker compose -f sidecar.yml --profile agent up -d
 services:
   app:
     image: ${APP_IMAGE:-nginx:stable-alpine}
@@ -27,11 +32,31 @@ services:
     depends_on: [app, netgraph]
     restart: unless-stopped
 
+  # The optional host agent (--profile agent): app's network namespace for its
+  # sockets, the host's PID namespace to find their owners in, whichever
+  # container they run in. It reads /proc only; SYS_PTRACE is for other
+  # processes' /proc/<pid>/fd, never to attach.
+  netgraph-agent:
+    image: ${NETGRAPH_AGENT_IMAGE:-ghcr.io/xen0bit/netgraph-agent:latest}
+    profiles: [agent]
+    network_mode: "service:app"
+    pid: host
+    cap_drop: [ALL]
+    cap_add: [SYS_PTRACE, DAC_READ_SEARCH]
+    read_only: true
+    environment:
+      NETGRAPH_AGENT_TOKEN: ${NETGRAPH_AGENT_TOKEN:-}
+      NETGRAPH_AGENT_NAME: app
+    command: ["-server", "http://netgraph:8443"]
+    depends_on: [app, netgraph]
+    restart: unless-stopped
+
   netgraph:
     image: ${NETGRAPH_IMAGE:-ghcr.io/xen0bit/netgraph:latest}
     environment:
       NETGRAPH_TOKEN: ${NETGRAPH_TOKEN:?set NETGRAPH_TOKEN}
       NETGRAPH_READ_TOKEN: ${NETGRAPH_READ_TOKEN:-}
+      NETGRAPH_AGENT_TOKEN: ${NETGRAPH_AGENT_TOKEN:-} # empty: the agent endpoints are off
     volumes: [netgraph-data:/data]
     ports: ["${NETGRAPH_PORT:-8443}:8443"]
     restart: unless-stopped

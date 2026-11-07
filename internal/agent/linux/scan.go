@@ -81,7 +81,10 @@ func (s *Scanner) Scan(ctx context.Context) ([]agent.Process, []agent.Connection
 		}
 		as := agent.Socket{Proto: so.proto, LocalIP: so.localIP, LocalPort: so.localPort, RemoteIP: so.remoteIP,
 			RemotePort: so.remotePort, State: so.state, UID: so.uid, PID: inodes[so.inode], ID: strconv.FormatUint(so.inode, 10)}
-		if !as.Connected() {
+		// Inode 0 is a socket no program holds any more (TIME_WAIT, an
+		// orphaned FIN_WAIT2): the kernel finishes it alone. It names no
+		// program, and would shadow the sighting that did.
+		if !as.Connected() || so.inode == 0 {
 			continue
 		}
 		p, ok := procCache[as.PID]

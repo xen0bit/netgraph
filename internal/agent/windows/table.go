@@ -102,7 +102,9 @@ func Connections(sockets []agent.Socket, procs map[int]agent.Process, now int64)
 	}
 	var out []agent.Connection
 	for _, s := range sockets {
-		if !s.Connected() || s.State == "LISTEN" {
+		// PID 0 owns what no program holds any more (TIME_WAIT): it names
+		// no program, and would shadow the sighting that did.
+		if !s.Connected() || s.State == "LISTEN" || s.PID == 0 {
 			continue
 		}
 		out = append(out, agent.NewConnection(s, listening, procs[s.PID], now))

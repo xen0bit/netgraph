@@ -37,7 +37,7 @@ func run(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("netgraph-agent", flag.ContinueOnError)
 	server := fs.String("server", envOr("NETGRAPH_SERVER", "http://127.0.0.1:8443"), "server URL; $NETGRAPH_SERVER")
 	tokenFile := fs.String("token-file", "", "file holding the agent token; $NETGRAPH_AGENT_TOKEN")
-	name := fs.String("name", "", "agent name; default hostname")
+	name := fs.String("name", os.Getenv("NETGRAPH_AGENT_NAME"), "agent name; default hostname; $NETGRAPH_AGENT_NAME")
 	interval := fs.Duration("interval", 10*time.Second, "scan interval")
 	once := fs.Bool("once", false, "scan and upload once, then exit")
 	refresh := fs.Duration("refresh", time.Minute, "how often an unchanged open connection is sent again")

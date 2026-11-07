@@ -17,6 +17,7 @@ func TestScannerFixture(t *testing.T) {
 	tcp := `  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
    0: 0100007F:1F90 0900A8C0:01BB 01 00000000:00000000 00:00000000 00000000  1000        0 999 1 0 0 0 0
    1: 00000000:0016 00000000:0000 0A 00000000:00000000 00:00000000 00000000     0        0 100 1 0 0 0 0
+   2: 0100007F:1F91 0900A8C0:01BB 06 00000000:00000000 03:00000F9F 00000000     0        0 0 3 0000000000000000
 `
 	if err := os.WriteFile(filepath.Join(root, "net", "tcp"), []byte(tcp), 0o644); err != nil {
 		t.Fatal(err)
@@ -62,6 +63,7 @@ func TestScannerFixture(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Not the TIME_WAIT socket (inode 0): no program holds it.
 	if len(conns) != 2 {
 		t.Fatalf("connections = %+v", conns)
 	}

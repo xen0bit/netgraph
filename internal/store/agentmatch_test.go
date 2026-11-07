@@ -23,6 +23,11 @@ func TestAgentNamesFlowProcesses(t *testing.T) {
 				Direction: "in", PID: 80, App: "nginx", Path: "/usr/sbin/nginx", CodeID: "sha256:aa", FirstSeen: ms(5 * time.Second), LastSeen: ms(5 * time.Second)},
 			{Key: "out", Proto: "tcp", LocalIP: webIP.String(), LocalPort: 40001, RemoteIP: upstream.String(), RemotePort: 443,
 				Direction: "out", PID: 99, App: "python3", FirstSeen: ms(10 * time.Second), LastSeen: ms(70 * time.Second)},
+			// python3's socket again after it closed, in TIME_WAIT, as agents
+			// up to 0.1.9 sent it: no program, and seen later. It must not
+			// shadow the sighting that named python3.
+			{Key: "out|0", Proto: "tcp", LocalIP: webIP.String(), LocalPort: 40001, RemoteIP: upstream.String(), RemotePort: 443,
+				Direction: "out", State: "TIME_WAIT", FirstSeen: ms(80 * time.Second), LastSeen: ms(140 * time.Second)},
 			// The scanner's tuple, but long before it connected.
 			{Key: "old", Proto: "tcp", LocalIP: webIP.String(), LocalPort: 80, RemoteIP: scanner.String(), RemotePort: 40000,
 				App: "old-httpd", FirstSeen: ms(-time.Hour), LastSeen: ms(-time.Hour + time.Minute)},

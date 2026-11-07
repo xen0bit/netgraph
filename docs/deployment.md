@@ -677,6 +677,11 @@ Some connections lose it on the way in:
 - **Loopback**: traffic between processes in the namespace (a proxy and
   a backend sharing it, the sensor shipping to a server there) never
   reaches `eth0`.
+- **Programs**: which program behind the namespace made or accepted a
+  connection (the proxy, or a backend's outbound call) takes a host agent
+  in the same network namespace, with the host's PID namespace
+  ([Host agent](agent.md#linux-in-docker); `sidecar.yml`'s `agent`
+  profile).
 
 The capture interface's own MAC is the sensor's device, tagged `router`
 and named after the sensor (`-name`).
