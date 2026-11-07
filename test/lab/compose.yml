@@ -11,6 +11,9 @@
 #   nas .102 ────┼── router .10 ═════════════════┘
 #   tv .103 ─────┤   └ sensor (shares the router's network namespace)
 #   server .20 ──┘── mgmt (published on 127.0.0.1) ── chrome
+#
+# laptop-agent is netgraph-agent in the laptop's PID and network namespaces,
+# as on a real laptop: it names the programs behind the laptop's connections.
 name: netgraph-lab
 
 x-lab: &lab
@@ -78,6 +81,7 @@ services:
     environment:
       NETGRAPH_TOKEN: lab-ingest-token
       NETGRAPH_READ_TOKEN: lab-read-token
+      NETGRAPH_AGENT_TOKEN: lab-agent-token
     volumes: [data:/data]
     networks:
       lan:
@@ -103,6 +107,20 @@ services:
       lan:
         ipv4_address: 10.77.0.100
         mac_address: "3c:22:fb:00:00:64"   # Apple
+
+  laptop-agent:
+    build: { context: ../.., dockerfile: deploy/Dockerfile, target: agent }
+    image: netgraph-agent:lab
+    pid: "service:laptop"
+    network_mode: "service:laptop"
+    cap_drop: [ALL]
+    cap_add: [SYS_PTRACE, DAC_READ_SEARCH]
+    read_only: true
+    environment:
+      NETGRAPH_AGENT_TOKEN: lab-agent-token
+    command: ["-server", "http://10.77.0.20:8443", "-name", "lab-laptop-agent", "-interval", "1s", "-refresh", "5s"]
+    depends_on: [laptop, server]
+    restart: on-failure
 
   printer:
     <<: *lab

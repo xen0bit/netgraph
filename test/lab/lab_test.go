@@ -73,7 +73,7 @@ func TestLab(t *testing.T) {
 	compose(t, "build")
 	t.Cleanup(func() {
 		if t.Failed() {
-			for _, svc := range []string{"sensor", "server", "router", "laptop"} {
+			for _, svc := range []string{"sensor", "server", "router", "laptop", "laptop-agent"} {
 				out, _ := composeErr("logs", "--tail", "40", svc)
 				t.Logf("--- %s logs ---\n%s", svc, out)
 			}
@@ -116,6 +116,7 @@ func TestLab(t *testing.T) {
 	t.Run("flows", func(t *testing.T) { checkFlows(t, c, whole) })
 	t.Run("windows", func(t *testing.T) { checkWindows(t, c, steps) })
 	t.Run("graph", func(t *testing.T) { checkGraph(t, c, whole) })
+	t.Run("agent", func(t *testing.T) { checkAgent(t, c, whole) })
 	t.Run("policy", func(t *testing.T) { checkPolicy(t, c, whole) })
 	pcap := filepath.Join(t.TempDir(), "lab.pcap")
 	compose(t, "cp", "tap:/shared/lab.pcap", pcap)
@@ -290,7 +291,10 @@ func checkWindows(t *testing.T, c *apiclient.Client, steps map[string]int64) {
 
 func checkGraph(t *testing.T, c *apiclient.Client, f model.Filter) {
 	ctx := context.Background()
-	g, err := c.Graph(ctx, f, model.DefaultGraphOptions)
+	// Without the agent's programs drawn between (checkAgent has those).
+	o := model.DefaultGraphOptions
+	o.Processes = false
+	g, err := c.Graph(ctx, f, o)
 	if err != nil {
 		t.Fatal(err)
 	}

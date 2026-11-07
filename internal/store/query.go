@@ -496,6 +496,9 @@ func (s *Store) flowsWhere(ctx context.Context, f model.Filter, extra string, ex
 		return nil, err
 	}
 	s.setGeo(out)
+	if err := s.setProcesses(ctx, out, from, to); err != nil {
+		return nil, err
+	}
 	for i, id := range devIDs {
 		if id != 0 {
 			out[i].Device = model.EntityID(model.KindDevice, macs[id])
@@ -661,6 +664,8 @@ func (s *Store) flowsHourly(ctx context.Context, f model.Filter, from, to int64)
 		return nil, err
 	}
 	s.setGeo(out)
+	// No setProcesses: a rollup keeps no client port to match an agent's
+	// socket by.
 	for i, id := range devIDs {
 		if id != 0 {
 			out[i].Device = model.EntityID(model.KindDevice, macs[id])

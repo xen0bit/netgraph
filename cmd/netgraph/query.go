@@ -334,6 +334,11 @@ func flowsTable(fl []model.Flow) *table {
 	if networks {
 		head = slices.Insert(head, 4, "NETWORK")
 	}
+	// The program behind the device's end, when a host agent named it.
+	procs := slices.ContainsFunc(fl, func(f model.Flow) bool { return f.Process != "" })
+	if procs {
+		head = slices.Insert(head, 3, "PROCESS")
+	}
 	t := &table{head: head}
 	for _, f := range fl {
 		state := f.State
@@ -345,6 +350,9 @@ func flowsTable(fl []model.Flow) *table {
 			model.FormatBytes(f.BytesOut), model.FormatBytes(f.BytesIn), clock(f.LastSeen)}
 		if networks {
 			row = slices.Insert(row, 4, clip(f.Network(), 32))
+		}
+		if procs {
+			row = slices.Insert(row, 3, clip(f.Process, 20))
 		}
 		t.add(row...)
 	}

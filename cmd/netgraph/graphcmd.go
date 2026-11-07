@@ -25,6 +25,7 @@ func runGraph(args []string) error {
 	dns := fs.Bool("dns", true, "draw lookups and answers")
 	sites := fs.Bool("sites", true, "group names by registrable domain: one time.com node for www.time.com, auth.time.com, ...")
 	anomalies := fs.Bool("anomalies", true, "outline what medium and high anomalies are about")
+	processes := fs.Bool("processes", true, "draw the programs a host agent named between a device and what they connected to")
 	networks := fs.Bool("networks", true, "one node per network (AS) for addresses with a known one: clients from outside, unnamed destinations; needs the server's -asn-file")
 	layout := fs.String("layout", "elk", "layout engine: elk or dagre")
 	theme := fs.String("theme", "light", "SVG theme: light or dark")
@@ -42,7 +43,7 @@ func runGraph(args []string) error {
 		return err
 	}
 	defer closeFn()
-	g, err := be.Graph(ctx(), filter, model.GraphOptions{Collapse: *collapse, TopN: *top, Identity: *identity, DNS: *dns, Sites: *sites, Anomalies: *anomalies, Networks: *networks})
+	g, err := be.Graph(ctx(), filter, model.GraphOptions{Collapse: *collapse, TopN: *top, Identity: *identity, DNS: *dns, Sites: *sites, Anomalies: *anomalies, Networks: *networks, Processes: *processes})
 	if err != nil {
 		return err
 	}

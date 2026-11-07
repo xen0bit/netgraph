@@ -41,7 +41,7 @@ func runServe(args []string) error {
 	readTokenFile := fs.String("read-token-file", etcCredential("read.token"), "file holding the token for queries and the web UI (default $NETGRAPH_READ_TOKEN; under the systemd unit, /etc/netgraph/read.token; none: open)")
 	operatorTokenFile := fs.String("operator-token-file", "", "file holding the token for changing things: labels, notes, findings. With this set, the read token only reads; default $NETGRAPH_OPERATOR_TOKEN")
 	adminTokenFile := fs.String("admin-token-file", "", "file holding the token for the audit log and test notifications; default $NETGRAPH_ADMIN_TOKEN")
-	agentTokenFile := fs.String("agent-token-file", "", "file holding the optional host agent's token; default $NETGRAPH_AGENT_TOKEN")
+	agentTokenFile := fs.String("agent-token-file", etcCredential("agent.token"), "file holding the optional host agents' token (default $NETGRAPH_AGENT_TOKEN; under the systemd unit, /etc/netgraph/agent.token; none: agents off)")
 	trustedProxy := fs.String("trusted-proxy", "", "comma-separated addresses or CIDRs of a reverse proxy to trust to say who someone is")
 	proxyHeader := fs.String("proxy-user-header", "Remote-User", "the header a -trusted-proxy names the user in")
 	proxyRoles := fs.String("proxy-roles-file", "", `with -trusted-proxy, lines of "user role" (viewer, operator or admin); "* role" sets the default, otherwise viewer`)

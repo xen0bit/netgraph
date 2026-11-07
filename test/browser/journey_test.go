@@ -31,7 +31,10 @@ import (
 	"github.com/chromedp/chromedp/kb"
 )
 
-const readToken = "journey-read-token"
+const (
+	readToken  = "journey-read-token"
+	agentToken = "journey-agent-token"
+)
 
 var (
 	baseURL string
@@ -75,6 +78,10 @@ func run(m *testing.M) (int, error) {
 	if err := os.WriteFile(tok, []byte(readToken), 0o600); err != nil {
 		return 0, err
 	}
+	agentTok := filepath.Join(dir, "agent.token")
+	if err := os.WriteFile(agentTok, []byte(agentToken), 0o600); err != nil {
+		return 0, err
+	}
 	sensor = filepath.Join(dir, "netgraph-sensor")
 	replay = pcap
 	for _, args := range [][]string{
@@ -95,7 +102,7 @@ func run(m *testing.M) (int, error) {
 	}
 	addr := l.Addr().String()
 	l.Close()
-	srv := exec.Command(bin, "serve", "-db", db, "-listen", addr, "-no-auth", "-read-token-file", tok, "-web-dir", filepath.Join(root, "web/dist"))
+	srv := exec.Command(bin, "serve", "-db", db, "-listen", addr, "-no-auth", "-read-token-file", tok, "-agent-token-file", agentTok, "-web-dir", filepath.Join(root, "web/dist"))
 	srv.Stdout, srv.Stderr = os.Stderr, os.Stderr
 	if err := srv.Start(); err != nil {
 		return 0, err
