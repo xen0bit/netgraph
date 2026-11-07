@@ -16,3 +16,10 @@ ARG TARGETPLATFORM
 COPY $TARGETPLATFORM/netgraph-sensor /usr/bin/netgraph-sensor
 ENTRYPOINT ["/usr/bin/netgraph-sensor"]
 CMD ["run"]
+
+# The host agent: see deploy/Dockerfile and deploy/compose/agent.yml.
+FROM alpine:3.22 AS agent
+ARG TARGETPLATFORM
+RUN apk add --no-cache nftables
+COPY $TARGETPLATFORM/netgraph-agent /usr/bin/netgraph-agent
+ENTRYPOINT ["/usr/bin/netgraph-agent"]

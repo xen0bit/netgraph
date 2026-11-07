@@ -1,0 +1,29 @@
+# netgraph-agent on a Linux host, in a container: it names the program behind
+# each of this host's connections, so the graph draws device ──runs──▶ program
+# ──connects──▶ destination wherever a sensor saw the same connection.
+#
+#   NETGRAPH_AGENT_TOKEN=... NETGRAPH_SERVER=https://netgraph.lan:8443 docker compose -f agent.yml up -d
+#
+# The server takes the same token from -agent-token-file or $NETGRAPH_AGENT_TOKEN.
+#
+# It must see the host's processes and sockets, not its own: the host's PID
+# namespace (/proc/<pid>) and network namespace (/proc/net/tcp). Reading
+# another user's /proc/<pid>/fd and exe needs CAP_SYS_PTRACE (read access
+# only: it never attaches) and CAP_DAC_READ_SEARCH. Programs in other
+# containers have network namespaces of their own: their sockets show up
+# only as Docker's port forwarding on this one.
+services:
+  netgraph-agent:
+    image: ${NETGRAPH_AGENT_IMAGE:-ghcr.io/xen0bit/netgraph-agent:latest}
+    pid: host
+    network_mode: host
+    cap_drop: [ALL]
+    cap_add: [SYS_PTRACE, DAC_READ_SEARCH]
+    # Enforcement (-enforce=nftables -apply) changes the host's firewall, in
+    # its own table only: add NET_ADMIN above and the flags below.
+    read_only: true
+    environment:
+      NETGRAPH_AGENT_TOKEN: ${NETGRAPH_AGENT_TOKEN:?set NETGRAPH_AGENT_TOKEN}
+      NETGRAPH_SERVER: ${NETGRAPH_SERVER:?set NETGRAPH_SERVER}
+    # Named after the host (network_mode: host shares its hostname); -name to choose.
+    restart: unless-stopped

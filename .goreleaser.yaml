@@ -3,13 +3,15 @@
 #   goreleaser check                       # validate this file
 #   goreleaser release --snapshot --clean  # full pipeline dry-run (no publish)
 #
-# Two binaries, because they are two different deployments:
+# Three binaries, because they are three different deployments:
 #
 #   netgraph-sensor  goes on the router. Tiny, stateless, every Linux arch Go
 #                    supports that a router plausibly runs — mips included.
 #   netgraph         the persistence host: SQLite, API, TUI, web UI. SQLite is
 #                    modernc.org/sqlite, which is CGO-free but does not build
 #                    for mips, so the server matrix leaves mips out.
+#   netgraph-agent   optional, on the hosts whose programs you want named:
+#                    Linux (with opt-in nftables enforcement), macOS, Windows.
 #
 # Everything is CGO_ENABLED=0, so every target cross-compiles from one runner.
 
@@ -73,6 +75,27 @@ builds:
       - -trimpath
     ldflags: *ldflags
 
+  - id: netgraph-agent
+    binary: netgraph-agent
+    main: ./cmd/netgraph-agent
+    env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64, arm, riscv64, "386"]
+    goarm: ["7"]
+    go386: [softfloat]
+    ignore:
+      - { goos: darwin, goarch: arm }
+      - { goos: darwin, goarch: riscv64 }
+      - { goos: darwin, goarch: "386" }
+      - { goos: windows, goarch: arm }
+      - { goos: windows, goarch: riscv64 }
+      - { goos: windows, goarch: "386" }
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    flags:
+      - -trimpath
+    ldflags: *ldflags
+
 archives:
   # Names carry the ARM variant: armv5/6/7 are all GOARCH=arm, and without
   # it they collide on one file name (pwrq hit this as a 422 on upload).
@@ -101,6 +124,27 @@ archives:
     files:
       - README.md
       - LICENSE*
+
+  - id: netgraph-agent
+    ids: [netgraph-agent]
+    formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    name_template: >-
+      netgraph-agent_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    files:
+      - README.md
+      - LICENSE*
+      - docs/agent.md
+      # Service definitions to drop in by hand: systemd, launchd.
+      - src: packaging/netgraph-agent.service
+        dst: packaging/netgraph-agent.service
+      - src: packaging/agent.conf.example
+        dst: packaging/agent.conf.example
+      - src: packaging/macos/*
+        dst: packaging/macos
 
 nfpms:
   - id: netgraph-sensor
@@ -148,6 +192,32 @@ nfpms:
         dst: /etc/netgraph/server.conf
         type: config|noreplace
 
+  - id: netgraph-agent
+    package_name: netgraph-agent
+    ids: [netgraph-agent]
+    vendor: netgraph
+    homepage: https://github.com/xen0bit/netgraph
+    maintainer: Remy <21974988+xen0bit@users.noreply.github.com>
+    description: |-
+      netgraph host agent (optional).
+      Names the program behind each of this host's connections and predicts
+      the netgraph server's policy for it. Enforcement through a dedicated
+      nftables table is opt-in.
+    license: MIT
+    formats: [deb, rpm, apk]
+    bindir: /usr/bin
+    # Only for -enforce=nftables; observing needs nothing else.
+    suggests: [nftables]
+    scripts:
+      postinstall: packaging/postinstall.sh
+      postremove: packaging/postremove.sh
+    contents:
+      - src: packaging/netgraph-agent.service
+        dst: /usr/lib/systemd/system/netgraph-agent.service
+      - src: packaging/agent.conf.example
+        dst: /etc/netgraph/agent.conf
+        type: config|noreplace
+
 dockers_v2:
   - id: netgraph
     ids: [netgraph]
@@ -163,6 +233,14 @@ dockers_v2:
     tags: ["{{ .Version }}", "{{ if not .Prerelease }}latest{{ end }}"]
     platforms: [linux/amd64, linux/arm64, linux/arm/v7]
     flags: ["--target=sensor"]
+
+  - id: netgraph-agent
+    ids: [netgraph-agent]
+    dockerfile: deploy/goreleaser.Dockerfile
+    images: ["ghcr.io/xen0bit/netgraph-agent"]
+    tags: ["{{ .Version }}", "{{ if not .Prerelease }}latest{{ end }}"]
+    platforms: [linux/amd64, linux/arm64, linux/arm/v7]
+    flags: ["--target=agent"]
 
 checksum:
   name_template: "checksums.txt"

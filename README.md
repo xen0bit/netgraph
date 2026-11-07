@@ -36,8 +36,9 @@ the browser.
 |---|---|---|
 | `netgraph-sensor` | the router: any Linux, x86, ARM v5–v8, MIPS (softfloat), RISC-V, ppc64le | captures with pure-Go AF_PACKET, decodes (Ethernet or monitor-mode 802.11), ships compressed batches; about 8 MB, about 45 MiB of memory at 64k tracked connections |
 | `netgraph` | any host: Linux, macOS, Windows | ingest, SQLite storage and correlation, `query`, `graph`, `tui`, the web UI, `import` for pcap files |
+| `netgraph-agent` (optional) | laptops and servers: Linux, macOS, Windows | names the program behind each connection, so the graph draws device → program → destination; on Linux, opt-in nftables enforcement of host-wide deny rules |
 
-Both are static binaries with no C dependencies.
+All are static binaries with no C dependencies.
 
 ## Quick start
 
@@ -81,6 +82,8 @@ netgraph graph -from -1h -o window.svg
 - [Using netgraph](docs/usage.md): the CLI, the TUI and the web UI.
 - [Concepts](docs/concepts.md): the data model, how time windows work,
   how names and devices are correlated, and what netgraph cannot see.
+- [Host agent](docs/agent.md): naming the programs behind connections, on
+  Linux, macOS and Windows.
 - [HTTP API](docs/api.md): query endpoints and the sensor event format.
 - [Development](docs/development.md): building, testing, fuzzing, the
   Docker lab, releases.

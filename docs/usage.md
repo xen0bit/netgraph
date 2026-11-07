@@ -117,7 +117,8 @@ Add `-o json` or `-o csv` to any `query` for scripts.
 
 `graph` options: `-collapse` (default on; fold addresses into the names
 they were reached by), `-sites` (default on; one node per registrable
-domain), `-networks` (default on; with an ASN table, one node per network
+domain), `-processes` (default on; the programs a [host agent](agent.md)
+named, between a device and what they connected to), `-networks` (default on; with an ASN table, one node per network
 for clients from outside and unnamed destinations), `-anomalies` (default
 on; outline what medium and high anomalies are about), `-top N` (each device's busiest N destinations, `-1` for all; the
 rest are one "N more destinations" node), `-dns` (lookups and answers,
@@ -343,6 +344,11 @@ Incidents, Insights, What-if), **Wi-Fi** and **Settings** (General, Sensors).
   Right-click anything for what you can do with it, including asking what
   would happen if an edge were blocked. Double-click "N more destinations" or a
   site to open it in place, and again to close it.
+
+  With a [host agent](agent.md) on a device, **Processes** (on by default)
+  draws the programs it named between the device and what they connected to;
+  click one for its connections, PIDs and executable. The Connections table
+  shows the program under the device's end too.
 
   With the map focused, arrow keys move between nodes, Enter opens one, `+` and
   `-` zoom and `0` fits. A list of the same nodes follows the map for screen

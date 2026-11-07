@@ -3,7 +3,8 @@
 A deployment is one **server** and one or more **sensors**. The server
 holds the database, the API and the UIs. Each sensor captures somewhere on
 the network and posts what it sees to the server. Sensors keep nothing on
-disk.
+disk. Optional **host agents** on laptops and servers name the program
+behind each connection a sensor saw ([below](#host-agents)).
 
 ```
  router                                   server
@@ -61,6 +62,7 @@ netgraph serve -db /var/lib/netgraph/netgraph.db -listen :8443
 | `-notify-file` | `$NETGRAPH_NOTIFY` | notification channels, one URL a line: see [Notifications](#notifications) |
 | `-operator-token-file` | `$NETGRAPH_OPERATOR_TOKEN` | the token for changing things. With this or an admin token set, the read token only reads: see [Who can do what](#who-can-do-what) |
 | `-admin-token-file` | `$NETGRAPH_ADMIN_TOKEN` | the token for the audit log and test notifications |
+| `-agent-token-file` | `$NETGRAPH_AGENT_TOKEN`; unit: `agent.token` | the token [host agents](#host-agents) use; none: the agent endpoints are off |
 | `-trusted-proxy` | | addresses or CIDRs of a reverse proxy to trust to say who someone is |
 | `-proxy-user-header` | `Remote-User` | the header it says so in |
 | `-proxy-roles-file` | | lines of `user role`; `* role` sets the default, otherwise `viewer` |
@@ -627,16 +629,17 @@ files can stay root-only. The server package installs `netgraph.service`
 the same way: its token goes in `/etc/netgraph/server.token`, and the
 database lives in `/var/lib/netgraph`. It also loads these optional files,
 when present, and `netgraph serve` uses each without a flag: a read token in
-`/etc/netgraph/read.token`, Wi-Fi keys in `/etc/netgraph/wifi.keys`, and a
+`/etc/netgraph/read.token`, an agent token in `/etc/netgraph/agent.token`, Wi-Fi keys in `/etc/netgraph/wifi.keys`, and a
 certificate and key in `/etc/netgraph/tls.crt` and `/etc/netgraph/tls.key`.
 Do not point flags in `server.conf` at `${CREDENTIALS_DIRECTORY}`: systemd
 does not expand variables inside an `EnvironmentFile`.
 
 ## Docker
 
-Images: `ghcr.io/xen0bit/netgraph` (server, with the web UI) and
-`ghcr.io/xen0bit/netgraph-sensor`. The compose files in `deploy/compose/`
-cover the three shapes:
+Images: `ghcr.io/xen0bit/netgraph` (server, with the web UI),
+`ghcr.io/xen0bit/netgraph-sensor` and `ghcr.io/xen0bit/netgraph-agent`
+(the optional host agent). The compose files in `deploy/compose/`
+cover the shapes:
 
 - **`sidecar.yml`**: the sensor shares an application container's network
   namespace (`network_mode: service:app`) and sees its traffic. The lab
@@ -644,6 +647,8 @@ cover the three shapes:
 - **`host.yml`**: the sensor on a router or Linux host, with
   `network_mode: host`.
 - **`server.yml`**: the server on its own.
+- **`agent.yml`**: the host agent on a Docker host, with the host's PID and
+  network namespaces ([Host agents](#host-agents)).
 
 The sensor needs only `cap_add: [NET_RAW]`; the examples drop everything
 else and run read-only.
@@ -676,6 +681,43 @@ Some connections lose it on the way in:
 The capture interface's own MAC is the sensor's device, tagged `router`
 and named after the sensor (`-name`).
 
+## Host agents
+
+A sensor sees which device connected where; it can't see which program on
+the device did. `netgraph-agent` can, on Linux, macOS and Windows: it reports
+each socket and its process to the server, which matches them to the
+sensor's connections by protocol, addresses and ports. The graph then draws
+`laptop ──runs──▶ firefox ──connects──▶ example.com`, and the tables carry a
+process column. On Linux it can also enforce host-wide deny rules in a
+dedicated nftables table, off unless asked for.
+
+```
+ laptop                                    server
+ ┌──────────────────────┐  HTTP(S) POST    ┌───────────────────────────────┐
+ │ netgraph-agent       │  JSON, agent     │ netgraph serve                │
+ │  /proc, lsof or      │  token           │  -agent-token-file ...        │
+ │  GetExtendedTcpTable │ ───────────────► │  matches sockets to the       │
+ └──────────────────────┘                  │  sensor's connections         │
+                                           └───────────────────────────────┘
+```
+
+1. Give the server an agent token: `-agent-token-file /etc/netgraph/agent.token`
+   or `$NETGRAPH_AGENT_TOKEN` (the server's systemd unit reads
+   `/etc/netgraph/agent.token` when it exists). Agents use it, and nothing
+   else does.
+2. Install the agent on each host: the `netgraph-agent` package (systemd),
+   `deploy/compose/agent.yml` (Docker, `pid: host` and `network_mode: host`),
+   the launchd plist in the macOS archive, or a Windows service. [Host
+   agent](agent.md#installing) has each.
+3. Check it under Manage → Host agents, or with `netgraph agents list`.
+
+Matching needs the sensor and the agent to see the same addresses: an agent
+behind NAT from the sensor (a VM on a NAT network, a container on a bridge)
+names nothing until it runs where the sensor's addresses are. Connections
+shorter than the agent's scan interval (10 s) are missed, and hour-precision
+windows, which come from rollups, name no programs. See
+[Host agent](agent.md#programs-in-the-graph-and-the-tables).
+
 ## Several sensors
 
 Any number of sensors can ship to one server, each with its own `-name`
@@ -692,6 +734,8 @@ bridge) record them twice, so capture each segment once.
 
 - Always set `NETGRAPH_TOKEN`. Without it (`-no-auth`) anyone who can reach
   the port can write to your database.
+- Give host agents their own token (`NETGRAPH_AGENT_TOKEN`); it can report
+  processes and read the active policy, nothing else.
 - Set `NETGRAPH_READ_TOKEN` unless the server listens on a trusted network
   only. The data includes every device's browsing destinations.
 - Use `-tls-cert`/`-tls-key`, or a reverse proxy, when sensors ship across

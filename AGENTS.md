@@ -29,8 +29,11 @@ that are easy to break.
 - **Other sources run on the server** (`internal/sources`): decoders bound what they read
   and have `Fuzz*` targets, as the sensor's do, and UDP exports need an allow-list. Conntrack is the exception, since only the router's
   kernel knows it: `internal/conntrack` runs in the sensor, off by default.
-- **The host agent is not the sensor.** `cmd/netgraph-agent` is Linux only and optional; nothing
-  else depends on it. It sends a program's name, not its arguments, unless `-cmdlines`.
+- **The host agent is not the sensor.** `cmd/netgraph-agent` is optional (Linux, macOS, Windows);
+  nothing else depends on it. It sends a program's name, not its arguments, unless `-cmdlines`,
+  and runs nothing the server names. Each platform's parsers build everywhere, have `Fuzz*`
+  targets, and are tested on Linux CI. A program is matched to a sensor's connection by
+  protocol, both addresses and ports, while it was open: never guessed from a name or a time alone.
 - **The sensor persists nothing.** It writes no file: no database, spool,
   cache or keyring on disk. Its only inputs from disk are the token and CA
   files it is pointed at. (The kernel's connection table comes over netlink.)

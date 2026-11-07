@@ -1,0 +1,6 @@
+# /etc/netgraph/agent.conf — read by netgraph-agent.service.
+# The agent token goes in /etc/netgraph/agent.token (root-only is fine); the
+# server reads the same token from -agent-token-file or $NETGRAPH_AGENT_TOKEN.
+# Add -cmdlines to send full command lines (arguments can hold secrets), and
+# -enforce=nftables [-apply] to enforce host-wide deny rules (see docs/agent.md).
+NETGRAPH_AGENT_ARGS=-server https://netgraph.lan:8443

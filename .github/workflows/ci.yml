@@ -60,6 +60,9 @@ jobs:
           go vet ./...
           go vet -tags lab ./test/lab/...
           go vet -tags browser ./test/browser/...
+          # The host agent's macOS and Windows code only builds there.
+          GOOS=darwin go vet ./cmd/netgraph-agent/... ./internal/agent/...
+          GOOS=windows go vet ./cmd/netgraph-agent/... ./internal/agent/...
       - uses: golangci/golangci-lint-action@v9
         with:
           version: v2.14.0
@@ -76,6 +79,31 @@ jobs:
       - run: |
           go install golang.org/x/vuln/cmd/govulncheck@latest
           "$(go env GOPATH)/bin/govulncheck" ./...
+
+  # The host agent on the platforms nobody builds the rest for: each
+  # scanner's live test opens a connection and expects to see it, with its
+  # own process, from the real lsof/ps (macOS) or TCP table (Windows).
+  agent:
+    name: agent (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27"
+          cache: true
+      - run: go test -v ./internal/agent/... ./cmd/netgraph-agent/...
+      - name: Build and run
+        shell: bash
+        run: |
+          CGO_ENABLED=0 go build -o netgraph-agent-bin ./cmd/netgraph-agent
+          ./netgraph-agent-bin -version
+          # No token: it must refuse to start rather than run open.
+          if NETGRAPH_AGENT_TOKEN= ./netgraph-agent-bin -once; then exit 1; fi
 
   # Real journeys through the web UI, in the Chrome the runner ships with.
   browser:
