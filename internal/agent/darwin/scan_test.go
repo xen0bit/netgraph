@@ -74,6 +74,9 @@ func TestScan(t *testing.T) {
 		t.Fatal(err)
 	}
 	unixPath := strings.HasPrefix(exe, "/")
+	if !unixPath {
+		exe = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" // nothing to hash, but a macOS path
+	}
 	ps := "  501     1     0 /usr/sbin/sshd\n  777     1   501 " + exe + "\n"
 	args := "  501 /usr/sbin/sshd -D\n  777 " + exe + " --type=renderer --secret=x\n"
 	var ran []string
