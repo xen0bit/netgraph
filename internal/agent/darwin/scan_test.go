@@ -67,10 +67,13 @@ func TestParseLsof(t *testing.T) {
 }
 
 func TestScan(t *testing.T) {
-	exe := filepath.Join(t.TempDir(), "Google Chrome")
+	// ps on macOS prints absolute Unix paths; on another test host the temp
+	// dir is whatever it is, so hashing is only checked where it is one.
+	exe := filepath.ToSlash(filepath.Join(t.TempDir(), "Google Chrome"))
 	if err := os.WriteFile(exe, []byte("chrome"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+	unixPath := strings.HasPrefix(exe, "/")
 	ps := "  501     1     0 /usr/sbin/sshd\n  777     1   501 " + exe + "\n"
 	args := "  501 /usr/sbin/sshd -D\n  777 " + exe + " --type=renderer --secret=x\n"
 	var ran []string
@@ -92,7 +95,7 @@ func TestScan(t *testing.T) {
 	if len(conns) != 3 {
 		t.Fatalf("connections = %+v", conns)
 	}
-	if conns[0].Direction != "in" || conns[0].App != "sshd" || conns[1].App != "Google Chrome" || conns[1].Direction != "out" || conns[1].SHA256 == "" {
+	if conns[0].Direction != "in" || conns[0].App != "sshd" || conns[1].App != "Google Chrome" || conns[1].Direction != "out" || (unixPath && conns[1].SHA256 == "") {
 		t.Fatalf("connections = %+v", conns)
 	}
 	if len(procs) != 2 {
