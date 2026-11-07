@@ -1,0 +1,182 @@
+package agent
+
+import (
+	"crypto/sha256"
+	"encoding/hex"
+	"io"
+	"net/netip"
+	"os"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"sync"
+)
+
+// What every platform's scanner bounds a snapshot to.
+const (
+	MaxConnections = 5000
+	MaxProcesses   = 2000
+	MaxCmdline     = 2048
+	maxHashBytes   = 64 << 20
+)
+
+// Socket is one socket as a platform reports it, before it becomes a
+// Connection. Addresses may be IPv4-mapped IPv6 (a dual-stack socket's view
+// of an IPv4 peer); NewConnection unmaps them, as the sensor records them.
+type Socket struct {
+	Proto      string // tcp or udp; a trailing 6 is dropped
+	LocalIP    string
+	LocalPort  int
+	RemoteIP   string
+	RemotePort int
+	State      string
+	UID        int
+	PID        int
+	// ID tells two sockets with the same addresses apart over time, such as
+	// an inode; it is part of the key, so a reused port is a new connection.
+	ID string
+}
+
+// Connected reports whether the socket has a peer: a listener or an unbound
+// UDP socket has none, and is not a connection.
+func (s Socket) Connected() bool {
+	a, err := netip.ParseAddr(s.RemoteIP)
+	return err == nil && !a.IsUnspecified() && s.RemotePort != 0
+}
+
+// Unmap writes an address the way the sensor and the policy do: an
+// IPv4-mapped IPv6 address as plain IPv4. Anything unparsable is returned
+// as it is.
+func Unmap(ip string) string {
+	a, err := netip.ParseAddr(ip)
+	if err != nil {
+		return ip
+	}
+	return a.Unmap().WithZone("").String()
+}
+
+// Listener is a protocol and local port something listens on.
+type Listener struct {
+	Proto string
+	Port  int
+}
+
+// NewConnection turns a socket into a connection: unmapped addresses, the
+// direction (in when a local listener has its port, local when the peer is
+// this host or link-local), and a key unique to the socket.
+func NewConnection(s Socket, listening map[Listener]bool, p Process, now int64) Connection {
+	proto := strings.TrimSuffix(strings.ToLower(s.Proto), "6")
+	local, remote := Unmap(s.LocalIP), Unmap(s.RemoteIP)
+	dir := "out"
+	if listening[Listener{proto, s.LocalPort}] {
+		dir = "in"
+	}
+	if r, err := netip.ParseAddr(remote); err == nil && (r.IsLoopback() || r.IsLinkLocalUnicast() || remote == local) {
+		dir = "local"
+	}
+	key := proto + "|" + local + ":" + strconv.Itoa(s.LocalPort) + "|" + remote + ":" + strconv.Itoa(s.RemotePort)
+	if s.ID != "" {
+		key += "|" + s.ID
+	}
+	uid := s.UID
+	if uid == 0 {
+		uid = p.UID
+	}
+	return Connection{
+		Key: key, Proto: proto, LocalIP: local, LocalPort: s.LocalPort, RemoteIP: remote, RemotePort: s.RemotePort,
+		Direction: dir, State: s.State, PID: s.PID, UID: uid, App: AppName(p.Path, p.Cmdline), Path: p.Path,
+		CodeID: p.CodeID, SHA256: p.SHA256, FirstSeen: now, LastSeen: now,
+	}
+}
+
+// Argv0 is the program part of a command line, without its arguments.
+func Argv0(cmdline string) string {
+	if i := strings.IndexByte(cmdline, ' '); i >= 0 {
+		return cmdline[:i]
+	}
+	return cmdline
+}
+
+// AppName is the name a policy's process selector matches: the executable's
+// base name, else the command's.
+func AppName(path, cmdline string) string {
+	base := func(p string) string {
+		// Windows paths use backslashes, whatever the agent runs on.
+		if i := strings.LastIndexAny(p, `/\`); i >= 0 {
+			return p[i+1:]
+		}
+		return p
+	}
+	if path != "" {
+		return base(path)
+	}
+	return base(Argv0(cmdline))
+}
+
+// ClipCmdline bounds a command line, and keeps only the program unless full
+// command lines were asked for: arguments can hold passwords and tokens.
+func ClipCmdline(cmdline string, full bool) string {
+	if !full {
+		cmdline = Argv0(cmdline)
+	}
+	if len(cmdline) > MaxCmdline {
+		cmdline = cmdline[:MaxCmdline]
+	}
+	return cmdline
+}
+
+// Hasher hashes executables, at most 64 MiB of each, and caches the result
+// until the file's size or modification time changes.
+type Hasher struct {
+	mu    sync.Mutex
+	cache map[string]hashEntry
+}
+
+type hashEntry struct {
+	size  int64
+	mtime int64
+	sha   string
+}
+
+// Hash returns the SHA-256 of the file at open, and its code ID. key names
+// the executable for the cache (its path); open is what is read, which may
+// differ: on Linux /proc/<pid>/exe reaches the running binary even from
+// another mount namespace, or after it was replaced on disk.
+func (h *Hasher) Hash(key, open string) (sha, codeID string) {
+	if open == "" {
+		return "", ""
+	}
+	if key == "" {
+		key = open
+	}
+	st, err := os.Stat(open)
+	if err != nil || !st.Mode().IsRegular() || st.Size() > maxHashBytes {
+		return "", ""
+	}
+	h.mu.Lock()
+	if h.cache == nil {
+		h.cache = map[string]hashEntry{}
+	}
+	e, ok := h.cache[key]
+	h.mu.Unlock()
+	if ok && e.size == st.Size() && e.mtime == st.ModTime().UnixMilli() {
+		return e.sha, "sha256:" + e.sha
+	}
+	f, err := os.Open(filepath.Clean(open))
+	if err != nil {
+		return "", ""
+	}
+	defer f.Close()
+	d := sha256.New()
+	if _, err := io.Copy(d, io.LimitReader(f, maxHashBytes)); err != nil {
+		return "", ""
+	}
+	sum := hex.EncodeToString(d.Sum(nil))
+	h.mu.Lock()
+	if len(h.cache) > 4*MaxProcesses {
+		h.cache = map[string]hashEntry{} // binaries come and go; don't keep every one forever
+	}
+	h.cache[key] = hashEntry{size: st.Size(), mtime: st.ModTime().UnixMilli(), sha: sum}
+	h.mu.Unlock()
+	return sum, "sha256:" + sum
+}

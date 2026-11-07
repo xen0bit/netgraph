@@ -416,6 +416,14 @@ type Flow struct {
 	PktsOut     uint64 `json:"pkts_out"`
 	PktsIn      uint64 `json:"pkts_in"`
 	Connections int    `json:"connections,omitempty"` // rows from hourly rollups, which keep no packet counts
+	// The program on the device's end, when a host agent there reported the
+	// socket (exact precision only: rollups keep no ports to match by).
+	Process string `json:"process,omitempty"`
+	PID     int    `json:"pid,omitempty"`
+	Agent   string `json:"agent,omitempty"`
+	// The program on the other end of a LAN connection, when that host runs
+	// an agent too.
+	PeerProcess string `json:"peer_process,omitempty"`
 }
 
 // Inbound reports whether the connection was opened from outside to the
@@ -542,6 +550,7 @@ const (
 	RelProbes      = "probes"      // device -> ssid
 	RelAssociates  = "associates"  // device -> access point
 	RelHandshake   = "handshake"   // device -> access point (4-way handshake)
+	RelRuns        = "runs"        // device -> process (graph only, from a host agent)
 )
 
 // Entity kinds; an entity ID is "<kind>:<key>".
@@ -564,7 +573,9 @@ const (
 	// destinations of one device that Top N summarised.
 	KindSite   = "site"
 	KindSensor = "sensor"
-	KindOther  = "other"
+	// A program on a device, keyed "<device id>/<name>", from a host agent.
+	KindProcess = "process"
+	KindOther   = "other"
 )
 
 // EntityID builds an entity ID.
@@ -617,10 +628,14 @@ type GraphOptions struct {
 	// "AS24940 HETZNER-AS · DE", not an address each. Named destinations
 	// stay names.
 	Networks bool `json:"networks"`
+	// Processes draws the programs a host agent named between a device and
+	// what they connected to: device ──runs──▶ firefox ──connects──▶ name.
+	// Devices without an agent are drawn as before.
+	Processes bool `json:"processes"`
 }
 
 // DefaultGraphOptions is what the UIs start from.
-var DefaultGraphOptions = GraphOptions{Collapse: true, TopN: 15, DNS: true, Sites: true, Anomalies: true, Networks: true}
+var DefaultGraphOptions = GraphOptions{Collapse: true, TopN: 15, DNS: true, Sites: true, Anomalies: true, Networks: true, Processes: true}
 
 // Values encodes graph options as query parameters.
 func (o GraphOptions) Values() map[string]string {
@@ -631,7 +646,7 @@ func (o GraphOptions) Values() map[string]string {
 		return "0"
 	}
 	return map[string]string{"collapse": b(o.Collapse), "identity": b(o.Identity), "dns": b(o.DNS), "sites": b(o.Sites),
-		"anomalies": b(o.Anomalies), "networks": b(o.Networks), "top": strconv.Itoa(o.TopN)}
+		"anomalies": b(o.Anomalies), "networks": b(o.Networks), "processes": b(o.Processes), "top": strconv.Itoa(o.TopN)}
 }
 
 // ParseGraphOptions decodes query parameters over DefaultGraphOptions.
@@ -652,6 +667,7 @@ func ParseGraphOptions(q url.Values) GraphOptions {
 	o.Sites = flag("sites", o.Sites)
 	o.Anomalies = flag("anomalies", o.Anomalies)
 	o.Networks = flag("networks", o.Networks)
+	o.Processes = flag("processes", o.Processes)
 	if n, err := strconv.Atoi(q.Get("top")); err == nil {
 		o.TopN = n
 	}

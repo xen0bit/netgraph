@@ -1,7 +1,7 @@
 # netgraph — Makefile
 #
 #   make            # list targets (same as `make help`)
-#   make build      # build netgraph and netgraph-sensor into ./bin
+#   make build      # build netgraph, netgraph-sensor and netgraph-agent into ./bin
 #   make test       # run the test suite with the race detector
 #   make cross      # compile every release architecture (no tests)
 #   make lab        # run the isolated docker-compose lab test
@@ -32,14 +32,16 @@ SENSOR_TARGETS := amd64: arm64: arm:GOARM=5 arm:GOARM=6 arm:GOARM=7 386:GO386=so
 # goos/goarch for the server. No mips: modernc.org/sqlite does not build there.
 SERVER_TARGETS := linux/amd64 linux/arm64 linux/arm linux/riscv64 \
 	darwin/amd64 darwin/arm64 windows/amd64 windows/arm64
-# The optional host agent: Linux only, built by make build-agent, not released yet.
-AGENT_TARGETS := amd64 arm64 arm riscv64
+# goos/goarch for the optional host agent: Linux (enforcement too), macOS and
+# Windows (observe only). Keep in sync with .goreleaser.yaml.
+AGENT_TARGETS := linux/amd64 linux/arm64 linux/arm linux/riscv64 linux/386 \
+	darwin/amd64 darwin/arm64 windows/amd64 windows/arm64
 
 .DEFAULT_GOAL := help
 
-## build: build netgraph and netgraph-sensor into ./bin
+## build: build netgraph, netgraph-sensor and netgraph-agent into ./bin
 .PHONY: build
-build: build-server build-sensor
+build: build-server build-sensor build-agent
 
 ## build-server: build ./bin/netgraph
 .PHONY: build-server
@@ -56,10 +58,10 @@ build-sensor:
 build-ech:
 	CGO_ENABLED=0 GOOS=linux $(GO) build -tags experimental -trimpath -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/netgraph-ech ./cmd/netgraph-ech
 
-## build-agent: build ./bin/netgraph-agent (Linux host agent)
+## build-agent: build ./bin/netgraph-agent (host agent; GOOS=darwin or windows for those)
 .PHONY: build-agent
 build-agent:
-	CGO_ENABLED=0 GOOS=linux $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/netgraph-agent ./cmd/netgraph-agent
+	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/netgraph-agent$(if $(filter windows,$(GOOS)),.exe) ./cmd/netgraph-agent
 
 ## web.build: assemble the web UI into web/dist
 .PHONY: web.build
@@ -157,17 +159,18 @@ cross:
 		if env CGO_ENABLED=0 GOOS=$${t%/*} GOARCH=$${t#*/} $(GO) build -o /dev/null ./cmd/netgraph; \
 		then echo "ok    server $$t"; else echo "FAIL  server $$t"; fail=1; fi; \
 	done; \
-	for a in $(AGENT_TARGETS); do \
-		if env CGO_ENABLED=0 GOOS=linux GOARCH=$$a $(GO) build -o /dev/null ./cmd/netgraph-agent; \
-		then echo "ok    agent linux/$$a"; else echo "FAIL  agent linux/$$a"; fail=1; fi; \
+	for t in $(AGENT_TARGETS); do \
+		if env CGO_ENABLED=0 GOOS=$${t%/*} GOARCH=$${t#*/} GO386=softfloat $(GO) build -o /dev/null ./cmd/netgraph-agent; \
+		then echo "ok    agent $$t"; else echo "FAIL  agent $$t"; fail=1; fi; \
 	done; \
 	exit $$fail
 
-## docker: build the sensor and server images locally
+## docker: build the sensor, server and agent images locally
 .PHONY: docker
 docker:
 	docker build -f deploy/Dockerfile --target sensor -t netgraph-sensor:dev .
 	docker build -f deploy/Dockerfile --target server -t netgraph:dev .
+	docker build -f deploy/Dockerfile --target agent -t netgraph-agent:dev .
 
 ## browser: drive the web UI in a local headless Chrome (no Docker)
 .PHONY: browser

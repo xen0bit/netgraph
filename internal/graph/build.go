@@ -55,6 +55,7 @@ type builder struct {
 	devices map[string]*model.Device
 	names   map[string]map[string]bool // site node -> the names it stands for
 	addrs   map[string]map[string]bool // name node -> the addresses in its "addresses"
+	procs   map[string][]string        // device -> its process nodes
 }
 
 // Build assembles a graph.
@@ -85,7 +86,7 @@ func Build(in Input, o model.GraphOptions) *model.Graph {
 		o.TopN = 15
 	}
 	b := &builder{in: in, o: o, nodes: map[string]*model.Node{}, edges: map[string]*model.Edge{}, spans: map[string][][2]int64{},
-		names: map[string]map[string]bool{}, addrs: map[string]map[string]bool{}}
+		names: map[string]map[string]bool{}, addrs: map[string]map[string]bool{}, procs: map[string][]string{}}
 	g := &model.Graph{FromMS: in.FromMS, ToMS: in.ToMS, Precision: in.Precision, Truncated: in.Truncated}
 
 	devices := map[string]*model.Device{}
@@ -193,7 +194,11 @@ func Build(in Input, o model.GraphOptions) *model.Graph {
 					keptDest[d.key] = true
 				}
 				for _, fl := range d.flows {
-					b.connect(src, d.key, fl)
+					from, to := b.process(src, fl.Process, fl), d.key
+					if strings.HasPrefix(to, model.KindDevice+":") {
+						to = b.process(to, fl.PeerProcess, fl)
+					}
+					b.connect(from, to, fl)
 				}
 			}
 		}
@@ -575,7 +580,21 @@ func (b *builder) foldLookups() {
 	for _, k := range b.eord {
 		e := b.edges[k]
 		if e.Rel == model.RelQueried {
-			if c, ok := b.edges[e.From+"\x00"+e.To+"\x00"+model.RelConnects]; ok {
+			c, ok := b.edges[e.From+"\x00"+e.To+"\x00"+model.RelConnects]
+			if !ok {
+				// Drawn through a program: fold the lookup into its edge,
+				// when exactly one of the device's programs went there.
+				var found []*model.Edge
+				for _, p := range b.procs[e.From] {
+					if pc, ok := b.edges[p+"\x00"+e.To+"\x00"+model.RelConnects]; ok {
+						found = append(found, pc)
+					}
+				}
+				if len(found) == 1 {
+					c, ok = found[0], true
+				}
+			}
+			if ok {
 				if c.Attrs == nil {
 					c.Attrs = map[string]string{}
 				}
@@ -673,6 +692,48 @@ func (b *builder) span(e *model.Edge, first, last int64) {
 		e.FirstSeen = first
 	}
 	e.LastSeen = max(e.LastSeen, last)
+}
+
+// ProcessID is the graph node of a program on a device.
+func ProcessID(device, name string) string {
+	return model.EntityID(model.KindProcess, device+"/"+name)
+}
+
+// process returns the node a device's end of a connection is drawn from: the
+// program a host agent named, hung off the device by a runs edge, or the
+// device itself. The device keeps its totals either way.
+func (b *builder) process(dev, name string, fl model.Flow) string {
+	if !b.o.Processes || name == "" || !strings.HasPrefix(dev, model.KindDevice+":") {
+		return dev
+	}
+	b.sourceNode(dev, b.devices)
+	d := b.nodes[dev]
+	id := ProcessID(dev, name)
+	if !b.hasNode(id) {
+		b.procs[dev] = append(b.procs[dev], id)
+	}
+	n := b.node(id, model.KindProcess, name, "")
+	n.Local = true
+	setAttr(n, "device", dev)
+	// Which end this device is: the flow's own device sent BytesOut.
+	sent, got := fl.BytesOut, fl.BytesIn
+	if dev != fl.Device {
+		sent, got = fl.BytesIn, fl.BytesOut
+	} else {
+		setAttr(d, "agent", fl.Agent)
+		setAttr(n, "agent", fl.Agent)
+		if fl.PID > 0 && n.Sub == "" {
+			n.Sub = "pid " + strconv.Itoa(fl.PID)
+		}
+	}
+	d.BytesOut += sent
+	d.BytesIn += got
+	e := b.edge(dev, id, model.RelRuns)
+	e.Count += b.conns(fl)
+	e.BytesOut += sent
+	e.BytesIn += got
+	b.span(e, fl.FirstSeen, fl.LastSeen)
+	return id
 }
 
 // connect draws one connection between a device (src) and its peer (dst):

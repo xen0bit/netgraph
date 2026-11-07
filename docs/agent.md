@@ -1,69 +1,171 @@
-# Optional host agent
+# Host agent (optional)
 
-`netgraph-agent` is an optional Linux host component. It is separate from
-`netgraph-sensor`: the sensor stays a small, portable, stateless passive
-capture agent, while the host agent identifies local processes and may
-enforce the active policy on the machine it runs on.
+`netgraph-agent` runs on the hosts whose programs you want named. A sensor
+sees that the laptop connected to `api.example.com`; the agent on the laptop
+says it was `python3`. The server matches the two, and the graph draws
 
-The server works unchanged when no agent is connected. An agent failure never
-affects sensors or stored network history.
+```
+laptop ──runs──▶ python3 ──connects──▶ api.example.com
+```
+
+It is separate from `netgraph-sensor`: the sensor stays a small, portable,
+stateless passive capture on the router, and nothing depends on an agent.
+The server works unchanged with none connected, and an agent failure never
+affects sensors or stored history.
+
+| Platform | Sockets from | Processes from | Enforcement |
+|---|---|---|---|
+| Linux (amd64, arm64, armv7, riscv64, 386) | `/proc/net/{tcp,tcp6,udp,udp6}` and `/proc/<pid>/fd` | `/proc/<pid>` | opt-in, nftables |
+| macOS (amd64, arm64) | `lsof -nP -iTCP -iUDP` | `ps` | none: observe only |
+| Windows (amd64, arm64) | `GetExtendedTcpTable` (TCP only) | the process list and `QueryFullProcessImageName` | none: observe only |
+
+All builds are static and cgo-free. macOS runs the system's `/usr/sbin/lsof`
+and `/bin/ps` by absolute path with fixed arguments; Windows calls iphlpapi.
 
 ## What it reports
 
-- process identity: PID, PPID, UID, executable path, the program's name (the
-  full command line only with `-cmdlines`: arguments can hold passwords and
-  tokens), executable SHA-256 (`sha256:...` as the current code ID);
-- process-attributed TCP/UDP sockets from `/proc/net/{tcp,tcp6,udp,udp6}`,
-  mapped to PIDs through `/proc/<pid>/fd` socket inodes;
-- a stable connection key (protocol, local address/port, remote
-  address/port);
-- the policy prediction (`allow`, `deny`, `ask`) and, when enforcement is on,
-  the actual result.
+- process identity: PID, parent PID, UID (not on Windows), executable path,
+  start time, and the program's name. The full command line only with
+  `-cmdlines` (Linux and macOS), since arguments can hold passwords and
+  tokens;
+- the executable's SHA-256 (`sha256:...` as its code ID): at most 64 MiB
+  read, cached until the file's size or mtime changes. On Linux it reads
+  `/proc/<pid>/exe`, which reaches the running binary even from a container
+  or after the file was replaced;
+- each connected TCP socket, and on Linux and macOS each UDP socket
+  connected to one peer (many QUIC and DNS clients use unconnected sockets,
+  which name no peer and are skipped), with its owning process and direction
+  (`out`, `in` when a local listener has the port, `local`). IPv4 peers of
+  dual-stack sockets are reported as IPv4, as the sensor sees them;
+- the policy prediction (`allow`, `deny`, `ask`) and, when enforcing, what
+  was done.
 
-It does **not** send packet payloads, credentials, DNS queries or file
-contents. The executable hash reads at most 64 MiB and is cached until the
-file's size or mtime changes.
+It does **not** send packet payloads, credentials, DNS queries, file
+contents or environment variables, and it never runs a command, path or URL
+from the server.
+
+The agent polls (`-interval`, 10 s by default), so a connection that opens
+and closes between two scans is never seen. An open connection that hasn't
+changed is sent again every `-refresh` (a minute), which keeps its
+`last_seen` current for matching.
+
+## Programs in the graph and the tables
+
+The server matches each of the sensor's connections to an agent's socket
+with the same protocol, addresses and ports, seen while the connection was
+open (two minutes of slack either way). Then:
+
+- **Graph**: with **Processes** (default on; `processes=0` in the API,
+  `-processes=false` for `netgraph graph`) a device's connections hang off
+  the programs that made or accepted them, joined by `runs` edges; the
+  device keeps its totals. A lookup is folded into the program's edge when
+  one program went there. A LAN connection between two hosts with agents is
+  drawn program to program. Connections no agent named stay on the device.
+- **Process details**: click a program on the map for its connections, PIDs,
+  executable path and code ID (`GET /api/v1/entity?id=process:<device>/<name>`).
+- **Flows**: the Connections table, the device panel, `netgraph query flows`
+  and `GET /api/v1/flows` carry `process`, `pid`, `agent` and, for a LAN
+  connection whose other end runs an agent, `peer_process`.
+
+The sensor and the agent must see the same addresses:
+
+- a host behind NAT from the sensor's point of view (a VM on a NAT network,
+  a container on a bridge network) keeps addresses of its own, so nothing
+  matches. Run the agent where the sensor's addresses are: on the VM itself,
+  or in the container's network namespace (as in `test/lab`);
+- programs inside containers have their own network namespace. An agent on
+  the Docker host sees their published ports only as `docker-proxy` (or not
+  at all, with NAT); run one in the container's namespace to name them;
+- hour-precision windows (longer than raw retention) come from rollups that
+  keep no ports, so they name no programs.
 
 ## Server setup
 
-Use a dedicated agent token, separate from the sensor ingest and read tokens:
+Give agents a token of their own, separate from the sensors' and readers':
 
 ```sh
-export NETGRAPH_AGENT_TOKEN="$(openssl rand -hex 32)"
-netgraph serve -agent-token-file /etc/netgraph/agent.token ...
+openssl rand -hex 32 | sudo tee /etc/netgraph/agent.token >/dev/null
+netgraph serve -agent-token-file /etc/netgraph/agent.token ...   # or $NETGRAPH_AGENT_TOKEN
 ```
 
-The agent endpoints are under `/api/v1/agent/` and require that token:
+Without one, the agent endpoints are off.
 
-| Endpoint | |
+| Endpoint (agent token) | |
 |---|---|
-| `POST /api/v1/agent/hello` | register host, OS, version and capabilities |
+| `POST /api/v1/agent/hello` | register host, OS, architecture, version and capabilities |
 | `POST /api/v1/agent/events` | processes, connections and actual results |
 | `GET /api/v1/agent/policy` | active policy, profile and mode |
 
-Read-only inventory is available to normal readers:
-
-| Endpoint | |
+| Endpoint (read token) | |
 |---|---|
-| `GET /api/v1/agents` | agents with process/connection counts |
+| `GET /api/v1/agents` | agents with process and connection counts |
 | `GET /api/v1/agents/{name}/processes` | latest processes |
 | `GET /api/v1/agents/{name}/connections` | latest attributed connections |
 
 CLI: `netgraph agents list`, `netgraph agents processes -agent NAME`,
-`netgraph agents connections -agent NAME`.
+`netgraph agents connections -agent NAME`. The web UI lists agents under
+Manage.
 
-## Running
+## Installing
+
+Every platform takes the same flags: `-server URL` (or `$NETGRAPH_SERVER`),
+`-token-file FILE` (or `$NETGRAPH_AGENT_TOKEN`), `-name` (default: the host
+name), `-ca-file` for a private CA, `-interval`, `-refresh`, and `-once`
+(one scan and upload, to test a setup). See [Deployment](deployment.md#host-agents)
+for where agents fit.
+
+### Linux with systemd
+
+The `.deb`, `.rpm` and `.apk` packages install `netgraph-agent.service` and
+`/etc/netgraph/agent.conf`:
 
 ```sh
-sudo NETGRAPH_AGENT_TOKEN=... netgraph-agent \
-  -server https://netgraph.example:8443 \
-  -name laptop \
-  -interval 10s
+sudo apt install ./netgraph-agent_<version>_linux_amd64.deb
+sudoedit /etc/netgraph/agent.conf     # NETGRAPH_AGENT_ARGS=-server https://netgraph.lan:8443
+echo "<agent token>" | sudo tee /etc/netgraph/agent.token >/dev/null && sudo chmod 600 /etc/netgraph/agent.token
+sudo systemctl enable --now netgraph-agent
 ```
 
-`-once` performs one scan and upload, useful for testing.
+The unit runs as a dynamic, unprivileged user with `CAP_SYS_PTRACE` (read
+access to other users' `/proc/<pid>/fd`; it never attaches to a process) and
+`CAP_DAC_READ_SEARCH`. Without them it sees only its own processes.
 
-## Enforcement
+### Linux in Docker
+
+`deploy/compose/agent.yml` runs `ghcr.io/xen0bit/netgraph-agent` with the
+host's PID and network namespaces (`pid: host`, `network_mode: host`), which
+is what lets it see the host's processes and sockets:
+
+```sh
+NETGRAPH_AGENT_TOKEN=... NETGRAPH_SERVER=https://netgraph.lan:8443 \
+  docker compose -f deploy/compose/agent.yml up -d
+```
+
+To name one container's programs instead, share that container's
+namespaces, as the lab does: `pid: "service:app"` and
+`network_mode: "service:app"`.
+
+### macOS
+
+The darwin archive carries `packaging/macos/netgraph-agent.plist`, a launchd
+daemon; its comments have the install commands. As root it sees every user's
+sockets.
+
+### Windows
+
+Run it as a service from an elevated prompt (elevated, it can read almost
+every process's image):
+
+```bat
+mkdir "C:\ProgramData\netgraph"
+rem put the agent token in C:\ProgramData\netgraph\agent.token, readable by Administrators only
+sc.exe create netgraph-agent start= auto binPath= "\"C:\Program Files\netgraph\netgraph-agent.exe\" -server https://netgraph.lan:8443 -token-file C:\ProgramData\netgraph\agent.token"
+sc.exe start netgraph-agent
+```
+
+It reports TCP only: the Windows tables give UDP sockets no peer.
+
+## Enforcement (Linux)
 
 Prediction is always on: each connection is evaluated against the server's
 active policy. `-enforce=nftables` adds enforcement, which is a dry run (it
@@ -75,8 +177,10 @@ sudo netgraph-agent -enforce=nftables -apply ...
 
 The agent then owns one table, `inet netgraph_agent` (`-nft-table`), and
 replaces it whole in a single `nft -f` transaction whenever the set of drops
-changes; on exit it deletes it. It drops a destination (address, and protocol
-and port when known) only when:
+changes; on exit it deletes it. It needs `nft` and `CAP_NET_ADMIN` (in the
+container: `cap_add: [NET_ADMIN]`; under systemd: add it to
+`AmbientCapabilities`). It drops a destination (address, and protocol and
+port when known) only when:
 
 - an explicit **deny rule** matched: never the policy's default, since a
   default egress of deny would cut the host off;
@@ -85,11 +189,15 @@ and port when known) only when:
   apart, so a drop by address would block every program;
 - the address is not the netgraph server's.
 
-The agent sees a connection by polling `/proc`, so the first packets of a
-denied connection have already left; the drop stops the rest and later ones.
-Allow and ask are never enforced (nothing can ask), and the agent reports
+The agent sees a connection by polling, so the first packets of a denied
+connection have already left; the drop stops the rest and later ones. Allow
+and ask are never enforced (nothing can ask), and the agent reports
 `actual: none` with the reason. The API keeps `predicted` and `actual`
 separate, with `scope` (`host`, `process`, `default`) saying what decided.
+
+macOS and Windows agents refuse `-enforce`: they would need pf or a Network
+Extension, or the Windows Filtering Platform, and netgraph changes no
+firewall it doesn't own.
 
 Rules match what the agent can see: the remote address, port, protocol and
 the program's name. It does not see DNS or TLS names, so `domain` and `host`
@@ -98,12 +206,12 @@ rules don't match on the agent.
 ## Privacy and safety
 
 - The agent is opt-in and uses a separate token.
-- It reads `/proc`; it does not dump memory, payloads or credentials.
+- It reads process and socket tables; it does not dump memory, payloads or
+  credentials, and sends no arguments unless `-cmdlines`.
 - Processes and connections follow the server's raw retention and `db purge`.
   They name no MAC, so `db forget` can't find them: purge by time instead.
-- The executable hash is bounded and cached.
+- In the web UI's privacy mode, agent names are replaced and executable
+  paths, command lines and hashes are blanked.
 - It does not execute paths, commands or URLs from the server.
 - `nftables` changes are confined to one dedicated table and are off by
   default.
-- macOS support (Network Extension / Endpoint Security) is a separate future
-  platform implementation, not part of this Linux agent.

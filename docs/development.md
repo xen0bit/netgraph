@@ -6,6 +6,8 @@
 |---|---|
 | `cmd/netgraph-sensor` | the router agent. Must never import SQLite, d2 or the TUI libraries: `deps_test.go` enforces it (modernc SQLite does not build for MIPS, d2 adds ~20 MB) |
 | `cmd/netgraph` | server, CLI, TUI |
+| `cmd/netgraph-agent` | the optional host agent (Linux, macOS, Windows): one file of setup per platform |
+| `internal/agent` | the agent protocol, runner and shared socket handling; `linux`, `darwin` and `windows` scanners (their parsers build and are tested on every platform), `enforce` (nftables) |
 | `internal/wire` | event schema, batch codec, shipper (spool, retry) |
 | `internal/decode` | protocol parsers: DNS/mDNS/LLMNR/NBNS, DHCPv4/v6, ARP/NDP, LLDP, SSDP, HTTP, TLS ClientHello + JA4, QUIC Initial |
 | `internal/flow` | the flow table and interval export |
@@ -30,7 +32,7 @@
 ## Building
 
 ```sh
-make build         # bin/netgraph (no embedded UI) and bin/netgraph-sensor
+make build         # bin/netgraph (no embedded UI), bin/netgraph-sensor and bin/netgraph-agent
 make build-full    # bin/netgraph with the web UI and ASN table embedded (needs Go, gzip and curl)
 make asn.fetch     # download the ASN table builds embed, if missing (make asn.update: again)
 make cross         # compile every release target

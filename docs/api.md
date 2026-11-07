@@ -51,7 +51,7 @@ are unix milliseconds.
 | `GET /api/v1/summary` | `{devices, flows, inbound, peak_connections, dns_queries, domains, remote_ips, bytes_out, bytes_in, precision, ...}`; bytes are what devices here sent and received |
 | `GET /api/v1/devices` | `[{id, mac, label, user_label, auto_label, vendor, vendor_short, randomized, role, ips, hostnames, services, serves, fingerprints, user_agents, flows, inbound, dns_queries, bytes_out, bytes_in, remotes, active_from, active_to, first_seen, last_seen, type, type_confidence, user_type, owner, groups, same_as}]`; `device=` also takes `type:printer`, `owner:alice` or `group:iot`; `serves` lists the ports clients connected to (`443/tcp`), `inbound` how many connections came in from outside |
 | `GET /api/v1/destinations` | `[{key, kind, label, connections, devices, bytes_out, bytes_in, first_seen, last_seen, ports, remote_ips}]`: remote ends aggregated by name, or by address when no name is known, busiest first. One name with several addresses is one row; `ports` is `443/tcp` style and `remote_ips` lists the addresses. Uses the window and filters. |
-| `GET /api/v1/flows` | `[{key, proto, client_ip, client_port, server_ip, server_port, device, device_name, device_mac, remote_ip, remote_port, peer_device, peer_name, direction, app, name, sni, http_host, qname, alpn, ja4, user_agent, asn, as_org, country, first_seen, last_seen, state, closed, end_reason, bytes_out, bytes_in, pkts_out, pkts_in, connections}]`, busiest first (see [Flows](#flows)). `sort=first_seen`, `last_seen`, `bytes`, `bytes_out` or `bytes_in`, with `-` in front for descending, orders them before the limit; hourly answers ignore it |
+| `GET /api/v1/flows` | `[{key, proto, client_ip, client_port, server_ip, server_port, device, device_name, device_mac, remote_ip, remote_port, peer_device, peer_name, direction, app, name, sni, http_host, qname, alpn, ja4, user_agent, asn, as_org, country, first_seen, last_seen, state, closed, end_reason, bytes_out, bytes_in, pkts_out, pkts_in, connections, process, pid, agent, peer_process}]`, busiest first (see [Flows](#flows)). `sort=first_seen`, `last_seen`, `bytes`, `bytes_out` or `bytes_in`, with `-` in front for descending, orders them before the limit; hourly answers ignore it |
 | `GET /api/v1/dns` | `[{ts, client_ip, device, device_name, server, qname, qtype, rcode, latency_ms, count, answers: [{name, type, data, ttl, expires}]}]`, newest first; `count` is set on hourly rollup rows |
 | `GET /api/v1/facts` | `[{rel, src, src_label, dst, dst_label, first_seen, last_seen, count, source, attrs}]`; facts support the window and the `device`, `domain` and `ip` filters only |
 | `GET /api/v1/timeseries?step=5m` | `{step, precision, buckets: [{ts, bytes_out, bytes_in, flows_new, dns_queries, devices}]}` |
@@ -149,10 +149,14 @@ Graph options: `collapse=0|1` (default 1), `dns=0|1` (1), `sites=0|1` (1),
 `anomalies=0|1` (1; outline what medium and high anomalies are about),
 `networks=0|1` (1; one `asn:<number>` node per network for clients from
 outside and unnamed destinations, when the server has an ASN table),
-`identity=0|1` (0), `top=N` (15; `-1` for all). `GET /api/v1/entity` also
-answers for a graph's `site:<registrable domain>` nodes: the connections,
-lookups and facts of every name under it, and for `asn:<number>` (a
-network's connections in the window).
+`processes=0|1` (1; the programs a [host agent](agent.md) named, as
+`process:<device id>/<name>` nodes between a device and its peers, joined by
+`runs` edges), `identity=0|1` (0), `top=N` (15; `-1` for all). `GET
+/api/v1/entity` also answers for a graph's `site:<registrable domain>` nodes:
+the connections, lookups and facts of every name under it, for
+`asn:<number>` (a network's connections in the window), and for
+`process:<device id>/<name>` (the program's connections, PIDs, agent,
+executable path and code ID).
 
 ```sh
 curl -s -H "Authorization: Bearer $NETGRAPH_READ_TOKEN" \

@@ -362,3 +362,43 @@ func TestBuildCarriesTruncation(t *testing.T) {
 		t.Fatal("input truncation was lost")
 	}
 }
+
+// A LAN connection between two hosts with agents is drawn program to
+// program: laptop ──runs──▶ ssh ──connects──▶ sshd ◀──runs── nas.
+func TestBuildProcessesAtBothEnds(t *testing.T) {
+	const nas = "device:aa:bb:cc:00:00:02"
+	in := Input{Devices: []model.Device{{ID: laptop, MAC: "aa:bb:cc:00:00:01", Label: "laptop", IPs: []string{"192.168.1.5"}},
+		{ID: nas, MAC: "aa:bb:cc:00:00:02", Label: "nas", IPs: []string{"192.168.1.10"}}},
+		Flows: []model.Flow{{Device: laptop, ClientIP: "192.168.1.5", ClientPort: 50000, RemoteIP: "192.168.1.10", RemotePort: 22,
+			ServerIP: "192.168.1.10", ServerPort: 22, PeerDevice: nas, Proto: "tcp", Direction: model.DirLocal, BytesOut: 100, BytesIn: 900,
+			FirstSeen: 1000, LastSeen: 2000, Process: "ssh", PID: 7, Agent: "laptop", PeerProcess: "sshd"},
+			flow(laptop, "example.com", "93.184.215.14", 50)}}
+	g := Build(in, model.GraphOptions{Collapse: true, TopN: 15, Processes: true})
+	ssh, sshd := ProcessID(laptop, "ssh"), ProcessID(nas, "sshd")
+	has := func(from, to, rel string) bool {
+		return slices.ContainsFunc(g.Edges, func(e model.Edge) bool { return e.From == from && e.To == to && e.Rel == rel })
+	}
+	if !has(laptop, ssh, model.RelRuns) || !has(nas, sshd, model.RelRuns) || !has(ssh, sshd, model.RelConnects) {
+		t.Fatalf("edges = %+v", g.Edges)
+	}
+	// A connection no agent named still leaves the device itself.
+	if !has(laptop, "domain:example.com", model.RelConnects) {
+		t.Fatalf("unattributed connection moved: %+v", g.Edges)
+	}
+	for _, n := range g.Nodes {
+		switch n.ID {
+		case laptop:
+			if n.BytesOut != 100 || n.BytesIn != 950 {
+				t.Errorf("laptop = %+v", n)
+			}
+		case nas:
+			if n.BytesOut != 900 || n.BytesIn != 100 {
+				t.Errorf("nas = %+v", n)
+			}
+		case ssh:
+			if n.Sub != "pid 7" || n.Attrs["agent"] != "laptop" {
+				t.Errorf("ssh = %+v", n)
+			}
+		}
+	}
+}

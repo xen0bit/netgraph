@@ -20,6 +20,7 @@ const raw = {
   ip: "M4 7h16v10H4zM8 12h.01M12 12h.01M16 12h.01",
   asn: "M12 3l8 4.5v9L12 21l-8-4.5v-9z",
   more: "M6 12h.01M12 12h.01M18 12h.01",
+  process: "M3 5h18v14H3zM7 10l3 2-3 2M12 15h5",
   note: "M5 3h14v18H5zM8 8h8M8 12h8M8 16h5",
 };
 
@@ -41,6 +42,7 @@ export function iconFor(n) {
     case "domain": case "site": return "domain";
     case "ip": return "ip";
     case "asn": return "asn";
+    case "process": return "process";
     case "other": return "more";
     default: return n.id.startsWith("other:") ? "more" : "note";
   }

@@ -10,6 +10,7 @@ import (
 	"maps"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -33,6 +34,9 @@ func (s *Store) Entity(ctx context.Context, id string, f model.Filter) (*model.E
 	}
 	if kind == model.KindSensor {
 		return s.sensorEntity(ctx, id, key, f)
+	}
+	if kind == model.KindProcess {
+		return s.processEntity(ctx, id, key, f)
 	}
 	from, to := s.window(f)
 	d := &model.EntityDetail{ID: id, Kind: kind, Key: key}
@@ -203,6 +207,68 @@ func (s *Store) sensorEntity(ctx context.Context, id, name string, f model.Filte
 		return d, nil
 	}
 	return nil, ErrNotFound
+}
+
+// processEntity describes a program on a device, as the graph draws it
+// (process:<device id>/<name>): the device's connections a host agent
+// attributed to it, at either end, and what the agent said about it.
+func (s *Store) processEntity(ctx context.Context, id, key string, f model.Filter) (*model.EntityDetail, error) {
+	dev, name, ok := strings.Cut(key, "/")
+	kind, mac, _ := model.SplitEntityID(dev)
+	if !ok || name == "" || kind != model.KindDevice {
+		return nil, fmt.Errorf("invalid process id %q", id)
+	}
+	from, to := s.window(f)
+	all, err := s.Flows(ctx, model.Filter{From: time.UnixMilli(from), To: time.UnixMilli(to), Device: mac, Limit: 5000, Multicast: true})
+	if err != nil {
+		return nil, err
+	}
+	d := &model.EntityDetail{ID: id, Kind: model.KindProcess, Key: key, Label: name, Attrs: map[string]string{"device": dev}}
+	agents, pids := map[string]bool{}, map[int]bool{}
+	for _, fl := range all {
+		mine := fl.Device == dev && fl.Process == name
+		if !mine && !(fl.PeerDevice == dev && fl.PeerProcess == name) {
+			continue
+		}
+		if mine {
+			agents[fl.Agent] = true
+			if fl.PID > 0 {
+				pids[fl.PID] = true
+			}
+		}
+		if d.FirstSeen == 0 || fl.FirstSeen < d.FirstSeen {
+			d.FirstSeen = fl.FirstSeen
+		}
+		d.LastSeen = max(d.LastSeen, fl.LastSeen)
+		if len(d.Flows) < 200 {
+			d.Flows = append(d.Flows, fl)
+		}
+	}
+	delete(agents, "")
+	if len(d.Flows) == 0 {
+		return nil, ErrNotFound
+	}
+	if len(agents) > 0 {
+		d.Attrs["agent"] = strings.Join(slices.Sorted(maps.Keys(agents)), ", ")
+	}
+	if len(pids) > 0 {
+		var ps []string
+		for _, p := range slices.Sorted(maps.Keys(pids)) {
+			ps = append(ps, strconv.Itoa(p))
+		}
+		d.Attrs["pids"] = strings.Join(ps, ", ")
+	}
+	// The executable the agent hashed, newest first.
+	for a := range agents {
+		var path, code string
+		err := s.r.QueryRowContext(ctx, `SELECT path, code_id FROM agent_connections WHERE agent = ? AND app = ? AND path != ''
+			ORDER BY last_seen DESC LIMIT 1`, a, name).Scan(&path, &code)
+		if err == nil {
+			d.Attrs["path"], d.Attrs["code_id"] = path, code
+			break
+		}
+	}
+	return d, nil
 }
 
 func filterFlows(in []model.Flow, keep func(model.Flow) bool) []model.Flow {

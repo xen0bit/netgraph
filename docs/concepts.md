@@ -186,6 +186,19 @@ a name. Named destinations stay names. Top N then ranks networks, so many
 small visitors from one provider can outrank one large one. Without the
 option, an address node is labelled with its network.
 
+**Programs.** A [host agent](agent.md) on a device reports its sockets and
+the process behind each. The server matches them to the sensor's
+connections by protocol, both addresses and both ports, while the
+connection was open, and with **processes** (default) draws
+
+```
+device ──runs──▶ process ──connects──▶ domain
+```
+
+The device keeps its totals; connections no agent named stay on it. The
+match is evidence too: an agent behind NAT from the sensor, or a connection
+shorter than the agent's scan, names nothing rather than a guess.
+
 Each relationship is drawn once, so a busy window stays readable:
 
 - A device that looked a name up and connected to it has one `connects`

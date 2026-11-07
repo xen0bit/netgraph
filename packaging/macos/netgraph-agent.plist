@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  netgraph host agent as a launchd daemon. As root it sees every user's
+  sockets (lsof) and executables (ps).
+
+    sudo install -m 0755 netgraph-agent /usr/local/bin/
+    sudo install -d -m 0700 /usr/local/etc/netgraph
+    sudo sh -c 'umask 077; echo "$TOKEN" > /usr/local/etc/netgraph/agent.token'
+    # edit -server below, then:
+    sudo install -m 0644 netgraph-agent.plist /Library/LaunchDaemons/
+    sudo launchctl bootstrap system /Library/LaunchDaemons/netgraph-agent.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>netgraph-agent</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/local/bin/netgraph-agent</string>
+    <string>-server</string>
+    <string>https://netgraph.lan:8443</string>
+    <string>-token-file</string>
+    <string>/usr/local/etc/netgraph/agent.token</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+  <key>StandardErrorPath</key>
+  <string>/var/log/netgraph-agent.log</string>
+</dict>
+</plist>

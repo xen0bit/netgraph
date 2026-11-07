@@ -39,7 +39,7 @@ const state = {
   live: false,
   filter: "",
   tab: "home",
-  gopts: { collapse: true, dns: true, sites: true, anomalies: true, networks: true, identity: false, top: 15 },
+  gopts: { collapse: true, dns: true, sites: true, anomalies: true, networks: true, processes: true, identity: false, top: 15 },
   graph: null,
   data: {},
   // Per table: the column it is sorted by ({col, dir}), and how many rows
@@ -86,7 +86,7 @@ function loadHash() {
   // when the map was the only landing page, and from saveHash, which leaves the
   // map out.
   state.tab = areaOf(p.get("tab")) ? p.get("tab") : raw ? "graph" : "home";
-  for (const k of ["collapse", "dns", "sites", "anomalies", "networks", "identity"]) if (p.has(k)) state.gopts[k] = p.get(k) === "1";
+  for (const k of ["collapse", "dns", "sites", "anomalies", "networks", "processes", "identity"]) if (p.has(k)) state.gopts[k] = p.get(k) === "1";
   const top = num("top");
   if (top === -1 || (top && top >= 1)) state.gopts.top = Math.min(top, 1000);
   // sort=<table>.<column>.<asc|desc>
@@ -111,7 +111,7 @@ function saveHash() {
   if (state.live) { p.set("live", "1"); p.set("span", state.span); } else { p.set("from", state.to - state.span); p.set("to", state.to); }
   if (state.filter) p.set("q", state.filter);
   if (state.tab !== "graph") p.set("tab", state.tab);
-  for (const k of ["collapse", "dns", "sites", "anomalies", "networks", "identity"]) p.set(k, state.gopts[k] ? "1" : "0");
+  for (const k of ["collapse", "dns", "sites", "anomalies", "networks", "processes", "identity"]) p.set(k, state.gopts[k] ? "1" : "0");
   p.set("top", state.gopts.top);
   const so = state.sort[state.tab];
   if (so) p.set("sort", `${state.tab}.${so.col}.${so.dir}`);
@@ -999,7 +999,9 @@ const tables = {
       return [
         when(f.first_seen),
         dirBadge(f.direction),
-        client, `<span class="muted">→</span>`, server,
+        client + (f.direction === "in" ? procLine(f.peer_process) : procLine(f.process, f.pid)),
+        `<span class="muted">→</span>`,
+        server + (f.direction === "in" ? procLine(f.process, f.pid) : procLine(f.peer_process)),
         esc(f.name) + (f.sni && f.qname && f.sni !== f.qname ? `<div class="sub">dns: ${esc(f.qname)}</div>` : ""),
         esc(f.app),
         (f.state ? badge(f.state, f.state) : "") + (f.closed ? badge(f.truncated ? "truncated" : f.end_reason || "closed", "closed") : ""),
@@ -1390,7 +1392,7 @@ function theme() {
 
 function graphOpts() {
   const b = (k) => (state.gopts[k] ? "1" : "0");
-  return { collapse: b("collapse"), dns: b("dns"), sites: b("sites"), anomalies: b("anomalies"), networks: b("networks"), identity: b("identity"), top: String(state.gopts.top) };
+  return { collapse: b("collapse"), dns: b("dns"), sites: b("sites"), anomalies: b("anomalies"), networks: b("networks"), processes: b("processes"), identity: b("identity"), top: String(state.gopts.top) };
 }
 
 // Nodes opened in place on the map: a device's "N more", or a site's names.
@@ -1829,7 +1831,7 @@ async function openEntity(id, { anomaly } = {}) {
     const line = f.direction === "in"
       ? `${link(peerID(f), hostPort(f.client_ip, f.client_port))} → ${dev}:${f.server_port}/${esc(f.proto)}${f.name ? ` <span class="muted">for ${esc(f.name)}</span>` : ""}`
       : `${dev} → ${link(peerID(f), f.name || f.server_ip)}:${f.server_port}/${esc(f.proto)}`;
-    return `<li><time>${when(f.first_seen)}</time>${dirBadge(f.direction)} ${line} ${f.state ? badge(f.state, f.state) : ""}${f.closed ? badge(f.end_reason, "closed") : ""} <span class="muted">sent ${bytes(f.bytes_out)} · received ${bytes(f.bytes_in)}</span></li>`;
+    return `<li><time>${when(f.first_seen)}</time>${dirBadge(f.direction)} ${line}${f.process ? ` ${badge(f.process, "process")}` : ""} ${f.state ? badge(f.state, f.state) : ""}${f.closed ? badge(f.end_reason, "closed") : ""} <span class="muted">sent ${bytes(f.bytes_out)} · received ${bytes(f.bytes_in)}</span></li>`;
   }).join("");
   const timeline = (d.timeline || []).slice(-300).map((e) => `<li><time>${when(e.ts)}</time>${badge(e.type)} ${esc(e.detail)}</li>`).join("");
   const flagged = anomaly
@@ -1838,7 +1840,7 @@ async function openEntity(id, { anomaly } = {}) {
   const anomalyBox = flagged ? `<div class="anomaly-box"><b>${anomaly ? `${esc(anomaly.severity)} ${esc(anomaly.kind.replaceAll("_", " "))}` : "Anomalies"}</b><ul>${flagged.map((l) => `<li>${esc(l)}</li>`).join("")}</ul>${anomaly ? `<button type="button" id="autopsy-anomaly">Autopsy</button> <button type="button" id="save-incident">Save incident</button> <button type="button" id="mute-anomaly">Mute this for 1 hour</button>` : ""}</div>` : "";
   $("#panel-body").innerHTML = `${anomalyBox}
     <h2>${esc(d.label || d.key)}</h2>
-    <div class="muted mono">${esc(d.id)}</div>${d.kind === "device" ? `<p><a data-passport="${esc(d.id)}">Open its passport →</a></p>` : ""}${rename}${d.kind === "device" ? profileForm(dev, d.attrs) : ""}
+    <div class="muted mono">${esc(d.id)}</div>${d.kind === "process" ? processIntro(d) : ""}${d.kind === "device" ? `<p><a data-passport="${esc(d.id)}">Open its passport →</a></p>` : ""}${rename}${d.kind === "device" ? profileForm(dev, d.attrs) : ""}
     <dl><dt>first seen</dt><dd>${stamp(d.first_seen)}</dd><dt>last seen</dt><dd>${stamp(d.last_seen)}</dd>${devInfo}${attrs}</dl>
     ${dev ? `<details class="why-box"><summary>Why this type</summary>${typeWhy(dev)}</details>` : ""}
     ${facts ? `<h3>Relationships in this window</h3><ul>${facts}</ul>` : ""}
@@ -1908,7 +1910,21 @@ async function openEntity(id, { anomaly } = {}) {
   };
 }
 
+// procLine is the program a host agent named at one end of a connection.
+function procLine(name, pid) {
+  if (!name) return "";
+  return `<div class="sub" title="The program, as the host agent on this device reported it">${esc(name)}${pid ? ` <span class="muted">pid ${Number(pid)}</span>` : ""}</div>`;
+}
+
+// processIntro says what a process node is: a program on a device, by its agent.
+function processIntro(d) {
+  const dev = d.attrs?.device || "";
+  const name = state.graph?.nodes?.find((n) => n.id === dev)?.label || dev.slice("device:".length);
+  return `<p>A program on <a data-id="${esc(dev)}">${esc(name)}</a>, as its host agent${d.attrs?.agent ? ` <b>${esc(d.attrs.agent)}</b>` : ""} reported it. Matched to the sensor's connections by addresses and ports.</p>`;
+}
+
 function filterFor(d) {
+  if (d.kind === "process") return `device:${(d.attrs?.device || "").slice("device:".length)}`;
   if (d.kind === "device") return `device:${d.key}`;
   if (d.kind === "ip") return `ip:${d.key}`;
   if (d.kind === "domain" || d.kind === "site") return `domain:${d.key}`;
@@ -2938,7 +2954,7 @@ function openView(v) {
 }
 
 function syncGraphInputs() {
-  for (const [id, k] of [["#g-collapse", "collapse"], ["#g-dns", "dns"], ["#g-sites", "sites"], ["#g-anomalies", "anomalies"], ["#g-networks", "networks"], ["#g-identity", "identity"]]) {
+  for (const [id, k] of [["#g-collapse", "collapse"], ["#g-dns", "dns"], ["#g-sites", "sites"], ["#g-anomalies", "anomalies"], ["#g-networks", "networks"], ["#g-processes", "processes"], ["#g-identity", "identity"]]) {
     $(id).checked = state.gopts[k];
   }
   $("#g-top").value = state.gopts.top;
@@ -3312,6 +3328,7 @@ function init() {
   $("#g-sites").checked = state.gopts.sites;
   $("#g-anomalies").checked = state.gopts.anomalies;
   $("#g-networks").checked = state.gopts.networks;
+  $("#g-processes").checked = state.gopts.processes;
   $("#g-identity").checked = state.gopts.identity;
   $("#g-top").value = state.gopts.top;
 
@@ -3405,7 +3422,7 @@ function init() {
     renderHome(refreshSeq).catch(() => {});
   }, 3000);
   $("#summary").onclick = (e) => { const a = e.target.closest("[data-tab]"); if (a) selectTab(a.dataset.tab); };
-  for (const [id, k] of [["#g-collapse", "collapse"], ["#g-dns", "dns"], ["#g-sites", "sites"], ["#g-anomalies", "anomalies"], ["#g-networks", "networks"], ["#g-identity", "identity"]]) {
+  for (const [id, k] of [["#g-collapse", "collapse"], ["#g-dns", "dns"], ["#g-sites", "sites"], ["#g-anomalies", "anomalies"], ["#g-networks", "networks"], ["#g-processes", "processes"], ["#g-identity", "identity"]]) {
     $(id).onchange = () => { state.gopts[k] = $(id).checked; refresh(); };
   }
   $("#g-top").onchange = () => { state.gopts.top = Number($("#g-top").value) || 15; refresh(); };

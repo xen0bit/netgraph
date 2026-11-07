@@ -37,6 +37,7 @@ var palette = map[string][2]string{
 	model.KindSSID:        {"#e0f2fe", "#0369a1"},
 	model.KindSite:        {"#dcfce7", "#15803d"},
 	model.KindASN:         {"#ecfeff", "#0e7490"},
+	model.KindProcess:     {"#fef9c3", "#a16207"},
 	model.KindOther:       {"#f9fafb", "#9ca3af"},
 }
 
@@ -54,6 +55,7 @@ var darkPalette = map[string][2]string{
 	model.KindSSID:        {"#075985", "#7dd3fc"},
 	model.KindSite:        {"#14532d", "#86efac"},
 	model.KindASN:         {"#164e63", "#67e8f9"},
+	model.KindProcess:     {"#713f12", "#fde047"},
 	model.KindOther:       {"#1f2937", "#9ca3af"},
 }
 
@@ -85,6 +87,8 @@ func RenderD2(g *model.Graph, o RenderOptions) string {
 				shape = "oval"
 			case model.KindService, model.KindUPnP:
 				shape = "hexagon"
+			case model.KindProcess:
+				shape = "parallelogram"
 			case model.KindOther:
 				extra = "; stroke-dash: 4"
 			}

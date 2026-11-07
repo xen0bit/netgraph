@@ -16,11 +16,11 @@ const DOMAIN = String.raw`\b(?:[a-z0-9_-]+\.)+[a-z]{2,}\b`;
 const SHAPES = new RegExp(`(${MAC})|(${IPV6})|(${IPV4})|(${DOMAIN})`, "gi");
 
 // Fields whose whole value is a name.
-const NAME_FIELDS = new Set(["label", "auto_label", "device_name", "peer_name", "name", "hostnames", "services", "owner", "groups", "as_org", "sni", "http_host", "qname", "ssid", "src_label", "dst_label", "site", "actor", "user"]);
+const NAME_FIELDS = new Set(["label", "auto_label", "device_name", "peer_name", "name", "hostnames", "services", "owner", "groups", "as_org", "sni", "http_host", "qname", "ssid", "src_label", "dst_label", "site", "actor", "user", "agent"]);
 // Fields that say nothing about anyone, and that code compares against.
 const KEEP = new Set(["kind", "rel", "proto", "app", "state", "direction", "severity", "type", "status", "precision", "source", "end_reason", "role", "signal", "says", "confidence", "tool", "event", "via", "tab", "user_type", "type_confidence", "action", "alpn", "says", "qtype", "rcode", "security"]);
 // Free text and fingerprints: nothing here is worth the risk.
-const BLANK = new Set(["text", "note", "user_agent", "user_agents", "ja4", "fingerprints", "model", "body"]);
+const BLANK = new Set(["text", "note", "user_agent", "user_agents", "ja4", "fingerprints", "model", "body", "path", "cmdline", "code_id", "sha256"]);
 
 const isGenerated = (s) => /^\d+ (more|names?|other)/.test(s) || /^(private|other)$/i.test(s);
 

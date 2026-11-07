@@ -1,17 +1,19 @@
-//go:build linux
-
-// Command netgraph-agent is the optional Linux host agent. It reports local
-// process identity and process-attributed connections, predicts the active
-// policy, and can enforce deny rules through a dedicated nftables table when
-// explicitly enabled. It is separate from netgraph-sensor.
+// Command netgraph-agent is the optional host agent, for Linux, Windows and
+// macOS. It reports local process identity and process-attributed
+// connections, and predicts the active policy; on Linux it can enforce deny
+// rules through a dedicated nftables table when explicitly enabled. It is
+// separate from netgraph-sensor.
 package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"flag"
 	"fmt"
 	"net"
+	"net/http"
 	"net/netip"
 	"net/url"
 	"os"
@@ -21,28 +23,28 @@ import (
 	"time"
 
 	"github.com/xen0bit/netgraph/internal/agent"
-	"github.com/xen0bit/netgraph/internal/agent/enforce"
-	"github.com/xen0bit/netgraph/internal/agent/linux"
 	"github.com/xen0bit/netgraph/internal/buildinfo"
 )
 
 func main() {
-	if err := run(os.Args[1:]); err != nil {
+	if err := service(run); err != nil {
 		fmt.Fprintln(os.Stderr, "netgraph-agent:", err)
 		os.Exit(1)
 	}
 }
 
-func run(args []string) error {
+func run(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("netgraph-agent", flag.ContinueOnError)
 	server := fs.String("server", envOr("NETGRAPH_SERVER", "http://127.0.0.1:8443"), "server URL; $NETGRAPH_SERVER")
 	tokenFile := fs.String("token-file", "", "file holding the agent token; $NETGRAPH_AGENT_TOKEN")
 	name := fs.String("name", "", "agent name; default hostname")
 	interval := fs.Duration("interval", 10*time.Second, "scan interval")
 	once := fs.Bool("once", false, "scan and upload once, then exit")
-	enforceMode := fs.String("enforce", "off", "off or nftables")
+	refresh := fs.Duration("refresh", time.Minute, "how often an unchanged open connection is sent again")
+	enforceMode := fs.String("enforce", "off", "off, or nftables (Linux)")
 	apply := fs.Bool("apply", false, "with -enforce=nftables, actually change the host firewall (default dry run)")
 	nftTable := fs.String("nft-table", "netgraph_agent", "nftables table for enforcement")
+	caFile := fs.String("ca-file", "", "PEM CA bundle to verify the server's certificate")
 	cmdlines := fs.Bool("cmdlines", false, "send each process's full command line; off, only the program (arguments can hold secrets)")
 	version := fs.Bool("version", false, "print version and exit")
 	if err := fs.Parse(args); err != nil {
@@ -69,28 +71,38 @@ func run(args []string) error {
 	if *name == "" {
 		*name = "host-agent"
 	}
+	host, _ := os.Hostname()
 	client := &agent.Client{Base: strings.TrimRight(*server, "/"), Token: tok, Agent: *name, Boot: bootID()}
-	runner := &agent.Runner{Client: client, Scanner: &linux.Scanner{Cmdlines: *cmdlines}, Interval: *interval,
-		Logf: func(format string, a ...any) { fmt.Fprintf(os.Stderr, "netgraph-agent: "+format+"\n", a...) }}
+	if *caFile != "" {
+		pem, err := os.ReadFile(*caFile)
+		if err != nil {
+			return err
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return fmt.Errorf("%s: no certificates found", *caFile)
+		}
+		tr := http.DefaultTransport.(*http.Transport).Clone()
+		tr.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool}
+		client.HTTP = &http.Client{Timeout: 30 * time.Second, Transport: tr}
+	}
+	runner := &agent.Runner{Client: client, Scanner: newScanner(*cmdlines), Interval: *interval, Refresh: *refresh,
+		Hello: agent.Hello{Host: host, Version: buildinfo.Version},
+		Logf:  func(format string, a ...any) { fmt.Fprintf(os.Stderr, "netgraph-agent: "+format+"\n", a...) }}
 	switch *enforceMode {
 	case "off", "":
-	case "nftables":
-		n, err := enforce.NewNftables(*nftTable)
-		if err != nil {
-			return err
-		}
-		n.DryRun = !*apply
-		// Never drop the way back to the server.
-		n.Protect, err = serverAddrs(*server)
-		if err != nil {
-			return err
-		}
-		runner.Enforcer = n
 	default:
-		return fmt.Errorf("-enforce %q is not off or nftables", *enforceMode)
+		// Never drop the way back to the server.
+		protect, err := serverAddrs(*server)
+		if err != nil {
+			return err
+		}
+		e, err := newEnforcer(*enforceMode, *nftTable, !*apply, protect)
+		if err != nil {
+			return err
+		}
+		runner.Enforcer = e
 	}
-	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
 	if *once {
 		if runner.Enforcer != nil {
 			defer runner.Enforcer.Close()
@@ -122,11 +134,18 @@ func serverAddrs(server string) ([]netip.Addr, error) {
 	return addrs, nil
 }
 
+// bootID names this run of the agent: the kernel's boot ID on Linux, else a
+// start time.
 func bootID() string {
 	if b, err := os.ReadFile("/proc/sys/kernel/random/boot_id"); err == nil {
 		return strings.TrimSpace(string(b))
 	}
 	return fmt.Sprintf("%d", time.Now().UnixNano())
+}
+
+// interrupted is a context that ends on Ctrl-C or SIGTERM.
+func interrupted() (context.Context, context.CancelFunc) {
+	return signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 }
 
 func envOr(k, def string) string {
