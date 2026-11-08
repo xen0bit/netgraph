@@ -125,6 +125,11 @@ open (two minutes of slack either way). Then:
   device keeps its totals. A lookup is folded into the program's edge when
   one program went there. A LAN connection between two hosts with agents is
   drawn program to program. Connections no agent named stay on the device.
+- **Processes** tab: every program the agents reported in the window, with
+  its host and device, PIDs, command lines, who started it, how many
+  connections it made, accepted and kept on the host (loopback, which no
+  sensor sees), what it talked to and served, and the bytes of the matched
+  connections (`GET /api/v1/processes`).
 - **Process details**: click a program on the map for its connections, PIDs,
   each PID's command line (the program alone without `-cmdlines`), the
   processes that started it,

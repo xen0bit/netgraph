@@ -261,7 +261,15 @@ func (s *Store) processEntity(ctx context.Context, id, key string, f model.Filte
 	}
 	// What each PID ran, and who started it, as the agent described them.
 	if len(pids) > 0 && len(agents) == 1 {
-		s.processLineage(ctx, d, slices.Collect(maps.Keys(agents))[0], slices.Sorted(maps.Keys(pids)))
+		newest := slices.Sorted(maps.Keys(pids))
+		slices.Reverse(newest)
+		cmds, by := s.lineage(ctx, slices.Collect(maps.Keys(agents))[0], newest)
+		if len(cmds) > 0 {
+			d.Attrs["cmdline"] = strings.Join(cmds, "\n")
+		}
+		if by != "" {
+			d.Attrs["started by"] = by
+		}
 	}
 	// The executable the agent hashed, newest first.
 	for a := range agents {
@@ -500,10 +508,11 @@ func (s *Store) Search(ctx context.Context, q string, limit int) ([]model.Search
 	return out, rows.Err()
 }
 
-// processLineage adds what an agent said about a program's PIDs: each one's
-// command line (the program alone unless the agent sends arguments) and the
-// chain of processes that started the newest.
-func (s *Store) processLineage(ctx context.Context, d *model.EntityDetail, agentName string, pids []int) {
+// lineage is what an agent said about a program's PIDs (the newest
+// first): each one's command line (the program alone unless the agent sends
+// arguments), and the chain of processes that started the newest, oldest
+// first: "sshd (10) › bash (20)".
+func (s *Store) lineage(ctx context.Context, agentName string, pids []int) (cmdlines []string, startedBy string) {
 	type proc struct {
 		ppid          int
 		path, cmdline string
@@ -514,25 +523,22 @@ func (s *Store) processLineage(ctx context.Context, d *model.EntityDetail, agent
 			agentName, pid).Scan(&p.ppid, &p.path, &p.cmdline)
 		return p, err == nil
 	}
-	var lines []string
 	newest, newestPID := proc{}, 0
 	for _, pid := range pids {
 		p, ok := get(pid)
 		if !ok {
 			continue
 		}
-		if len(lines) < 10 && p.cmdline != "" {
-			lines = append(lines, "pid "+strconv.Itoa(pid)+": "+p.cmdline)
+		if len(cmdlines) < 10 && p.cmdline != "" {
+			cmdlines = append(cmdlines, "pid "+strconv.Itoa(pid)+": "+p.cmdline)
 		}
-		newest, newestPID = p, pid
-	}
-	if len(lines) > 0 {
-		d.Attrs["cmdline"] = strings.Join(lines, "\n")
+		if newestPID == 0 {
+			newest, newestPID = p, pid
+		}
 	}
 	if newestPID == 0 {
-		return
+		return cmdlines, ""
 	}
-	// Oldest first: "sshd › sshd-session › bash".
 	var chain []string
 	seen := map[int]bool{newestPID: true}
 	for pp := newest.ppid; pp > 1 && !seen[pp] && len(chain) < 8; {
@@ -544,7 +550,5 @@ func (s *Store) processLineage(ctx context.Context, d *model.EntityDetail, agent
 		chain = append([]string{agent.AppName(p.path, p.cmdline) + " (" + strconv.Itoa(pp) + ")"}, chain...)
 		pp = p.ppid
 	}
-	if len(chain) > 0 {
-		d.Attrs["started by"] = strings.Join(chain, " › ")
-	}
+	return cmdlines, strings.Join(chain, " › ")
 }

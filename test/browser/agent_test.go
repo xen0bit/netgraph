@@ -62,3 +62,37 @@ func TestAgentProcessInTheUI(t *testing.T) {
 	s = open(t, window()+"&open="+url.QueryEscape(proc), "")
 	s.waitFor("the process's details", `(() => { const p = document.querySelector("#panel-body"); return !!p && p.textContent.includes("A program on") && p.textContent.includes("journey-agent") && p.textContent.includes("/usr/bin/journey-browser"); })()`)
 }
+
+// The Processes tab lists what agents reported, a program seen only on
+// loopback included, as text: a command line can say anything.
+func TestProcessesTab(t *testing.T) {
+	at := dataEnd - 30*60_000
+	b, _ := json.Marshal(agent.Batch{Version: agent.Version, Agent: "proc-agent", Boot: "b", Seq: 1,
+		Processes: []agent.Process{
+			{PID: 10, PPID: 1, Path: "/usr/sbin/sshd", Cmdline: "sshd"},
+			{PID: 7070, PPID: 10, Path: "/usr/bin/loopy", Cmdline: `loopy <img src=x onerror="window.pwned=1">`},
+		},
+		Connections: []agent.Connection{{Key: "lo", Proto: "tcp", LocalIP: "127.0.0.1", LocalPort: 45000,
+			RemoteIP: "127.0.0.1", RemotePort: 6379, Direction: "local", PID: 7070, App: "loopy<b>x</b>",
+			Path: "/usr/bin/loopy", FirstSeen: at, LastSeen: at + 1000}}})
+	post, _ := http.NewRequest("POST", baseURL+"/api/v1/agent/events", bytes.NewReader(b))
+	post.Header.Set("Authorization", "Bearer "+agentToken)
+	post.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(post)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("agent events: %s", resp.Status)
+	}
+	s := open(t, window()+"&tab=processes", "")
+	s.waitFor("the loopback program", `[...document.querySelectorAll("#t-processes tr")].some((r) => r.textContent.includes("loopy<b>x</b>") && r.textContent.includes("127.0.0.1:6379") && r.textContent.includes("sshd (10)"))`)
+	var bad bool
+	s.eval(`!!document.querySelector("#t-processes img, #t-processes b b") || !!window.pwned`, &bad)
+	if bad {
+		t.Fatal("a command line or program name became markup")
+	}
+	s.waitFor("a click on it", `(() => { const r = [...document.querySelectorAll("#t-processes tbody tr[data-i]")].find((r) => r.textContent.includes("loopy<b>x</b>")); if (r) r.click(); return !!r; })()`)
+	s.waitFor("the program's details", `(() => { const p = document.querySelector("#panel-body"); return !!p && p.textContent.includes("No sensor saw") && p.textContent.includes("proc-agent"); })()`)
+}

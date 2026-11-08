@@ -200,3 +200,49 @@ func TestAgentNamesPings(t *testing.T) {
 		t.Fatalf("pings named %v", got)
 	}
 }
+
+// The Processes view: each program an agent reported, with what it
+// connected to (loopback too, which the sensor never sees), the ports it
+// accepted on, and the bytes of the sensor's connections matched to it.
+func TestPrograms(t *testing.T) {
+	ctx := context.Background()
+	st, at := inboundStore(t, Config{})
+	ms := func(d time.Duration) int64 { return at.Add(d).UnixMilli() }
+	if _, err := st.IngestAgentBatch(ctx, &agent.Batch{Version: agent.Version, Agent: "web-agent", Boot: "b", Seq: 1,
+		Processes: []agent.Process{{PID: 80, PPID: 1, Path: "/usr/sbin/nginx", Cmdline: "nginx"}},
+		Connections: []agent.Connection{
+			{Key: "in", Proto: "tcp", LocalIP: webIP.String(), LocalPort: 443, RemoteIP: visitor.String(), RemotePort: 51234,
+				Direction: "in", PID: 80, App: "nginx", Path: "/usr/sbin/nginx", FirstSeen: ms(time.Second), LastSeen: ms(5 * time.Second)},
+			{Key: "lo1", Proto: "tcp", LocalIP: "127.0.0.1", LocalPort: 50001, RemoteIP: "127.0.0.1", RemotePort: 8080,
+				Direction: "local", PID: 80, App: "nginx", FirstSeen: ms(2 * time.Second), LastSeen: ms(2 * time.Second)},
+			{Key: "lo2", Proto: "tcp", LocalIP: "127.0.0.1", LocalPort: 50002, RemoteIP: "127.0.0.1", RemotePort: 8080,
+				Direction: "local", PID: 80, App: "nginx", FirstSeen: ms(3 * time.Second), LastSeen: ms(3 * time.Second)},
+			{Key: "app", Proto: "tcp", LocalIP: "127.0.0.1", LocalPort: 8080, RemoteIP: "127.0.0.1", RemotePort: 50001,
+				Direction: "local", PID: 90, App: "gunicorn", FirstSeen: ms(2 * time.Second), LastSeen: ms(2 * time.Second)},
+		}}); err != nil {
+		t.Fatal(err)
+	}
+	ps, err := st.Programs(ctx, model.Filter{From: at, To: at.Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(ps) != 2 {
+		t.Fatalf("programs = %+v", ps)
+	}
+	ng := ps[0]
+	if ng.Name != "nginx" || ng.Connections != 3 || ng.In != 1 || ng.Local != 2 || ng.Flows != 1 || ng.BytesOut != 50000 ||
+		ng.Device != "device:"+webMAC || ng.ID != graph.ProcessID(ng.Device, "nginx") || ng.Path != "/usr/sbin/nginx" ||
+		len(ng.Peers) != 1 || ng.Peers[0] != "127.0.0.1:8080 ×2" || len(ng.Serves) != 1 || ng.Serves[0] != "443/tcp" ||
+		len(ng.Cmdlines) != 1 || ng.Cmdlines[0] != "pid 80: nginx" {
+		t.Fatalf("nginx = %+v", ng)
+	}
+	// gunicorn only talks over loopback: no device, no entity.
+	if g := ps[1]; g.Name != "gunicorn" || g.Device != "" || g.ID != "" || g.Flows != 0 || len(g.Serves) != 1 || g.Serves[0] != "8080/tcp" || len(g.Peers) != 0 {
+		t.Fatalf("gunicorn = %+v", g)
+	}
+	// A device filter keeps the programs matched on that device.
+	ps, _ = st.Programs(ctx, model.Filter{From: at, To: at.Add(time.Hour), Device: webMAC})
+	if len(ps) != 1 || ps[0].Name != "nginx" {
+		t.Fatalf("filtered = %+v", ps)
+	}
+}
