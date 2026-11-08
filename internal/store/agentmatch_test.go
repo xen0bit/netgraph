@@ -111,3 +111,54 @@ func TestAgentNamesFlowProcesses(t *testing.T) {
 		t.Fatal("a process with no connections was found")
 	}
 }
+
+// A program's details say what each PID ran and who started it, from the
+// processes the agent described; a bare PID never blanks what was known,
+// and a reused PID is a new process.
+func TestAgentProcessLineage(t *testing.T) {
+	ctx := context.Background()
+	st, at := inboundStore(t, Config{})
+	ms := func(d time.Duration) int64 { return at.Add(d).UnixMilli() }
+	send := func(seq uint64, procs []agent.Process, conns []agent.Connection) {
+		t.Helper()
+		if _, err := st.IngestAgentBatch(ctx, &agent.Batch{Version: agent.Version, Agent: "web-agent", Boot: "b", Seq: seq,
+			Processes: procs, Connections: conns}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	send(1, []agent.Process{
+		{PID: 10, PPID: 1, Path: "/usr/sbin/sshd", Cmdline: "sshd", Start: 1000},
+		{PID: 20, PPID: 10, Path: "/usr/bin/bash", Cmdline: "bash", Start: 2000},
+		{PID: 99, PPID: 20, Path: "/usr/bin/python3.12", Cmdline: "python3 job.py", Start: 3000},
+	}, []agent.Connection{{Key: "out", Proto: "tcp", LocalIP: webIP.String(), LocalPort: 40001, RemoteIP: upstream.String(), RemotePort: 443,
+		Direction: "out", PID: 99, App: "python3.12", FirstSeen: ms(10 * time.Second), LastSeen: ms(70 * time.Second)}})
+	// An older agent's bare PID for bash: ignored.
+	send(2, []agent.Process{{PID: 20}}, nil)
+	win := model.Filter{From: at, To: at.Add(time.Hour)}
+	dev := model.EntityID(model.KindDevice, webMAC)
+	d, err := st.Entity(ctx, graph.ProcessID(dev, "python3.12"), win)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if d.Attrs["cmdline"] != "pid 99: python3 job.py" || d.Attrs["started by"] != "sshd (10) › bash (20)" {
+		t.Fatalf("lineage = %q / %q", d.Attrs["cmdline"], d.Attrs["started by"])
+	}
+	var first int64
+	read := func() {
+		t.Helper()
+		if err := st.r.QueryRowContext(ctx, `SELECT first_seen FROM agent_processes WHERE agent='web-agent' AND pid=20`).Scan(&first); err != nil {
+			t.Fatal(err)
+		}
+	}
+	read()
+	was := first
+	st.cfg.Now = func() time.Time { return time.UnixMilli(was).Add(time.Hour) }
+	send(3, []agent.Process{{PID: 20, PPID: 10, Path: "/usr/bin/bash", Cmdline: "bash", Start: 2000}}, nil)
+	if read(); first != was {
+		t.Fatalf("same process: first_seen moved from %d to %d", was, first)
+	}
+	send(4, []agent.Process{{PID: 20, PPID: 1, Path: "/usr/bin/sleep", Cmdline: "sleep", Start: 9000}}, nil)
+	if read(); first == was {
+		t.Fatal("a reused PID kept the old process's first_seen")
+	}
+}

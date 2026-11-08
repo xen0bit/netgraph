@@ -7,12 +7,16 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"time"
 
 	"golang.org/x/sys/windows/svc"
 
 	"github.com/xen0bit/netgraph/internal/agent"
 	"github.com/xen0bit/netgraph/internal/agent/windows"
 )
+
+// defaultInterval is how often the agent scans.
+const defaultInterval = 10 * time.Second
 
 func newScanner(cmdlines bool) agent.Scanner { return &windows.Scanner{Cmdlines: cmdlines} }
 

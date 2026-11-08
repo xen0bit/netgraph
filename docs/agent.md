@@ -44,10 +44,21 @@ It does **not** send packet payloads, credentials, DNS queries, file
 contents or environment variables, and it never runs a command, path or URL
 from the server.
 
-The agent polls (`-interval`, 10 s by default), so a connection that opens
-and closes between two scans is never seen. An open connection that hasn't
-changed is sent again every `-refresh` (a minute), which keeps its
+The agent polls (`-interval`: 2 s on Linux, 10 s on macOS and Windows), so
+a connection that opens and closes between two scans is never seen: a
+200 ms HTTP request usually isn't, a page load's keep-alive connection
+usually is. On Linux a scan is cheap: the agent remembers which process
+holds each socket, and looks through `/proc/<pid>/fd` only for sockets it
+hasn't placed yet, first in the processes that already hold sockets, then
+in processes started since the last scan. It reads a process's identity as
+soon as it finds the socket, so a program that runs for a moment can still
+be named. An open connection that hasn't changed, and a process that
+hasn't, is sent again every `-refresh` (a minute), which keeps its
 `last_seen` current for matching.
+
+On Linux each socket's owner comes with its parents (up to eight, as far as
+the agent can read them), so a program's details say who started it:
+`sshd (10) › sshd-session (20) › bash (31)`.
 
 ## Programs in the graph and the tables
 
@@ -62,6 +73,8 @@ open (two minutes of slack either way). Then:
   one program went there. A LAN connection between two hosts with agents is
   drawn program to program. Connections no agent named stay on the device.
 - **Process details**: click a program on the map for its connections, PIDs,
+  each PID's command line (the program alone without `-cmdlines`), the
+  processes that started it,
   executable path and code ID (`GET /api/v1/entity?id=process:<device>/<name>`).
 - **Flows**: the Connections table, the device panel, `netgraph query flows`
   and `GET /api/v1/flows` carry `process`, `pid`, `agent` and, for a LAN

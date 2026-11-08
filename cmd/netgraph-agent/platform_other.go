@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"net/netip"
+	"time"
 
 	"github.com/xen0bit/netgraph/internal/agent"
 )
@@ -17,6 +18,8 @@ type noScanner struct{}
 func (noScanner) Scan(context.Context) ([]agent.Process, []agent.Connection, error) {
 	return nil, nil, errPlatform
 }
+
+const defaultInterval = 10 * time.Second
 
 func newScanner(bool) agent.Scanner { return noScanner{} }
 

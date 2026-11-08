@@ -50,7 +50,9 @@ func (s *Store) IngestAgentBatch(ctx context.Context, b *agent.Batch) (map[strin
 	}
 	defer tx.Rollback()
 	for _, p := range b.Processes {
-		if p.PID <= 0 {
+		// A PID alone names nothing (agents up to 0.2.0 sent the owners of
+		// sockets they couldn't read), and would blank a good row.
+		if p.PID <= 0 || (p.Path == "" && p.Cmdline == "") {
 			continue
 		}
 		_, err := tx.ExecContext(ctx, `INSERT INTO agent_processes
@@ -58,7 +60,9 @@ func (s *Store) IngestAgentBatch(ctx context.Context, b *agent.Batch) (map[strin
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			ON CONFLICT(agent, pid) DO UPDATE SET ppid=excluded.ppid, uid=excluded.uid, path=excluded.path,
 			cmdline=excluded.cmdline, code_id=excluded.code_id, sha256=excluded.sha256, signer=excluded.signer,
-			package=excluded.package, start=excluded.start, last_seen=excluded.last_seen`,
+			package=excluded.package, start=excluded.start, last_seen=excluded.last_seen,
+			first_seen=CASE WHEN excluded.start != 0 AND start != 0 AND excluded.start != start
+				THEN excluded.first_seen ELSE first_seen END`,
 			b.Agent, p.PID, p.PPID, p.UID, clip(p.Path, 1024), clip(p.Cmdline, 2048), clip(p.CodeID, 128), clip(p.SHA256, 128),
 			clip(p.Signer, 256), clip(p.Package, 256), p.Start, now, now)
 		if err != nil {

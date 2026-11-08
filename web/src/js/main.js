@@ -1803,7 +1803,7 @@ async function openEntity(id, { anomaly } = {}) {
   const autoLabel = d.attrs?.auto_label || "";
   const hiddenAttrs = new Set(["user_label", "auto_label", "user_type", "owner", "groups", "same_as", "not_same_as", "link_copied"]);
   const attrs = Object.entries(d.attrs || {}).filter(([k]) => !hiddenAttrs.has(k))
-    .map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("");
+    .map(([k, v]) => `<dt>${esc(k)}</dt><dd${String(v).includes("\n") ? ' class="lines"' : ""}>${esc(v)}</dd>`).join("");
   const rename = d.kind === "device" ? `
     <form class="rename" autocomplete="off">
       <input name="label" maxlength="64" aria-label="Device name" value="${esc(userLabel)}" placeholder="${esc(userLabel ? autoLabel : d.label || "Name this device")}">

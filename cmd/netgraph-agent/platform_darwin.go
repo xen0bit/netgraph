@@ -7,10 +7,14 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"time"
 
 	"github.com/xen0bit/netgraph/internal/agent"
 	"github.com/xen0bit/netgraph/internal/agent/darwin"
 )
+
+// defaultInterval is how often the agent scans: each scan runs lsof and ps.
+const defaultInterval = 10 * time.Second
 
 func newScanner(cmdlines bool) agent.Scanner { return &darwin.Scanner{Cmdlines: cmdlines} }
 

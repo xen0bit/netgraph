@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xen0bit/netgraph/internal/agent"
 	"github.com/xen0bit/netgraph/internal/graph"
 	"github.com/xen0bit/netgraph/internal/model"
 )
@@ -258,6 +259,10 @@ func (s *Store) processEntity(ctx context.Context, id, key string, f model.Filte
 		}
 		d.Attrs["pids"] = strings.Join(ps, ", ")
 	}
+	// What each PID ran, and who started it, as the agent described them.
+	if len(pids) > 0 && len(agents) == 1 {
+		s.processLineage(ctx, d, slices.Collect(maps.Keys(agents))[0], slices.Sorted(maps.Keys(pids)))
+	}
 	// The executable the agent hashed, newest first.
 	for a := range agents {
 		var path, code string
@@ -493,4 +498,53 @@ func (s *Store) Search(ctx context.Context, q string, limit int) ([]model.Search
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// processLineage adds what an agent said about a program's PIDs: each one's
+// command line (the program alone unless the agent sends arguments) and the
+// chain of processes that started the newest.
+func (s *Store) processLineage(ctx context.Context, d *model.EntityDetail, agentName string, pids []int) {
+	type proc struct {
+		ppid          int
+		path, cmdline string
+	}
+	get := func(pid int) (proc, bool) {
+		var p proc
+		err := s.r.QueryRowContext(ctx, `SELECT ppid, path, cmdline FROM agent_processes WHERE agent = ? AND pid = ?`,
+			agentName, pid).Scan(&p.ppid, &p.path, &p.cmdline)
+		return p, err == nil
+	}
+	var lines []string
+	newest, newestPID := proc{}, 0
+	for _, pid := range pids {
+		p, ok := get(pid)
+		if !ok {
+			continue
+		}
+		if len(lines) < 10 && p.cmdline != "" {
+			lines = append(lines, "pid "+strconv.Itoa(pid)+": "+p.cmdline)
+		}
+		newest, newestPID = p, pid
+	}
+	if len(lines) > 0 {
+		d.Attrs["cmdline"] = strings.Join(lines, "\n")
+	}
+	if newestPID == 0 {
+		return
+	}
+	// Oldest first: "sshd › sshd-session › bash".
+	var chain []string
+	seen := map[int]bool{newestPID: true}
+	for pp := newest.ppid; pp > 1 && !seen[pp] && len(chain) < 8; {
+		seen[pp] = true
+		p, ok := get(pp)
+		if !ok {
+			break
+		}
+		chain = append([]string{agent.AppName(p.path, p.cmdline) + " (" + strconv.Itoa(pp) + ")"}, chain...)
+		pp = p.ppid
+	}
+	if len(chain) > 0 {
+		d.Attrs["started by"] = strings.Join(chain, " › ")
+	}
 }
