@@ -1808,6 +1808,39 @@ type Agent struct {
 	Connections  int      `json:"connections"`
 }
 
+// Program is one program a host agent reported in a window: what it
+// connected to and accepted, from the agent's sockets (loopback included,
+// which no sensor sees), and the bytes of the sensor's connections matched
+// to it.
+type Program struct {
+	// ID is the program's entity (process:<device>/<name>) when a sensor's
+	// connection was matched to it, so its device is known.
+	ID         string   `json:"id,omitempty"`
+	Agent      string   `json:"agent"`
+	Name       string   `json:"name"`
+	Path       string   `json:"path,omitempty"`
+	CodeID     string   `json:"code_id,omitempty"`
+	Device     string   `json:"device,omitempty"`
+	DeviceName string   `json:"device_name,omitempty"`
+	PIDs       []int    `json:"pids,omitempty"`
+	Cmdlines   []string `json:"cmdlines,omitempty"`
+	StartedBy  string   `json:"started_by,omitempty"`
+	// The agent's sockets: how many, by direction.
+	Connections int `json:"connections"`
+	Out         int `json:"out"`
+	In          int `json:"in"`
+	Local       int `json:"local"`
+	// Peers it connected to, and ports it accepted on, busiest first.
+	Peers  []string `json:"peers,omitempty"`
+	Serves []string `json:"serves,omitempty"`
+	// The sensor's connections matched to it.
+	Flows     int    `json:"flows"`
+	BytesOut  uint64 `json:"bytes_out"`
+	BytesIn   uint64 `json:"bytes_in"`
+	FirstSeen int64  `json:"first_seen"`
+	LastSeen  int64  `json:"last_seen"`
+}
+
 // AgentProcess is one process the agent attributed.
 type AgentProcess struct {
 	Agent     string `json:"agent"`

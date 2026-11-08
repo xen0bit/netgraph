@@ -216,6 +216,7 @@ td .muted { color: var(--fg-2); }
 .panel dl { display: grid; grid-template-columns: max-content 1fr; gap: 2px 12px; margin: 8px 0; font-size: 13px; }
 .panel dt { color: var(--fg-2); }
 .panel dd { margin: 0; word-break: break-word; }
+.panel dd.lines { white-space: pre-line; }
 .panel ul { list-style: none; padding: 0; margin: 0; font-size: 13px; }
 .panel li { padding: 3px 0; border-bottom: 1px solid var(--bg-3); }
 .panel li time { color: var(--fg-2); font-family: var(--mono); font-size: 12px; margin-right: 6px; }

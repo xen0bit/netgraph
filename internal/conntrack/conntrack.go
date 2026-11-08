@@ -90,6 +90,8 @@ const (
 	ctaProtoNum      = 1
 	ctaProtoSrcPort  = 2
 	ctaProtoDstPort  = 3
+	ctaProtoICMPID   = 4
+	ctaProtoICMPv6ID = 7
 	ctaCountPackets  = 1
 	ctaCountBytes    = 2
 )
@@ -146,6 +148,10 @@ func readTuple(b []byte, order binary.ByteOrder, proto *uint8, src, dst *netip.A
 					*sport = binary.BigEndian.Uint16(p)
 				case typ == ctaProtoDstPort && len(p) == 2:
 					*dport = binary.BigEndian.Uint16(p)
+				case (typ == ctaProtoICMPID || typ == ctaProtoICMPv6ID) && len(p) == 2:
+					// An echo's identifier, as capture records it: the
+					// requester's port.
+					*sport = binary.BigEndian.Uint16(p)
 				}
 			})
 		}
@@ -271,6 +277,9 @@ func (t *Tracker) Update(entries []Entry, complete bool, now time.Time) []wire.F
 		// The reply tuple's source is who actually answered, past any port forward.
 		src := netip.AddrPortFrom(e.OrigSrc, e.OrigSport)
 		dst := netip.AddrPortFrom(e.ReplySrc, e.ReplySport)
+		if e.Proto == 1 || e.Proto == 58 {
+			dst = netip.AddrPortFrom(e.ReplySrc, 0)
+		}
 		if e.OrigSrc.IsLoopback() || e.ReplySrc.IsLoopback() || (t.Ignore != nil && t.Ignore(src, dst)) {
 			continue
 		}

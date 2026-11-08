@@ -6,7 +6,6 @@ import (
 	"runtime"
 	"slices"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/xen0bit/netgraph/internal/policy"
@@ -100,6 +99,12 @@ func (r *Runner) Run(ctx context.Context) error {
 		at time.Time
 	}
 	last := map[string]sent{}
+	type sentProc struct {
+		p  Process
+		at time.Time
+	}
+	lastProcs := map[int]sentProc{}
+	var lastSend time.Time
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
@@ -152,10 +157,38 @@ func (r *Runner) Run(ctx context.Context) error {
 				actuals = append(actuals, a)
 			}
 		}
-		if err := r.Client.Send(ctx, &Batch{Processes: procs, Connections: changed, Actuals: actuals}); err != nil {
-			r.Logf("send: %v", err)
-			// Nothing was recorded: send it all again next time.
-			changedKeys = map[string]bool{}
+		// Processes likewise: a new or changed one, and each again every
+		// refresh, not the same list every scan.
+		newProcs := make([]Process, 0, len(procs))
+		for _, p := range procs {
+			if old, ok := lastProcs[p.PID]; !ok || old.p != p || now.Sub(old.at) >= r.Refresh {
+				newProcs = append(newProcs, p)
+			}
+		}
+		sentOK := true
+		if len(changed) > 0 || len(newProcs) > 0 || len(actuals) > 0 || now.Sub(lastSend) >= r.Refresh {
+			if err := r.Client.Send(ctx, &Batch{Processes: newProcs, Connections: changed, Actuals: actuals}); err != nil {
+				r.Logf("send: %v", err)
+				// Nothing was recorded: send it all again next time.
+				changedKeys = map[string]bool{}
+				sentOK = false
+			} else {
+				lastSend = now
+			}
+		}
+		if sentOK {
+			for _, p := range newProcs {
+				lastProcs[p.PID] = sentProc{p, now}
+			}
+		}
+		seenProcs := make(map[int]bool, len(procs))
+		for _, p := range procs {
+			seenProcs[p.PID] = true
+		}
+		for pid := range lastProcs {
+			if !seenProcs[pid] {
+				delete(lastProcs, pid)
+			}
 		}
 		next := make(map[string]sent, len(conns))
 		for _, c := range conns {
@@ -181,7 +214,7 @@ func predict(p *PolicyResponse, c Connection) (action, scope, rule, reason strin
 	}
 	d := p.Policy.Evaluate(policy.Conn{
 		Direction: c.Direction, Profile: p.Profile, Name: first(c.SNI, c.HTTPHost), Host: c.HTTPHost,
-		IP: c.RemoteIP, Port: strconv.Itoa(c.RemotePort), Proto: strings.TrimSuffix(c.Proto, "6"), Process: c.App,
+		IP: c.RemoteIP, Port: strconv.Itoa(c.RemotePort), Proto: BaseProto(c.Proto), Process: c.App,
 	})
 	scope = ScopeDefault
 	if d.Matched {

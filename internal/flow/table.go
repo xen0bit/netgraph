@@ -329,6 +329,10 @@ func reverse(p *Packet) bool {
 			return true
 		}
 	}
+	if p.Proto == ProtoICMP || p.Proto == ProtoICMPv6 {
+		// An echo reply carries the identifier as its destination.
+		return p.Src.Port() == 0 && p.Dst.Port() != 0
+	}
 	if p.Proto != ProtoTCP && p.Proto != ProtoUDP {
 		return false
 	}

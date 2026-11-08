@@ -165,6 +165,7 @@ func New(cfg Config) *Server {
 	read("/api/v1/summary", s.summary)
 	read("/api/v1/devices", s.devices)
 	read("/api/v1/flows", s.flows)
+	read("/api/v1/processes", func(w http.ResponseWriter, r *http.Request) { answer(s, w, r, s.cfg.Store.Programs) })
 	read("/api/v1/connections", s.connections)
 	read("/api/v1/destinations", s.destinations)
 	read("/api/v1/dns", s.dns)

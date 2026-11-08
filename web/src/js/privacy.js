@@ -20,7 +20,7 @@ const NAME_FIELDS = new Set(["label", "auto_label", "device_name", "peer_name", 
 // Fields that say nothing about anyone, and that code compares against.
 const KEEP = new Set(["kind", "rel", "proto", "app", "state", "direction", "severity", "type", "status", "precision", "source", "end_reason", "role", "signal", "says", "confidence", "tool", "event", "via", "tab", "user_type", "type_confidence", "action", "alpn", "says", "qtype", "rcode", "security"]);
 // Free text and fingerprints: nothing here is worth the risk.
-const BLANK = new Set(["text", "note", "user_agent", "user_agents", "ja4", "fingerprints", "model", "body", "path", "cmdline", "code_id", "sha256"]);
+const BLANK = new Set(["text", "note", "user_agent", "user_agents", "ja4", "fingerprints", "model", "body", "path", "cmdline", "cmdlines", "started_by", "started by", "code_id", "sha256"]);
 
 const isGenerated = (s) => /^\d+ (more|names?|other)/.test(s) || /^(private|other)$/i.test(s);
 

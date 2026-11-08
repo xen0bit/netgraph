@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"time"
 
 	"golang.org/x/sys/windows/svc"
 
@@ -14,7 +15,15 @@ import (
 	"github.com/xen0bit/netgraph/internal/agent/windows"
 )
 
-func newScanner(cmdlines bool) agent.Scanner { return &windows.Scanner{Cmdlines: cmdlines} }
+// defaultInterval is how often the agent scans.
+const defaultInterval = 10 * time.Second
+
+func newScanner(cmdlines bool, events string, _ func(string, ...any)) (agent.Scanner, func(), error) {
+	if events != "" && events != "poll" {
+		return nil, nil, fmt.Errorf("-events %q: only Linux agents have connection events", events)
+	}
+	return &windows.Scanner{Cmdlines: cmdlines}, func() {}, nil
+}
 
 // Windows reports and predicts only: enforcing would need the Windows
 // Filtering Platform, and netgraph changes no firewall it doesn't own.

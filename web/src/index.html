@@ -87,6 +87,7 @@
     <button role="tab" data-area="map" data-tab="graph">Map</button>
     <button role="tab" data-area="devices" data-tab="devices">Devices</button>
     <button role="tab" data-area="activity" data-tab="flows">Activity</button>
+    <button role="tab" data-area="processes" data-tab="processes" title="The programs host agents named, and what each talked to">Processes</button>
     <button role="tab" data-area="findings" data-tab="findings">Findings<span id="findings-count" class="nav-count" hidden></span></button>
     <button role="tab" data-area="wifi" data-tab="wifi">Wi-Fi</button>
     <button role="tab" data-area="settings" data-tab="settings">Settings</button>
@@ -158,6 +159,7 @@
     </section>
     <section id="view-devices" class="view" hidden><table id="t-devices"></table></section>
     <section id="view-flows" class="view" hidden><table id="t-flows"></table></section>
+    <section id="view-processes" class="view" hidden><p class="muted note">Programs named by <a href="https://github.com/xen0bit/netgraph/blob/main/docs/agent.md" target="_blank" rel="noopener">host agents</a>, with every connection their agent saw, loopback included. Open one for its connections and who started it.</p><table id="t-processes"></table></section>
     <section id="view-destinations" class="view" hidden><div class="table-tools"><label class="muted">Group <select id="dest-group" aria-label="Group destinations"><option value="">by name</option><option value="site">by site</option></select></label></div><table id="t-destinations"></table></section>
     <section id="view-dns" class="view" hidden><table id="t-dns"></table></section>
     <section id="view-facts" class="view" hidden><table id="t-facts"></table></section>

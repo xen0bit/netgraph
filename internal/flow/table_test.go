@@ -318,3 +318,25 @@ func FuzzMeasure(f *testing.F) {
 		}
 	})
 }
+
+// Pings are told apart by their echo identifier, carried as the requester's
+// port (the processor puts it there): two pings to one host are two flows,
+// and a reply seen first still makes the pinger the client.
+func TestICMPEchoFlows(t *testing.T) {
+	var r recorder
+	tb := New(Config{ActiveTimeout: 10 * time.Second}, r.emit)
+	pinger := netip.MustParseAddr("192.168.1.10")
+	host := netip.MustParseAddrPort("9.9.9.9:0")
+	a, b := netip.AddrPortFrom(pinger, 6354), netip.AddrPortFrom(pinger, 7000)
+	tb.Add(&Packet{TS: t0, Proto: ProtoICMP, Src: host, Dst: a, Len: 84}) // reply first
+	tb.Add(&Packet{TS: t0.Add(time.Second), Proto: ProtoICMP, Src: a, Dst: host, Len: 84})
+	tb.Add(&Packet{TS: t0.Add(time.Second), Proto: ProtoICMP, Src: b, Dst: host, Len: 84})
+	tb.Flush(t0.Add(2*time.Second), "end")
+	got := map[uint16]wire.Flow{}
+	for _, f := range r.flows {
+		got[f.SrcPort] = f
+	}
+	if len(got) != 2 || got[6354].Src != pinger || got[6354].DstPort != 0 || got[6354].BytesOut != 84 || got[6354].BytesIn != 84 {
+		t.Fatalf("flows = %+v", r.flows)
+	}
+}

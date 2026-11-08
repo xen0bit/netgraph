@@ -15,7 +15,7 @@ affects sensors or stored history.
 
 | Platform | Sockets from | Processes from | Enforcement |
 |---|---|---|---|
-| Linux (amd64, arm64, armv7, riscv64, 386) | `/proc/net/{tcp,tcp6,udp,udp6}` and `/proc/<pid>/fd` | `/proc/<pid>` | opt-in, nftables |
+| Linux (amd64, arm64, armv7, riscv64, 386) | `/proc/net/{tcp,tcp6,udp,udp6}` and `/proc/<pid>/fd`; with `-events=bpf` also the kernel's connection events | `/proc/<pid>` | opt-in, nftables |
 | macOS (amd64, arm64) | `lsof -nP -iTCP -iUDP` | `ps` | none: observe only |
 | Windows (amd64, arm64) | `GetExtendedTcpTable` (TCP only) | the process list and `QueryFullProcessImageName` | none: observe only |
 
@@ -44,10 +44,74 @@ It does **not** send packet payloads, credentials, DNS queries, file
 contents or environment variables, and it never runs a command, path or URL
 from the server.
 
-The agent polls (`-interval`, 10 s by default), so a connection that opens
-and closes between two scans is never seen. An open connection that hasn't
-changed is sent again every `-refresh` (a minute), which keeps its
+The agent polls (`-interval`: 2 s on Linux, 10 s on macOS and Windows), so
+a connection that opens and closes between two scans is never seen: a
+200 ms HTTP request usually isn't, a page load's keep-alive connection
+usually is. [Connection events](#connection-events-linux--eventsbpf) name
+the rest. On Linux a scan is cheap: the agent remembers which process
+holds each socket, and looks through `/proc/<pid>/fd` only for sockets it
+hasn't placed yet, first in the processes that already hold sockets, then
+in processes started since the last scan. It reads a process's identity as
+soon as it finds the socket, so a program that runs for a moment can still
+be named. An open connection that hasn't changed, and a process that
+hasn't, is sent again every `-refresh` (a minute), which keeps its
 `last_seen` current for matching.
+
+## Connection events (Linux, `-events=bpf`)
+
+Polling can't name what it doesn't see. Behind a reverse proxy most
+connections last milliseconds: a health check, a short API call, a
+`wget` in a script. With `-events=bpf` (or `NETGRAPH_AGENT_EVENTS=bpf`) the
+kernel tells the agent as each one happens, from small BPF programs
+(`internal/agent/linux/bpf/src/conn.c`) attached to:
+
+| Hook | What it reports |
+|---|---|
+| `tcp_connect` | an outbound TCP connection |
+| `inet_csk_accept` (on return) | an accepted TCP connection, in the process that accepted it |
+| `ip_send_skb`, `ip6_send_skb` | a UDP datagram, with its addresses as sent |
+| `ping_v4_sendmsg`, `ping_v6_sendmsg`, `raw_sendmsg`, `rawv6_sendmsg` | an ICMP echo request, with its echo identifier |
+
+Each event carries the process (PID, parent, start time, user, command
+name) and the socket's inode. The agent reads the process from `/proc` as
+the event arrives and checks its start time, so a reused PID is never
+mistaken for it. A program that already exited is named by the kernel's
+command name alone. UDP and pings are reported once per process and
+destination every five seconds, not per packet. Polling continues beside
+the events: it keeps open connections' `last_seen` moving, and covers
+anything a kernel can't hook (the agent logs what). Events also tell the
+scanner which process holds a socket, so it walks `/proc/<pid>/fd` less.
+
+The programs only read: they change no packet, socket or decision. They
+read no payload beyond a UDP header or the ICMP header a program sends,
+and report only sockets in the agent's own network namespace. Requirements:
+
+- `CAP_BPF` and `CAP_PERFMON` (or root). In a container, add them to
+  `cap_add`; the `.deb`/`.rpm` unit allows them (`systemctl edit
+  netgraph-agent` to add them to `AmbientCapabilities`). They let a
+  process read kernel memory through BPF: grant them only where you want
+  this;
+- a kernel with BTF (`/sys/kernel/btf/vmlinux`) and BPF trampolines: 5.17
+  or later on amd64, 6.0 on arm64. 32-bit ARM and 386 kernels have no
+  trampolines: there `-events=bpf` fails to start, and polling is the
+  mode;
+- the host's PID namespace (`pid: host` in a container), since the kernel
+  names processes by their host PIDs.
+
+An ICMP echo is matched by its identifier, which the sensor records as the
+pinger's port. An unbound socket's source address isn't decided until the
+route is chosen, so the agent asks the routing table, in the same network
+namespace, which address it sends from to that destination.
+
+`make bpf` rebuilds the objects (clang, in Docker); they are checked in,
+so building the agent needs no clang. `make bpf-test` loads them into the
+running kernel and checks each kind of event.
+
+## Ancestry
+
+On Linux each socket's owner comes with its parents (up to eight, as far as
+the agent can read them), so a program's details say who started it:
+`sshd (10) › sshd-session (20) › bash (31)`.
 
 ## Programs in the graph and the tables
 
@@ -61,7 +125,14 @@ open (two minutes of slack either way). Then:
   device keeps its totals. A lookup is folded into the program's edge when
   one program went there. A LAN connection between two hosts with agents is
   drawn program to program. Connections no agent named stay on the device.
+- **Processes** tab: every program the agents reported in the window, with
+  its host and device, PIDs, command lines, who started it, how many
+  connections it made, accepted and kept on the host (loopback, which no
+  sensor sees), what it talked to and served, and the bytes of the matched
+  connections (`GET /api/v1/processes`).
 - **Process details**: click a program on the map for its connections, PIDs,
+  each PID's command line (the program alone without `-cmdlines`), the
+  processes that started it,
   executable path and code ID (`GET /api/v1/entity?id=process:<device>/<name>`).
 - **Flows**: the Connections table, the device panel, `netgraph query flows`
   and `GET /api/v1/flows` carry `process`, `pid`, `agent` and, for a LAN
@@ -111,8 +182,9 @@ Manage.
 Every platform takes the same flags: `-server URL` (or `$NETGRAPH_SERVER`),
 `-token-file FILE` (or `$NETGRAPH_AGENT_TOKEN`), `-name` (or
 `$NETGRAPH_AGENT_NAME`; default: the host name), `-ca-file` for a private
-CA, `-interval`, `-refresh`, and `-once` (one scan and upload, to test a
-setup). See [Deployment](deployment.md#host-agents)
+CA, `-interval`, `-refresh`, `-events` (`poll`, or `bpf` on Linux: see
+[Connection events](#connection-events-linux--eventsbpf)), and `-once` (one
+scan and upload, to test a setup). See [Deployment](deployment.md#host-agents)
 for where agents fit.
 
 ### Linux with systemd

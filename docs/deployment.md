@@ -719,7 +719,8 @@ dedicated nftables table, off unless asked for.
 Matching needs the sensor and the agent to see the same addresses: an agent
 behind NAT from the sensor (a VM on a NAT network, a container on a bridge)
 names nothing until it runs where the sensor's addresses are. Connections
-shorter than the agent's scan interval (10 s) are missed, and hour-precision
+shorter than the agent's scan interval (2 s on Linux, 10 s elsewhere) are
+usually missed, and hour-precision
 windows, which come from rollups, name no programs. See
 [Host agent](agent.md#programs-in-the-graph-and-the-tables).
 

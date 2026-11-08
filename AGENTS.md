@@ -34,6 +34,12 @@ that are easy to break.
   and runs nothing the server names. Each platform's parsers build everywhere, have `Fuzz*`
   targets, and are tested on Linux CI. A program is matched to a sensor's connection by
   protocol, both addresses and ports, while it was open: never guessed from a name or a time alone.
+  An ICMP echo's identifier is its port (the sensor records it as the pinger's), and an unbound
+  socket's source address is the one the agent's routing table gives. Its optional BPF programs
+  (`internal/agent/linux/bpf`, `-events=bpf`) only read, report only the agent's own network
+  namespace, read no payload past a UDP or ICMP header, and are rebuilt with `make bpf` and
+  checked in: the agent builds without clang. A process named by an event is read from `/proc`
+  only if its start time matches the kernel's.
 - **The sensor persists nothing.** It writes no file: no database, spool,
   cache or keyring on disk. Its only inputs from disk are the token and CA
   files it is pointed at. (The kernel's connection table comes over netlink.)

@@ -63,6 +63,27 @@ build-ech:
 build-agent:
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/netgraph-agent$(if $(filter windows,$(GOOS)),.exe) ./cmd/netgraph-agent
 
+## bpf: rebuild the agent's BPF objects from internal/agent/linux/bpf/src (clang, in Docker)
+# The objects are checked in, so building the agent needs no clang. CO-RE
+# (BTF) lets one object run on any kernel; there is one per byte order.
+BPF_DIR   := internal/agent/linux/bpf
+BPF_IMAGE ?= alpine:3.22
+.PHONY: bpf
+bpf:
+	docker run --rm -v $(CURDIR)/$(BPF_DIR):/bpf -w /bpf/src $(BPF_IMAGE) sh -c '\
+		apk add -q --no-cache clang20 llvm20 libbpf-dev linux-headers >/dev/null && \
+		export PATH=/usr/lib/llvm20/bin:$$PATH && \
+		for e in el eb; do \
+			clang -O2 -g -Wall -Werror -target bpf$$e -c conn.c -o ../conn_bpf$$e.o && llvm-strip -g ../conn_bpf$$e.o || exit 1; \
+		done && chown $(shell id -u):$(shell id -g) ../conn_bpf*.o'
+
+## bpf-test: load the agent's BPF programs into this kernel and check their events (Docker, CAP_BPF)
+.PHONY: bpf-test
+bpf-test:
+	CGO_ENABLED=0 $(GO) test -c -o $(BIN_DIR)/bpf.test ./$(BPF_DIR)
+	docker run --rm --pid host --cap-drop ALL --cap-add BPF --cap-add PERFMON --cap-add SYS_RESOURCE \
+		-e NETGRAPH_BPF_TEST=1 -v $(CURDIR)/$(BIN_DIR)/bpf.test:/bpf.test:ro alpine /bpf.test -test.v -test.run Live
+
 ## web.build: assemble the web UI into web/dist
 .PHONY: web.build
 web.build:

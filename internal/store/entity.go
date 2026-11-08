@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/xen0bit/netgraph/internal/agent"
 	"github.com/xen0bit/netgraph/internal/graph"
 	"github.com/xen0bit/netgraph/internal/model"
 )
@@ -258,6 +259,18 @@ func (s *Store) processEntity(ctx context.Context, id, key string, f model.Filte
 		}
 		d.Attrs["pids"] = strings.Join(ps, ", ")
 	}
+	// What each PID ran, and who started it, as the agent described them.
+	if len(pids) > 0 && len(agents) == 1 {
+		newest := slices.Sorted(maps.Keys(pids))
+		slices.Reverse(newest)
+		cmds, by := s.lineage(ctx, slices.Collect(maps.Keys(agents))[0], newest)
+		if len(cmds) > 0 {
+			d.Attrs["cmdline"] = strings.Join(cmds, "\n")
+		}
+		if by != "" {
+			d.Attrs["started by"] = by
+		}
+	}
 	// The executable the agent hashed, newest first.
 	for a := range agents {
 		var path, code string
@@ -493,4 +506,49 @@ func (s *Store) Search(ctx context.Context, q string, limit int) ([]model.Search
 		out = append(out, r)
 	}
 	return out, rows.Err()
+}
+
+// lineage is what an agent said about a program's PIDs (the newest
+// first): each one's command line (the program alone unless the agent sends
+// arguments), and the chain of processes that started the newest, oldest
+// first: "sshd (10) › bash (20)".
+func (s *Store) lineage(ctx context.Context, agentName string, pids []int) (cmdlines []string, startedBy string) {
+	type proc struct {
+		ppid          int
+		path, cmdline string
+	}
+	get := func(pid int) (proc, bool) {
+		var p proc
+		err := s.r.QueryRowContext(ctx, `SELECT ppid, path, cmdline FROM agent_processes WHERE agent = ? AND pid = ?`,
+			agentName, pid).Scan(&p.ppid, &p.path, &p.cmdline)
+		return p, err == nil
+	}
+	newest, newestPID := proc{}, 0
+	for _, pid := range pids {
+		p, ok := get(pid)
+		if !ok {
+			continue
+		}
+		if len(cmdlines) < 10 && p.cmdline != "" {
+			cmdlines = append(cmdlines, "pid "+strconv.Itoa(pid)+": "+p.cmdline)
+		}
+		if newestPID == 0 {
+			newest, newestPID = p, pid
+		}
+	}
+	if newestPID == 0 {
+		return cmdlines, ""
+	}
+	var chain []string
+	seen := map[int]bool{newestPID: true}
+	for pp := newest.ppid; pp > 1 && !seen[pp] && len(chain) < 8; {
+		seen[pp] = true
+		p, ok := get(pp)
+		if !ok {
+			break
+		}
+		chain = append([]string{agent.AppName(p.path, p.cmdline) + " (" + strconv.Itoa(pp) + ")"}, chain...)
+		pp = p.ppid
+	}
+	return cmdlines, strings.Join(chain, " › ")
 }

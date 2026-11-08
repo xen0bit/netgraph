@@ -35,7 +35,9 @@ services:
   # The optional host agent (--profile agent): app's network namespace for its
   # sockets, the host's PID namespace to find their owners in, whichever
   # container they run in. It reads /proc only; SYS_PTRACE is for other
-  # processes' /proc/<pid>/fd, never to attach.
+  # processes' /proc/<pid>/fd, never to attach. With BPF and PERFMON added
+  # and NETGRAPH_AGENT_EVENTS=bpf, it names connections that last milliseconds,
+  # such as health checks, too.
   netgraph-agent:
     image: ${NETGRAPH_AGENT_IMAGE:-ghcr.io/xen0bit/netgraph-agent:latest}
     profiles: [agent]

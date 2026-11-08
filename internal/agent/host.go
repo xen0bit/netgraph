@@ -65,7 +65,7 @@ type Listener struct {
 // direction (in when a local listener has its port, local when the peer is
 // this host or link-local), and a key unique to the socket.
 func NewConnection(s Socket, listening map[Listener]bool, p Process, now int64) Connection {
-	proto := strings.TrimSuffix(strings.ToLower(s.Proto), "6")
+	proto := BaseProto(s.Proto)
 	local, remote := Unmap(s.LocalIP), Unmap(s.RemoteIP)
 	dir := "out"
 	if listening[Listener{proto, s.LocalPort}] {
@@ -87,6 +87,19 @@ func NewConnection(s Socket, listening map[Listener]bool, p Process, now int64) 
 		Direction: dir, State: s.State, PID: s.PID, UID: uid, App: AppName(p.Path, p.Cmdline), Path: p.Path,
 		CodeID: p.CodeID, SHA256: p.SHA256, FirstSeen: now, LastSeen: now,
 	}
+}
+
+// BaseProto names a protocol as the sensor does: tcp6 and udp6 are tcp and
+// udp; icmp and icmpv6 stay apart, as the sensor keeps them.
+func BaseProto(p string) string {
+	p = strings.ToLower(p)
+	switch p {
+	case "tcp6":
+		return "tcp"
+	case "udp6":
+		return "udp"
+	}
+	return p
 }
 
 // Argv0 is the program part of a command line, without its arguments.

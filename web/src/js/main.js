@@ -15,6 +15,7 @@ import { manageHTML } from "./manage.js";
 import { sensorStatus, sensorDetail, fleetSettingsHTML, readSettings } from "./fleet.js";
 import { typeBadge, typeWhy, profileForm, presenceHTML, linksHTML, qualityHTML } from "./devices.js";
 import { Pulse } from "./pulse.js";
+import { processesSpec, programDetail } from "./processes.js";
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
@@ -61,6 +62,7 @@ const areas = {
   home: { tabs: [["home", "Home"]] },
   map: { tabs: [["graph", "Map"]] },
   devices: { tabs: [["devices", "Devices"], ["presence", "Presence"], ["links", "To confirm"], ["passport", "Passport"]] },
+  processes: { tabs: [["processes", "Programs"]] },
   activity: { tabs: [["flows", "Connections"], ["destinations", "Destinations"], ["dns", "DNS"], ["facts", "Facts"], ["pulse", "Pulse"], ["quality", "Internet"]] },
   findings: { tabs: [["findings", "Inbox"], ["anomalies", "This window"], ["incidents", "Incidents"], ["insights", "Insights"], ["policy", "Policy"], ["manage", "Manage"]], tools: `<button id="whatif-open" type="button" title="Test a proposed policy against observed traffic">What-if</button>` },
   wifi: { tabs: [["wifi", "Networks"], ["airspace", "Airspace"]] },
@@ -568,6 +570,17 @@ async function openFleetSettings() {
   sensorForm("sensors/%2A/config");
 }
 
+// openProgram opens a program's details: its map node's when a sensor
+// connection was matched to it, else what the agent alone said.
+function openProgram(p) {
+  if (p.id) { openEntity(p.id); return; }
+  $("#panel").hidden = false;
+  ++entityReq;
+  state.open = "";
+  $("#panel-body").innerHTML = programDetail(p);
+  $("#panel-body").onclick = null;
+}
+
 function openSensor(s) {
   $("#panel").hidden = false;
   ++entityReq;
@@ -782,7 +795,7 @@ async function copyClick(e) {
   setTimeout(() => { b.textContent = "Copy"; }, 2000);
 }
 
-const tablePath = { devices: "devices", flows: "flows", destinations: "destinations", dns: "dns", facts: "facts", wifi: "wifi", sensors: "sensors", anomalies: "anomalies", incidents: "incidents" };
+const tablePath = { devices: "devices", processes: "processes", flows: "flows", destinations: "destinations", dns: "dns", facts: "facts", wifi: "wifi", sensors: "sensors", anomalies: "anomalies", incidents: "incidents" };
 
 async function renderTab(seq) {
   const t = state.tab;
@@ -1076,6 +1089,7 @@ const tables = {
     keys: [(i) => i.opened, (i) => i.status, (i) => i.severity, (i) => i.kind, (i) => i.title, (i) => (i.entities || []).join(" ")],
     id: (i) => `incident:${i.id}`,
   },
+  processes: { ...processesSpec(when), open: (p) => openProgram(p) },
   sensors: {
     cols: ["Sensor", "Status", "Version", "Interfaces", "First seen", "Last seen", "Packets", "Kernel drops", "Active flows", "Evicted", "Queued", "Sent", "Send errors"],
     num: [6, 7, 8, 9, 10, 11, 12],
@@ -1204,8 +1218,11 @@ async function loadMore(t) {
   } catch { /* status shows it */ }
 }
 
+// Tables the CSV export endpoint doesn't serve: their own CSV button does.
+const noExport = new Set(["sensors", "processes"]);
+
 function exportAll(t) {
-  if (!tablePath[t] || t === "sensors") return;
+  if (!tablePath[t] || noExport.has(t)) return;
   return track(api("export", { kind: t, all: "1" }, true)).then((text) => {
     download(`netgraph-${t}-${fileStamp()}.csv`, text, "text/csv");
   }).catch(() => {});
@@ -1258,7 +1275,7 @@ function renderTable(t) {
     } catch (e) { setStatus(`copy failed: ${e.message}`); }
   };
   const exportBtn = tools.querySelector("[data-export]");
-  exportBtn.hidden = !tablePath[t] || t === "sensors";
+  exportBtn.hidden = !tablePath[t] || noExport.has(t);
   exportBtn.onclick = () => exportAll(t);
   el.onclick = (e) => {
     const b = e.target.closest("thead button.sort");
@@ -1803,7 +1820,7 @@ async function openEntity(id, { anomaly } = {}) {
   const autoLabel = d.attrs?.auto_label || "";
   const hiddenAttrs = new Set(["user_label", "auto_label", "user_type", "owner", "groups", "same_as", "not_same_as", "link_copied"]);
   const attrs = Object.entries(d.attrs || {}).filter(([k]) => !hiddenAttrs.has(k))
-    .map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("");
+    .map(([k, v]) => `<dt>${esc(k)}</dt><dd${String(v).includes("\n") ? ' class="lines"' : ""}>${esc(v)}</dd>`).join("");
   const rename = d.kind === "device" ? `
     <form class="rename" autocomplete="off">
       <input name="label" maxlength="64" aria-label="Device name" value="${esc(userLabel)}" placeholder="${esc(userLabel ? autoLabel : d.label || "Name this device")}">

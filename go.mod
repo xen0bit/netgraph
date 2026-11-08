@@ -9,6 +9,7 @@ require (
 	github.com/charmbracelet/x/ansi v0.10.1
 	github.com/chromedp/cdproto v0.0.0-20250724212937-08a3db8b4327
 	github.com/chromedp/chromedp v0.14.2
+	github.com/cilium/ebpf v0.22.0
 	github.com/gopacket/gopacket v1.7.4
 	github.com/klauspost/compress v1.20.3
 	github.com/muesli/termenv v0.16.0

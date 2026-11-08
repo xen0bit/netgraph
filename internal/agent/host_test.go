@@ -116,22 +116,11 @@ func TestRunnerRefreshes(t *testing.T) {
 		}
 	}))
 	defer srv.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
 	defer cancel()
-	r := &Runner{Client: &Client{Base: srv.URL, Agent: "laptop", Boot: "b"}, Scanner: &countScanner{},
+	sc := &countScanner{}
+	r := &Runner{Client: &Client{Base: srv.URL, Agent: "laptop", Boot: "b"}, Scanner: sc,
 		Interval: 20 * time.Millisecond, Refresh: 200 * time.Millisecond, Hello: Hello{Host: "laptop", Version: "v1"}}
-	go func() {
-		for {
-			mu.Lock()
-			n := len(batches)
-			mu.Unlock()
-			if n >= 25 || ctx.Err() != nil {
-				cancel()
-				return
-			}
-			time.Sleep(5 * time.Millisecond)
-		}
-	}()
 	_ = r.Run(ctx)
 	mu.Lock()
 	defer mu.Unlock()
@@ -144,8 +133,8 @@ func TestRunnerRefreshes(t *testing.T) {
 			with++
 		}
 	}
-	// The first batch, then roughly one per refresh: not every scan.
-	if len(batches) < 20 || with < 2 || with > len(batches)/2 {
-		t.Fatalf("%d batches, %d with connections", len(batches), with)
+	// The first batch, then roughly one per refresh: not one every scan.
+	if sc.n < 20 || with < 2 || with > sc.n/4 {
+		t.Fatalf("%d scans, %d batches, %d with connections", sc.n, len(batches), with)
 	}
 }
