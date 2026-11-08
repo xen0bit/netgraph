@@ -52,6 +52,11 @@ type Scanner struct {
 	// owner can't be read (another user's, a process AppArmor hides) isn't
 	// looked for in every process again at every scan.
 	missed map[uint64]time.Time
+
+	// ev holds connection events (Listen) until the next scan.
+	ev eventState
+	// Logf, if set, reports events dropped for want of room.
+	Logf func(string, ...any)
 }
 
 type procEntry struct {
@@ -82,20 +87,34 @@ type socket struct {
 
 // Capabilities says what this scanner reports.
 func (s *Scanner) Capabilities() []string {
-	return []string{"process-identity", "process-ancestry", "proc-sockets"}
+	caps := []string{"process-identity", "process-ancestry", "proc-sockets"}
+	s.ev.mu.Lock()
+	defer s.ev.mu.Unlock()
+	if s.ev.on {
+		caps = append(caps, "bpf-events")
+	}
+	return caps
+}
+
+func (s *Scanner) root() string {
+	if s.Root == "" {
+		return "/proc"
+	}
+	return s.Root
 }
 
 // Scan returns the current connections, the processes holding them and
 // their parents.
 func (s *Scanner) Scan(ctx context.Context) ([]agent.Process, []agent.Connection, error) {
-	root := s.Root
-	if root == "" {
-		root = "/proc"
-	}
+	root := s.root()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.owners == nil {
 		s.owners, s.procs, s.missed = map[uint64]int{}, map[int]procEntry{}, map[uint64]time.Time{}
+	}
+	pend, dropped, _ := s.takePending()
+	if dropped > 0 && s.Logf != nil {
+		s.Logf("%d connection events dropped: more than %d between two scans", dropped, maxPending)
 	}
 	sockets, err := readSockets(root)
 	if err != nil {
@@ -113,6 +132,28 @@ func (s *Scanner) Scan(ctx context.Context) ([]agent.Process, []agent.Connection
 		}
 		if so.inode != 0 && (agent.Socket{RemoteIP: so.remoteIP, RemotePort: so.remotePort}).Connected() {
 			want[so.inode] = true
+		}
+	}
+	// An event already said which process holds a socket: no need to look.
+	if len(pend) > 0 {
+		tupleIno := map[string]uint64{}
+		for _, so := range sockets {
+			if want[so.inode] {
+				tupleIno[tupleOf(so.proto, so.localIP, so.localPort, so.remoteIP, so.remotePort)] = so.inode
+			}
+		}
+		for _, pc := range pend {
+			if !pc.verified {
+				continue
+			}
+			ino := pc.ino
+			if ino == 0 {
+				ino = tupleIno[pc.tuple] // an accepted socket has no inode yet when the event fires
+			}
+			if ino != 0 && want[ino] {
+				s.procs[pc.c.PID] = procEntry{p: pc.procs[0], ticks: pc.ticks}
+				s.owners[ino] = pc.c.PID
+			}
 		}
 	}
 	s.place(ctx, root, want)
@@ -155,13 +196,37 @@ func (s *Scanner) Scan(ctx context.Context) ([]agent.Process, []agent.Connection
 			pp = e.p.PPID
 		}
 	}
-	procs := make([]agent.Process, 0, len(used))
-	for _, pid := range slices.Sorted(maps.Keys(used)) {
-		procs = append(procs, s.procs[pid].p)
-		if len(procs) >= agent.MaxProcesses {
-			break
+	// Connections the events saw that /proc no longer shows (or never
+	// did: they closed before this scan), with the processes behind them.
+	extra := map[int]agent.Process{}
+	if len(pend) > 0 {
+		seen := map[string]bool{}
+		for _, c := range out {
+			seen[c.Key] = true
+			seen[tupleOf(c.Proto, c.LocalIP, c.LocalPort, c.RemoteIP, c.RemotePort)] = true
+		}
+		for _, pc := range pend {
+			if seen[pc.c.Key] || seen[pc.tuple] || len(out) >= agent.MaxConnections {
+				continue
+			}
+			seen[pc.c.Key], seen[pc.tuple] = true, true
+			pc.c.LastSeen = now
+			out = append(out, pc.c)
+			for _, p := range pc.procs {
+				if !used[p.PID] {
+					extra[p.PID] = p
+				}
+			}
 		}
 	}
+	procs := make([]agent.Process, 0, len(used)+len(extra))
+	for _, pid := range slices.Sorted(maps.Keys(used)) {
+		procs = append(procs, s.procs[pid].p)
+	}
+	for _, pid := range slices.Sorted(maps.Keys(extra)) {
+		procs = append(procs, extra[pid])
+	}
+	procs = procs[:min(len(procs), agent.MaxProcesses)]
 	// Forget what this scan didn't need: sockets that closed, processes
 	// that hold none of them.
 	for ino := range s.owners {

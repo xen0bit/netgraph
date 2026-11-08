@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strconv"
 
+	"github.com/xen0bit/netgraph/internal/agent"
 	"github.com/xen0bit/netgraph/internal/model"
 )
 
@@ -118,9 +119,4 @@ func (s *Store) setProcesses(ctx context.Context, flows []model.Flow, from, to i
 }
 
 // protoBase is tcp or udp, as the sensor names them, for an agent's tcp6.
-func protoBase(p string) string {
-	if len(p) > 1 && p[len(p)-1] == '6' {
-		return p[:len(p)-1]
-	}
-	return p
-}
+func protoBase(p string) string { return agent.BaseProto(p) }

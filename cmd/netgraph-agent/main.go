@@ -46,6 +46,7 @@ func run(ctx context.Context, args []string) error {
 	nftTable := fs.String("nft-table", "netgraph_agent", "nftables table for enforcement")
 	caFile := fs.String("ca-file", "", "PEM CA bundle to verify the server's certificate")
 	cmdlines := fs.Bool("cmdlines", false, "send each process's full command line; off, only the program (arguments can hold secrets)")
+	events := fs.String("events", envOr("NETGRAPH_AGENT_EVENTS", "poll"), "poll, or bpf (Linux): name connections as the kernel opens them; needs CAP_BPF, CAP_PERFMON and the host PID namespace; $NETGRAPH_AGENT_EVENTS")
 	version := fs.Bool("version", false, "print version and exit")
 	if err := fs.Parse(args); err != nil {
 		return err
@@ -86,9 +87,14 @@ func run(ctx context.Context, args []string) error {
 		tr.TLSClientConfig = &tls.Config{MinVersion: tls.VersionTLS12, RootCAs: pool}
 		client.HTTP = &http.Client{Timeout: 30 * time.Second, Transport: tr}
 	}
-	runner := &agent.Runner{Client: client, Scanner: newScanner(*cmdlines), Interval: *interval, Refresh: *refresh,
-		Hello: agent.Hello{Host: host, Version: buildinfo.Version},
-		Logf:  func(format string, a ...any) { fmt.Fprintf(os.Stderr, "netgraph-agent: "+format+"\n", a...) }}
+	logf := func(format string, a ...any) { fmt.Fprintf(os.Stderr, "netgraph-agent: "+format+"\n", a...) }
+	scanner, closeScanner, err := newScanner(*cmdlines, *events, logf)
+	if err != nil {
+		return err
+	}
+	defer closeScanner()
+	runner := &agent.Runner{Client: client, Scanner: scanner, Interval: *interval, Refresh: *refresh,
+		Hello: agent.Hello{Host: host, Version: buildinfo.Version}, Logf: logf}
 	switch *enforceMode {
 	case "off", "":
 	default:

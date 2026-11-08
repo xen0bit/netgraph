@@ -216,5 +216,18 @@ func parseL4(f *frame) {
 		f.payload = b[8:]
 	case 1, 58:
 		f.payload = b
+		// An echo's identifier tells one ping apart from another to the
+		// same host, as a port would, and is what a host agent sees too:
+		// the request carries it as its source "port", the reply as its
+		// destination. Other ICMP messages keep no ports.
+		if len(b) >= 8 {
+			id := binary.BigEndian.Uint16(b[4:])
+			switch {
+			case f.proto == 1 && b[0] == 8, f.proto == 58 && b[0] == 128:
+				f.sport = id
+			case f.proto == 1 && b[0] == 0, f.proto == 58 && b[0] == 129:
+				f.dport = id
+			}
+		}
 	}
 }

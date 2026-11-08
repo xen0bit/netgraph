@@ -6,7 +6,6 @@ import (
 	"runtime"
 	"slices"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/xen0bit/netgraph/internal/policy"
@@ -215,7 +214,7 @@ func predict(p *PolicyResponse, c Connection) (action, scope, rule, reason strin
 	}
 	d := p.Policy.Evaluate(policy.Conn{
 		Direction: c.Direction, Profile: p.Profile, Name: first(c.SNI, c.HTTPHost), Host: c.HTTPHost,
-		IP: c.RemoteIP, Port: strconv.Itoa(c.RemotePort), Proto: strings.TrimSuffix(c.Proto, "6"), Process: c.App,
+		IP: c.RemoteIP, Port: strconv.Itoa(c.RemotePort), Proto: BaseProto(c.Proto), Process: c.App,
 	})
 	scope = ScopeDefault
 	if d.Matched {

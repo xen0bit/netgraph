@@ -2,12 +2,14 @@ package store
 
 import (
 	"context"
+	"net/netip"
 	"testing"
 	"time"
 
 	"github.com/xen0bit/netgraph/internal/agent"
 	"github.com/xen0bit/netgraph/internal/graph"
 	"github.com/xen0bit/netgraph/internal/model"
+	"github.com/xen0bit/netgraph/internal/wire"
 )
 
 // A host agent on the web server names the programs behind the sensor's
@@ -160,5 +162,41 @@ func TestAgentProcessLineage(t *testing.T) {
 	send(4, []agent.Process{{PID: 20, PPID: 1, Path: "/usr/bin/sleep", Cmdline: "sleep", Start: 9000}}, nil)
 	if read(); first == was {
 		t.Fatal("a reused PID kept the old process's first_seen")
+	}
+}
+
+// A ping is matched by its echo identifier, which the sensor records as the
+// pinger's port and the agent reports as the socket's local port; another
+// identifier to the same host is another program's.
+func TestAgentNamesPings(t *testing.T) {
+	ctx := context.Background()
+	st, at := inboundStore(t, Config{})
+	ts := at.Add(10 * time.Second)
+	dns9 := netip.MustParseAddr("9.9.9.9")
+	ping := func(seq, id uint64, ident uint16) wire.Event {
+		return wire.Event{Seq: seq, Type: wire.TypeFlow, TS: ts.Add(2 * time.Second), Flow: &wire.Flow{ID: id, Proto: 1,
+			Src: webIP, SrcPort: ident, SrcMAC: webMAC, Dst: dns9, DstMAC: gwMAC, BytesOut: 84, BytesIn: 84, PktsOut: 1, PktsIn: 1,
+			FirstSeen: ts, Start: ts, End: ts.Add(time.Second), Final: true, EndReason: "idle"}}
+	}
+	if _, err := st.Ingest(ctx, "web", "boot", []wire.Event{ping(100, 50, 6354), ping(101, 51, 7000)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.IngestAgentBatch(ctx, &agent.Batch{Version: agent.Version, Agent: "web-agent", Boot: "b", Seq: 1,
+		Connections: []agent.Connection{{Key: "icmp|ping", Proto: "icmp", LocalIP: webIP.String(), LocalPort: 6354,
+			RemoteIP: dns9.String(), Direction: "out", PID: 7, App: "ping", FirstSeen: ts.UnixMilli(), LastSeen: ts.UnixMilli()}}}); err != nil {
+		t.Fatal(err)
+	}
+	flows, err := st.Flows(ctx, model.Filter{From: at, To: at.Add(time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := map[int]string{}
+	for _, fl := range flows {
+		if fl.Proto == "icmp" {
+			got[fl.ClientPort] = fl.Process
+		}
+	}
+	if got[6354] != "ping" || got[7000] != "" || len(got) != 2 {
+		t.Fatalf("pings named %v", got)
 	}
 }

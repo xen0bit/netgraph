@@ -693,3 +693,37 @@ func TestTCPDNSSequenceBoundaryDoesNotWedge(t *testing.T) {
 		t.Fatal("tcpDNS left the processor locked after a sequence boundary")
 	}
 }
+
+// A ping's echo identifier is its flow's client port, from the request and
+// the reply alike, so a host agent can say which program pinged.
+func TestICMPEchoIdentifier(t *testing.T) {
+	var out collector
+	p := NewProcessor(Config{}, &out)
+	mk := func(src, dst netip.Addr, typ byte) []byte {
+		eth := make([]byte, 14)
+		copy(eth[0:6], []byte{0xaa, 0xbb, 0xcc, 0x00, 0x00, 0x01})
+		copy(eth[6:12], []byte{0x3c, 0x22, 0xfb, 0x01, 0x02, 0x03})
+		binary.BigEndian.PutUint16(eth[12:], 0x0800)
+		icmp := make([]byte, 16)
+		icmp[0] = typ
+		binary.BigEndian.PutUint16(icmp[4:], 6354)
+		ip := make([]byte, 20)
+		ip[0] = 0x45
+		binary.BigEndian.PutUint16(ip[2:], uint16(20+len(icmp)))
+		ip[8], ip[9] = 64, 1
+		copy(ip[12:16], src.AsSlice())
+		copy(ip[16:20], dst.AsSlice())
+		return append(append(eth, ip...), icmp...)
+	}
+	remote := netip.MustParseAddr("9.9.9.9")
+	p.Handle(testutil.Base, mk(testutil.Phone.IP, remote, 8), capture.LinkEthernet)
+	p.Handle(testutil.Base.Add(10*time.Millisecond), mk(remote, testutil.Phone.IP, 0), capture.LinkEthernet)
+	p.Flush(testutil.Base.Add(time.Second), "end")
+	flows := out.of(wire.TypeFlow)
+	if len(flows) != 1 {
+		t.Fatalf("flows = %+v", flows)
+	}
+	if f := flows[0].Flow; f.Src != testutil.Phone.IP || f.SrcPort != 6354 || f.DstPort != 0 || f.PktsOut != 1 || f.PktsIn != 1 {
+		t.Fatalf("ping flow = %+v", f)
+	}
+}

@@ -21,7 +21,9 @@ func (noScanner) Scan(context.Context) ([]agent.Process, []agent.Connection, err
 
 const defaultInterval = 10 * time.Second
 
-func newScanner(bool) agent.Scanner { return noScanner{} }
+func newScanner(bool, string, func(string, ...any)) (agent.Scanner, func(), error) {
+	return noScanner{}, func() {}, nil
+}
 
 var newEnforcer = func(string, string, bool, []netip.Addr) (agent.Enforcer, error) { return nil, errPlatform }
 

@@ -16,7 +16,12 @@ import (
 // defaultInterval is how often the agent scans: each scan runs lsof and ps.
 const defaultInterval = 10 * time.Second
 
-func newScanner(cmdlines bool) agent.Scanner { return &darwin.Scanner{Cmdlines: cmdlines} }
+func newScanner(cmdlines bool, events string, _ func(string, ...any)) (agent.Scanner, func(), error) {
+	if events != "" && events != "poll" {
+		return nil, nil, fmt.Errorf("-events %q: only Linux agents have connection events", events)
+	}
+	return &darwin.Scanner{Cmdlines: cmdlines}, func() {}, nil
+}
 
 // macOS reports and predicts only: enforcing would need pf or a Network
 // Extension, and netgraph changes no firewall it doesn't own.

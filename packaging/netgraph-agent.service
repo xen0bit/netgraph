@@ -15,9 +15,10 @@ RestartSec=5s
 DynamicUser=yes
 # Another user's /proc/<pid>/fd and exe need CAP_SYS_PTRACE (read access to
 # /proc only: the agent never attaches to a process) and CAP_DAC_READ_SEARCH.
-# Enforcement (-enforce=nftables -apply) also needs CAP_NET_ADMIN: add it to
+# Enforcement (-enforce=nftables -apply) also needs CAP_NET_ADMIN, and
+# connection events (-events=bpf) CAP_BPF and CAP_PERFMON: add them to
 # AmbientCapabilities with systemctl edit netgraph-agent.
-CapabilityBoundingSet=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH CAP_NET_ADMIN CAP_BPF CAP_PERFMON
 AmbientCapabilities=CAP_SYS_PTRACE CAP_DAC_READ_SEARCH
 NoNewPrivileges=yes
 ProtectSystem=strict
