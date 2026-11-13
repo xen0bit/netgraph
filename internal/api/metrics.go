@@ -83,6 +83,19 @@ func (s *Server) metrics(w http.ResponseWriter, r *http.Request) {
 	m("netgraph_ingest_seconds_total", "counter", "Time spent storing batches.")
 	v("netgraph_ingest_seconds_total", nil, float64(im.nanos.Load())/1e9)
 
+	m("netgraph_http_requests_total", "counter", "API requests answered, by route.")
+	s.routeTimes.each(func(route string, rt routeTime) {
+		v("netgraph_http_requests_total", []string{"route", route}, float64(rt.n))
+	})
+	m("netgraph_http_request_seconds_total", "counter", "Time spent answering API requests, by route.")
+	s.routeTimes.each(func(route string, rt routeTime) {
+		v("netgraph_http_request_seconds_total", []string{"route", route}, rt.total.Seconds())
+	})
+	m("netgraph_http_slow_requests_total", "counter", "API requests that took a second or more, by route.")
+	s.routeTimes.each(func(route string, rt routeTime) {
+		v("netgraph_http_slow_requests_total", []string{"route", route}, float64(rt.slow))
+	})
+
 	if sensors, err := s.cfg.Store.Sensors(ctx); err == nil {
 		sort.Slice(sensors, func(i, j int) bool { return sensors[i].Name < sensors[j].Name })
 		m("netgraph_sensor_last_seen_timestamp_seconds", "gauge", "When the sensor last delivered a batch.")

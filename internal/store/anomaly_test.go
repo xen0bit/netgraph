@@ -300,14 +300,13 @@ func TestAnomaliesLiveWindowUsesCache(t *testing.T) {
 	if first.ToMS == moved.ToMS {
 		t.Error("the shared report was changed for the later request")
 	}
-	// It expires, since sensor_silent depends on the clock.
+	// It expires, since sensor_silent depends on the clock: the stale report
+	// is answered at once and a fresh one computed behind it.
 	now = now.Add(anomalyLiveTTL)
 	if _, err := st.Anomalies(ctx, live()); err != nil {
 		t.Fatal(err)
 	}
-	if n := st.anomRuns.Load(); n != 2 {
-		t.Errorf("after the live TTL the checks ran %d times, want 2", n)
-	}
+	waitRuns(t, st, 2)
 	// A different span is a different report.
 	if _, err := st.Anomalies(ctx, model.Filter{From: now.Add(-2 * time.Hour), To: now}); err != nil {
 		t.Fatal(err)
@@ -396,16 +395,76 @@ func TestAnomalyReportSurvivesIngestWhileRunning(t *testing.T) {
 	if st.anomGen != gen {
 		t.Error("ingest marked the running report out of date")
 	}
-	// It does drop a report past its allowance.
-	st.anomRep, st.anomKey, st.anomAt = &model.AnomalyReport{}, "k", now.Add(-time.Minute)
+	// It marks a report past its allowance stale, to be answered while a
+	// fresh one is computed, and leaves a younger one alone.
+	st.anomSlots = map[string]*anomalySlot{
+		"old": {rep: &model.AnomalyReport{}, at: now.Add(-time.Minute)},
+		"new": {rep: &model.AnomalyReport{}, at: now},
+	}
 	st.invalidateAnomaliesThrottled()
-	if st.anomRep != nil {
-		t.Error("ingest kept a report older than its allowance")
+	if !st.anomSlots["old"].stale || st.anomSlots["new"].stale {
+		t.Error("ingest did not mark only the report older than its allowance stale")
 	}
 	// A change a person made still applies at once.
 	gen = st.anomGen
 	st.invalidateAnomalies()
 	if st.anomGen == gen {
 		t.Error("an explicit invalidation did not mark running reports out of date")
+	}
+}
+
+// waitRuns waits for a background refresh to have run the checks n times.
+func waitRuns(t *testing.T, st *Store, n int64) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for st.anomRuns.Load() < n {
+		if time.Now().After(deadline) {
+			t.Fatalf("the checks ran %d times, want %d", st.anomRuns.Load(), n)
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	for { // and for its report to be kept
+		st.anomMu.Lock()
+		busy := len(st.anomFlight) > 0
+		st.anomMu.Unlock()
+		if !busy {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+}
+
+// New data marks a report stale; the next request is answered from it at
+// once, and a fresh report computed behind it. A person's edit still drops it.
+func TestAnomaliesStaleAnsweredWhileRefreshing(t *testing.T) {
+	now := testutil.Base
+	st, err := Open(filepath.Join(t.TempDir(), "ng.db"), Config{Now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	ctx := context.Background()
+	fixed := model.Filter{From: now.Add(-3 * time.Hour), To: now.Add(-2 * time.Hour)}
+	if _, err := st.Anomalies(ctx, fixed); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(anomalyIngestAllowance)
+	st.invalidateAnomaliesThrottled()
+	if _, err := st.Anomalies(ctx, fixed); err != nil {
+		t.Fatal(err)
+	}
+	waitRuns(t, st, 2)
+	st.anomMu.Lock()
+	sl := st.anomSlots[fmt.Sprintf("%d|%d|%s", fixed.From.UnixMilli(), fixed.To.UnixMilli(), "")]
+	st.anomMu.Unlock()
+	if sl == nil || sl.stale {
+		t.Fatalf("the refreshed report was not kept: %+v", sl)
+	}
+	st.invalidateAnomalies()
+	if _, err := st.Anomalies(ctx, fixed); err != nil {
+		t.Fatal(err)
+	}
+	if n := st.anomRuns.Load(); n != 3 {
+		t.Errorf("after an edit the checks ran %d times, want 3 (synchronously)", n)
 	}
 }

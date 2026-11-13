@@ -78,15 +78,65 @@ func NewConnection(s Socket, listening map[Listener]bool, p Process, now int64) 
 	if s.ID != "" {
 		key += "|" + s.ID
 	}
+	app := AppName(p.Path, p.Cmdline)
+	if k, ok := LoopbackKey(proto, local, s.LocalPort, remote, s.RemotePort, app, s.PID); ok {
+		key = k
+	}
 	uid := s.UID
 	if uid == 0 {
 		uid = p.UID
 	}
 	return Connection{
 		Key: key, Proto: proto, LocalIP: local, LocalPort: s.LocalPort, RemoteIP: remote, RemotePort: s.RemotePort,
-		Direction: dir, State: s.State, PID: s.PID, UID: uid, App: AppName(p.Path, p.Cmdline), Path: p.Path,
+		Direction: dir, State: s.State, PID: s.PID, UID: uid, App: app, Path: p.Path,
 		CodeID: p.CodeID, SHA256: p.SHA256, FirstSeen: now, LastSeen: now,
 	}
+}
+
+// LoopbackKey is the key of a connection this host makes to itself, over
+// loopback or to its own address: one per program and fixed end, whatever its
+// ephemeral port. No sensor can see such a connection, so nothing is lost,
+// and a health check every second would otherwise add a row a second (a
+// proxy's checks once made up 7 million of 7.7 million rows). The end on the
+// lower port is taken as the fixed one, the server's. It names the program,
+// not the process: a health check is often a new process every time.
+func LoopbackKey(proto, local string, lport int, remote string, rport int, app string, pid int) (string, bool) {
+	l, err1 := netip.ParseAddr(local)
+	r, err2 := netip.ParseAddr(remote)
+	if err1 != nil || err2 != nil || !(l.IsLoopback() && r.IsLoopback() || l == r) {
+		return "", false
+	}
+	end, side := netip.AddrPortFrom(r, uint16(rport)).String(), "client"
+	if lport < rport {
+		end, side = netip.AddrPortFrom(l, uint16(lport)).String(), "server"
+	}
+	who := app
+	if who == "" {
+		who = "pid " + strconv.Itoa(pid)
+	}
+	return proto + "|self|" + side + "|" + end + "|" + who, true
+}
+
+// MergeKeys folds connections sharing a key into one: the earliest first
+// sighting, the latest last one, the newest state.
+func MergeKeys(conns []Connection) []Connection {
+	at := make(map[string]int, len(conns))
+	out := conns[:0]
+	for _, c := range conns {
+		i, ok := at[c.Key]
+		if !ok {
+			at[c.Key] = len(out)
+			out = append(out, c)
+			continue
+		}
+		m := &out[i]
+		first := min(m.FirstSeen, c.FirstSeen)
+		if c.LastSeen >= m.LastSeen {
+			*m = c
+		}
+		m.FirstSeen = first
+	}
+	return out
 }
 
 // BaseProto names a protocol as the sensor does: tcp6 and udp6 are tcp and

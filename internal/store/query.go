@@ -156,9 +156,12 @@ func connBytes(col string, from, to int64) string {
 		 FROM flows f WHERE f.flow_key = c.flow_key AND f.t_end >= %[2]d AND f.t_start < %[3]d) END)`, col, from, to)
 }
 
-// connsWindow adds the condition for connections active in [from, to).
+// connsWindow adds the condition for connections active in [from, to). The
+// unary + keeps first_seen out of index selection: SQLite can't tell the two
+// bounds apart, and "first_seen < to" spans all history while "last_seen >=
+// from" is the window, so an index on (…, first_seen) would scan every row.
 func connsWindow(w *where, from, to int64) {
-	w.add("c.last_seen >= ? AND c.first_seen < ?", from, to)
+	w.add("c.last_seen >= ? AND +c.first_seen < ?", from, to)
 }
 
 // where accumulates SQL conditions and their arguments.
@@ -1944,13 +1947,11 @@ func (s *Store) dnsHourly(ctx context.Context, f model.Filter, from, to int64) (
 func (s *Store) Summary(ctx context.Context, f model.Filter) (*model.Summary, error) {
 	from, to := s.window(f)
 	sum := &model.Summary{FromMS: from, ToMS: to, Precision: s.precision(from, to)}
-	df := f
-	df.Limit, df.Offset = 100000, 0
-	devs, err := s.Devices(ctx, df)
+	n, err := s.countDevices(ctx, f, from, to, sum.Precision == model.PrecisionExact)
 	if err != nil {
 		return nil, err
 	}
-	sum.Devices = len(devs)
+	sum.Devices = n
 	if sum.Precision == model.PrecisionExact {
 		w := &where{}
 		connsWindow(w, from, to)
@@ -2024,11 +2025,62 @@ func (s *Store) Summary(ctx context.Context, f model.Filter) (*model.Summary, er
 			return nil, err
 		}
 	}
+	// One bound per query: SQLite reads a lone min() or max() from an index,
+	// but both at once scan the table (see DataRange).
 	var oldest, newest, rawOldest sql.NullInt64
-	_ = s.r.QueryRowContext(ctx, `SELECT min(bucket), max(bucket) + 3600000 FROM traffic_hourly`).Scan(&oldest, &newest)
-	_ = s.r.QueryRowContext(ctx, `SELECT min(first_seen) FROM connections`).Scan(&rawOldest)
+	_ = s.r.QueryRowContext(ctx, `SELECT min(bucket) FROM traffic_hourly`).Scan(&oldest)
+	_ = s.r.QueryRowContext(ctx, `SELECT max(bucket) + 3600000 FROM traffic_hourly`).Scan(&newest)
+	// Per direction (ingest writes only these four), min() reads each from the index.
+	_ = s.r.QueryRowContext(ctx, `SELECT min(first_seen) FROM connections INDEXED BY connections_direction_first WHERE direction IN ('in', 'out', 'local', 'external')`).Scan(&rawOldest)
 	sum.OldestData, sum.NewestData, sum.RawFrom = oldest.Int64, newest.Int64, rawOldest.Int64
 	return sum, nil
+}
+
+// countDevices is len(Devices(f)) without building each device. Devices
+// counts a device with a connection or lookup in the window, or, unfiltered,
+// one with a fact in it (an address it held, a name it announced); with a
+// filter it is simplest, and still exact, to ask Devices.
+func (s *Store) countDevices(ctx context.Context, f model.Filter, from, to int64, exact bool) (int, error) {
+	narrow := f.Port != 0 || f.Proto != "" || f.App != "" || f.Dir != "" || f.ASN != 0 || f.Country != ""
+	if narrow || f.Device != "" || f.IP != "" || f.Domain != "" || f.DomainExact != "" || f.DomainSuffix != "" {
+		df := f
+		df.Limit, df.Offset = 100000, 0
+		devs, err := s.Devices(ctx, df)
+		return len(devs), err
+	}
+	w := &where{}
+	var dw *where
+	var conns, lookups string
+	var err error
+	if exact {
+		connsWindow(w, from, to)
+		if err := s.flowWhere(ctx, f, w, rawCols); err != nil {
+			return 0, err
+		}
+		if dw, err = s.dnsWhere(ctx, f, from, to); err != nil {
+			return 0, err
+		}
+		conns = `SELECT 1 FROM connections c WHERE c.client_device = e.id AND ` + w.sql()
+		lookups = `SELECT 1 FROM dns WHERE client_device = e.id AND ` + dw.sql()
+	} else {
+		w.add("bucket < ? AND bucket >= ?", to, hourOf(from))
+		if err := s.flowWhere(ctx, f, w, hourlyCols); err != nil {
+			return 0, err
+		}
+		if dw, err = s.dnsHourlyWhere(ctx, f, from, to); err != nil {
+			return 0, err
+		}
+		conns = `SELECT 1 FROM traffic_hourly WHERE client_device = e.id AND ` + w.sql()
+		lookups = `SELECT 1 FROM dns_hourly WHERE client_device = e.id AND ` + dw.sql()
+	}
+	// A device is one of few: an indexed probe per device beats a DISTINCT
+	// over every connection in the window.
+	args := append(append(append([]any{}, w.args...), dw.args...), from, to)
+	var n int
+	err = s.r.QueryRowContext(ctx, `SELECT count(*) FROM entities e WHERE e.kind = 'device' AND (
+		EXISTS (`+conns+`) OR EXISTS (`+lookups+`)
+		OR EXISTS (SELECT 1 FROM facts WHERE src = e.id AND last_seen >= ? AND first_seen < ?))`, args...).Scan(&n)
+	return n, err
 }
 
 // WiFi lists the SSIDs access points were seen broadcasting in the window,

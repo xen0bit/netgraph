@@ -182,7 +182,7 @@ func (s *Store) forgetInDatabase(ctx context.Context, mac string, opts ForgetOpt
 	}
 	_, _ = s.w.ExecContext(ctx, `PRAGMA incremental_vacuum`)
 	s.invalidateAnomalies()
-	s.types.reset()
+	s.types.forget()
 	return res, nil
 }
 
@@ -300,6 +300,6 @@ func (s *Store) purgeInDatabase(ctx context.Context, before time.Time, opts Purg
 	}
 	_, _ = s.w.ExecContext(ctx, `PRAGMA incremental_vacuum`)
 	s.invalidateAnomalies()
-	s.types.reset()
+	s.types.forget()
 	return r, nil
 }

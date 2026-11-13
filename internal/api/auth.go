@@ -277,6 +277,7 @@ func (s *Server) gate(min Role, allowQuery bool, h http.HandlerFunc) http.Handle
 		h(rec, r)
 		if rec.status < 400 {
 			s.audit(r, id)
+			s.memo.changed()
 		}
 	})
 }
