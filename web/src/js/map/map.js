@@ -10,6 +10,8 @@ const MOVE_MS = 500;
 const MAX_PARTICLES = 700;
 const FONT = '12px system-ui, -apple-system, "Segoe UI", sans-serif';
 const FONT_SMALL = '10px system-ui, -apple-system, "Segoe UI", sans-serif';
+// LABEL_SCALE is the zoom below which a node's own text is too small to read.
+const LABEL_SCALE = 0.28;
 
 const PALETTES = {
   light: {
@@ -767,6 +769,7 @@ export class LivingMap {
     };
     this.drawEdges(g, view, t);
     this.drawNodes(g, view);
+    if (s <= LABEL_SCALE) this.drawFarLabels(g);
     if (this.lasso) {
       const l = this.lasso;
       g.fillStyle = p.lasso;
@@ -860,9 +863,46 @@ export class LivingMap {
     g.globalAlpha = 1;
   }
 
+  // drawFarLabels names nodes when the map is zoomed too far out for their own
+  // text: at a fixed, readable size under each node, the important ones first
+  // (anomalies, then devices and local nodes, then the biggest), and never on
+  // top of another label. A label that won't fit is left out, not squeezed in.
+  drawFarLabels(g) {
+    const p = this.pal, s = this.scale;
+    g.save();
+    g.setTransform(this.dpr, 0, 0, this.dpr, 0, 0);
+    g.font = FONT_SMALL;
+    g.textAlign = "center";
+    g.textBaseline = "top";
+    g.lineJoin = "round";
+    const rank = (d) => {
+      const n = d.data, a = n.attrs || {};
+      return (a.anomaly ? 0 : n.kind === "device" || n.local ? 1 : 2) * 1e6 - d.w * d.h;
+    };
+    const placed = [];
+    const nodes = [...this.nodes.values()].filter((d) => !d.dying && !this.dimmed(d.id)).sort((a, b) => rank(a) - rank(b));
+    for (const d of nodes) {
+      const text = d.label;
+      if (!text) continue;
+      const w = this.measure.measureText(text).width * (10 / 12) + 6;
+      const cx = d.x * s + this.x, top = (d.y + d.h / 2) * s + this.y + 2;
+      const r = { x0: cx - w / 2, x1: cx + w / 2, y0: top, y1: top + 13 };
+      if (r.x1 < 0 || r.x0 > this.W || r.y1 < 0 || r.y0 > this.H) continue;
+      if (placed.some((q) => r.x0 < q.x1 && q.x0 < r.x1 && r.y0 < q.y1 && q.y0 < r.y1)) continue;
+      placed.push(r);
+      g.globalAlpha = d.alpha ?? 1;
+      g.strokeStyle = p.bg;
+      g.lineWidth = 3;
+      g.strokeText(text, cx, top);
+      g.fillStyle = p.text;
+      g.fillText(text, cx, top);
+    }
+    g.restore();
+  }
+
   drawNodes(g, view) {
     const p = this.pal, s = this.scale;
-    const labels = s > 0.28;
+    const labels = s > LABEL_SCALE;
     const subs = s > 0.6;
     for (const d of this.nodes.values()) {
       if (d.x + d.w < view.x0 || d.x - d.w > view.x1 || d.y + d.h < view.y0 || d.y - d.h > view.y1) continue;
@@ -905,7 +945,11 @@ export class LivingMap {
         g.textBaseline = "middle";
         g.font = FONT;
         const tx = lx + 22;
-        if (d.sub && subs) {
+        // Zoomed out, text this size is a smudge: drawFarLabels writes it at
+        // a readable size instead.
+        if (!labels) {
+          // the icon alone
+        } else if (d.sub && subs) {
           g.fillText(d.label, tx, d.y - 7);
           g.font = FONT_SMALL;
           g.fillStyle = p.sub;

@@ -82,13 +82,16 @@ func (s *Store) qualitySamples(ctx context.Context, from, to int64, deviceFilter
 }
 
 // legs says which leg of a handshake crossed which network. From a sensor on the
-// router, whoever's outside is the far end of the WAN leg.
+// router, whoever's outside is the far end of the WAN leg. Only a connection
+// made from here measures the upstream: an inbound one's far end is a visitor,
+// wherever they happen to be, and a server's visitors from the far side of
+// the world would read as a slow internet. Its near leg still counts.
 func (q qualitySample) legs() (wan, lan float64) {
 	switch q.dir {
 	case "out":
 		return q.server, q.client
 	case "in":
-		return q.client, q.server
+		return 0, q.server
 	case "local":
 		return 0, q.server
 	}

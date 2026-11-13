@@ -691,11 +691,14 @@ func (s *Store) Destinations(ctx context.Context, f model.Filter) ([]model.Desti
 		return nil, err
 	}
 	key := "coalesce(nullif(sni, ''), nullif(http_host, ''), nullif(qname, ''), remote_ip)"
+	// The service is the server's port: a remote one when a device here
+	// connected out, the device's own when someone connected in (the
+	// remote's is a visitor's ephemeral port).
 	rows, err := s.r.QueryContext(ctx, `SELECT `+key+` AS k,
 		count(*), count(DISTINCT client_device),
 		sum(`+connBytes("bytes_out", from, to)+`), sum(`+connBytes("bytes_in", from, to)+`),
 		min(first_seen), max(last_seen), coalesce(group_concat(DISTINCT remote_ip), ''),
-		coalesce(group_concat(DISTINCT remote_port || ':' || proto), '')
+		coalesce(group_concat(DISTINCT CASE WHEN direction = 'in' THEN client_port ELSE remote_port END || ':' || proto), '')
 		FROM connections c WHERE `+w.sql()+` GROUP BY k
 		ORDER BY sum(`+connBytes("bytes_out", from, to)+` + `+connBytes("bytes_in", from, to)+`) DESC, k LIMIT ?`, append(w.args, limit(f, 1000, 100000))...)
 	if err != nil {

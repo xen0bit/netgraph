@@ -66,7 +66,7 @@ button.toggle[aria-pressed="true"] { background: var(--ok); color: var(--bg); bo
 .brand { font-size: 17px; margin: 0; display: flex; align-items: center; gap: 8px; }
 .brand .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px var(--sel); }
 .window { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.window input[type="datetime-local"] { width: 12.5rem; }
+.window input[type="datetime-local"] { width: 12.5rem; font-size: 0.8rem; padding-left: 0.35rem; padding-right: 0.2rem; font-variant-numeric: tabular-nums; }
 .arrow { color: var(--fg-2); }
 .presets { display: inline-flex; }
 .presets button { border-radius: 0; margin-left: -1px; }

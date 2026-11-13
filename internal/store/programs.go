@@ -5,6 +5,8 @@ import (
 	"context"
 	"fmt"
 	"maps"
+	"net"
+	"net/netip"
 	"slices"
 	"strconv"
 	"strings"
@@ -128,7 +130,7 @@ func (s *Store) Programs(ctx context.Context, f model.Filter) ([]model.Program, 
 		}
 		pids := slices.SortedFunc(maps.Keys(a.pids), func(x, y int) int { return cmp.Compare(a.pids[y], a.pids[x]) })
 		p.PIDs = pids[:min(len(pids), 20)]
-		p.Peers = counted(a.peers, 5)
+		p.Peers = peersFirst(a.peers, 5)
 		p.Serves = counted(a.serves, 5)
 		p.Cmdlines, p.StartedBy = s.lineage(ctx, p.Agent, p.PIDs)
 		out = append(out, p)
@@ -160,6 +162,26 @@ func hostPort(ip string, port int) string {
 func topKeys(m map[string]int, n int) []string {
 	ks := slices.SortedFunc(maps.Keys(m), func(x, y string) int { return cmp.Or(cmp.Compare(m[y], m[x]), cmp.Compare(x, y)) })
 	return ks[:min(len(ks), n)]
+}
+
+// peersFirst is counted, but the peers off this host before those on it: a
+// proxy's health checks to its backends, thousands a day, would otherwise
+// hide everything it talks to on the network.
+func peersFirst(m map[string]int, n int) []string {
+	off, on := map[string]int{}, map[string]int{}
+	for k, v := range m {
+		host := k
+		if h, _, err := net.SplitHostPort(k); err == nil {
+			host = h
+		}
+		if a, err := netip.ParseAddr(strings.Trim(host, "[]")); err == nil && a.IsLoopback() {
+			on[k] = v
+		} else {
+			off[k] = v
+		}
+	}
+	out := counted(off, n)
+	return append(out, counted(on, n-len(out))...)
 }
 
 // counted is topKeys with each count: "203.0.113.9:443 ×12".
