@@ -11,6 +11,8 @@ import (
 type Matcher struct {
 	domains map[string]Entry
 	hosts   map[string]Entry
+	// excepts are names a list exempts (@@||name^), with their subdomains.
+	excepts map[string]Entry
 	ips     []ipRange
 	// maxHi[i] is the highest end among ips[:i+1], once sorted.
 	maxHi  []netip.Addr
@@ -24,7 +26,7 @@ type ipRange struct {
 
 // New builds a matcher from entries.
 func New(entries []Entry) *Matcher {
-	m := &Matcher{domains: map[string]Entry{}, hosts: map[string]Entry{}}
+	m := &Matcher{domains: map[string]Entry{}, hosts: map[string]Entry{}, excepts: map[string]Entry{}}
 	for _, e := range entries {
 		m.Add(e)
 	}
@@ -42,6 +44,10 @@ func (m *Matcher) Add(e Entry) {
 		if v, ok := normalizeDomain(e.Value); ok {
 			m.hosts[v] = e
 		}
+	case "except":
+		if v, ok := normalizeDomain(e.Value); ok {
+			m.excepts[v] = e
+		}
 	case "ip":
 		if r, ok := parseRange(e.Value); ok {
 			r.entry = e
@@ -56,17 +62,21 @@ func (m *Matcher) Len() int {
 	if m == nil {
 		return 0
 	}
-	return len(m.domains) + len(m.hosts) + len(m.ips)
+	return len(m.domains) + len(m.hosts) + len(m.excepts) + len(m.ips)
 }
 
 // MatchName returns the first enabled entry that blocks a name. A host entry
-// is exact; a domain entry also covers its subdomains.
+// is exact; a domain entry also covers its subdomains. A name a list exempts
+// (an except entry, for it or a parent) is not blocked.
 func (m *Matcher) MatchName(name string) (Entry, bool) {
 	if m == nil {
 		return Entry{}, false
 	}
 	name = strings.ToLower(strings.TrimSuffix(name, "."))
 	if name == "" {
+		return Entry{}, false
+	}
+	if _, ok := m.Excepted(name); ok {
 		return Entry{}, false
 	}
 	if e, ok := m.hosts[name]; ok {
@@ -81,6 +91,25 @@ func (m *Matcher) MatchName(name string) (Entry, bool) {
 		}
 		if e, ok := m.domains[name[i+1:]]; ok {
 			return e, true
+		}
+	}
+	return Entry{}, false
+}
+
+// Excepted returns the entry exempting a name or one of its parents.
+func (m *Matcher) Excepted(name string) (Entry, bool) {
+	if m == nil || len(m.excepts) == 0 {
+		return Entry{}, false
+	}
+	name = strings.ToLower(strings.TrimSuffix(name, "."))
+	if e, ok := m.excepts[name]; ok {
+		return e, true
+	}
+	for i := 0; i < len(name); i++ {
+		if name[i] == '.' {
+			if e, ok := m.excepts[name[i+1:]]; ok {
+				return e, true
+			}
 		}
 	}
 	return Entry{}, false

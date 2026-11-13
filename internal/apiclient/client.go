@@ -900,3 +900,55 @@ func (c *Client) AgentConnections(ctx context.Context, name string, limit int) (
 	err := c.getJSON(ctx, "/api/v1/agents/"+url.PathEscape(name)+"/connections", q, &v)
 	return v, err
 }
+
+// DNSRules lists netgraph's DNS server's rules.
+func (c *Client) DNSRules(ctx context.Context) ([]model.DNSRule, error) {
+	var v []model.DNSRule
+	err := c.getJSON(ctx, "/api/v1/dns/rules", nil, &v)
+	return v, err
+}
+
+// SaveDNSRule adds a DNS rule, or changes the one with r.ID.
+func (c *Client) SaveDNSRule(ctx context.Context, r *model.DNSRule) (*model.DNSRule, error) {
+	body, err := json.Marshal(r)
+	if err != nil {
+		return nil, err
+	}
+	method, path := http.MethodPost, "/api/v1/dns/rules"
+	if r.ID != 0 {
+		method, path = http.MethodPut, fmt.Sprintf("/api/v1/dns/rules/%d", r.ID)
+	}
+	out, err := c.do(ctx, method, path, nil, body)
+	if err != nil {
+		return nil, err
+	}
+	var v model.DNSRule
+	if err := json.Unmarshal(out, &v); err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
+// DeleteDNSRule removes a DNS rule.
+func (c *Client) DeleteDNSRule(ctx context.Context, id int64) error {
+	_, err := c.do(ctx, http.MethodDelete, fmt.Sprintf("/api/v1/dns/rules/%d", id), nil, nil)
+	return err
+}
+
+// DNSStats counts lookups and refusals in the window.
+func (c *Client) DNSStats(ctx context.Context, f model.Filter) (*model.DNSStats, error) {
+	var v model.DNSStats
+	if err := c.getJSON(ctx, "/api/v1/dns/stats", f.Values(), &v); err != nil {
+		return nil, err
+	}
+	return &v, nil
+}
+
+// DNSServer is the DNS server's status; Enabled is false when none runs.
+func (c *Client) DNSServer(ctx context.Context) (*model.DNSServerStatus, error) {
+	var v model.DNSServerStatus
+	if err := c.getJSON(ctx, "/api/v1/dns/server", nil, &v); err != nil {
+		return nil, err
+	}
+	return &v, nil
+}

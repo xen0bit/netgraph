@@ -72,6 +72,8 @@ type Config struct {
 	Alerts func() alert.Stats
 	// MaxBatch bounds an ingest request body (compressed); default 32 MiB.
 	MaxBatch int64
+	// DNS is netgraph's own DNS server; nil when it isn't running.
+	DNS DNSServer
 }
 
 // Server serves the API.
@@ -219,6 +221,7 @@ func New(cfg Config) *Server {
 	s.mux.Handle("POST /api/v1/policy/export", s.require(RoleViewer, s.policyExport))
 	s.registerPolicyRoutes()
 	s.registerBlocklistRoutes()
+	s.registerDNSRoutes()
 	s.registerProfileRoutes()
 	s.registerDecisionRoutes()
 	s.registerGeoRoutes()

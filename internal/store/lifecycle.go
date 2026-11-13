@@ -138,6 +138,8 @@ func (s *Store) forgetInDatabase(ctx context.Context, mac string, opts ForgetOpt
 	count(`DELETE FROM findings WHERE device = ? OR instr(lower(entity), ?) > 0 OR instr(lower(summary), ?) > 0 OR instr(lower(evidence), ?) > 0 OR instr(lower(note), ?) > 0`, devID, m, m, m, m)
 	count(`DELETE FROM audit_log WHERE instr(lower(target), ?) > 0`, m)
 	count(`DELETE FROM policy_decisions WHERE device = ? OR instr(lower(device_name), ?) > 0 OR instr(lower(note), ?) > 0`, devID, m, m)
+	// A DNS rule for this device names it by MAC; rules for everyone stay.
+	count(`DELETE FROM dns_rules WHERE scope = 'device' AND lower(scope_value) = ?`, m)
 	// A pin names the device, or an address only it used, even in its ID.
 	count(`DELETE FROM map_pins WHERE instr(lower(id), ?) > 0`, m)
 	if len(related) > 0 {

@@ -848,7 +848,7 @@ func (s *Store) dnsQuery(ctx context.Context, f model.Filter, extra string, extr
 	if extra != "" {
 		w.add(extra, extraArgs...)
 	}
-	rows, err := s.r.QueryContext(ctx, `SELECT ts, client_ip, client_device, server_ip, qname, qtype, rcode, coalesce(latency_ms, 0), answers
+	rows, err := s.r.QueryContext(ctx, `SELECT ts, client_ip, client_device, server_ip, qname, qtype, rcode, coalesce(latency_ms, 0), answers, blocked_by
 		FROM dns WHERE `+w.sql()+` ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?`, append(w.args, limit(f, 500, 50000), offset(f))...)
 	if err != nil {
 		return nil, err
@@ -861,7 +861,7 @@ func (s *Store) dnsQuery(ctx context.Context, f model.Filter, extra string, extr
 		var q model.DNSQuery
 		var dev int64
 		var answers string
-		if err := rows.Scan(&q.TS, &q.ClientIP, &dev, &q.Server, &q.QName, &q.QType, &q.RCode, &q.LatencyMS, &answers); err != nil {
+		if err := rows.Scan(&q.TS, &q.ClientIP, &dev, &q.Server, &q.QName, &q.QType, &q.RCode, &q.LatencyMS, &answers, &q.BlockedBy); err != nil {
 			return nil, err
 		}
 		var as []struct {

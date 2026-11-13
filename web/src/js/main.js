@@ -16,6 +16,7 @@ import { sensorStatus, sensorDetail, fleetSettingsHTML, readSettings } from "./f
 import { typeBadge, typeWhy, profileForm, presenceHTML, linksHTML, qualityHTML } from "./devices.js";
 import { Pulse } from "./pulse.js";
 import { processesSpec, programDetail } from "./processes.js";
+import { blockedBy, settingsHTML as dnsSettingsHTML, homeCard as dnsHomeCard } from "./dns.js";
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
@@ -457,13 +458,13 @@ function visitSince() {
   return v.since;
 }
 
-let homeState = { at: 0, report: null, findings: null, firstVisit: false, links: 0 };
+let homeState = { at: 0, report: null, findings: null, firstVisit: false, links: 0, dns: null };
 const homePoll = () => (homeState.report?.state === "no_data" ? 3000 : 30_000);
 
 function drawHome() {
   const el = $("#home-body");
   if (!homeState.report) return;
-  el.innerHTML = homeHTML(homeState.report, homeState.findings, { firstVisit: homeState.firstVisit, origin: location.origin, links: homeState.links });
+  el.innerHTML = homeHTML(homeState.report, homeState.findings, { firstVisit: homeState.firstVisit, origin: location.origin, links: homeState.links, extra: dnsHomeCard(homeState.dns) });
 }
 
 // renderHome draws what it has, then the findings when their checks finish: they
@@ -481,6 +482,12 @@ async function renderHome(seq, { force = false } = {}) {
   if (!sameSince) homeState.findings = null;
   drawHome();
   if (report.state === "no_data") return;
+  // What netgraph's own DNS server refused, when it runs.
+  loadDNSStatus().then((st) => (st?.enabled ? api("dns/stats", new URLSearchParams({ from: "-24h" })) : null)).then((d) => {
+    if (seq !== refreshSeq) return;
+    homeState.dns = d;
+    drawHome();
+  }).catch(() => {});
   track(api("devices/links", new URLSearchParams())).then((l) => {
     if (seq !== refreshSeq) return;
     homeState.links = l.length;
@@ -705,6 +712,7 @@ function renderSettings() {
         ${[["", "Match the system"], ["light", "Light"], ["dark", "Dark"]].map(([v, l]) => `<button type="button" data-theme-set="${v}" aria-pressed="${t === v}">${l}</button>`).join("")}
       </div></section>
     <section class="card"><h2>Long-term archive</h2><div id="settings-archive" class="muted">Reading…</div></section>
+    <section class="card"><h2>DNS server</h2><div id="settings-dns" class="muted">Reading…</div></section>
     ${can("admin") && me ? `<section class="card"><h2>What's been changed</h2><div id="settings-audit" class="muted">Reading…</div></section>` : ""}
     <section class="card"><h2>Notifications</h2><div id="settings-notify" class="muted">Reading…</div></section>
     <section class="card"><h2>Saved views</h2>
@@ -730,6 +738,7 @@ function renderSettings() {
     el.textContent = a.enabled ? `On. ${held} Read it with netgraph archive; the pages here don't show it.`
       : a.files ? `Off, with what was kept still there. ${held}` : "Off. With -archive-dir, what passes retention is kept in files instead of deleted.";
   }).catch(() => { const el = $("#settings-archive"); if (el) el.textContent = "Can't read it."; });
+  renderSettingsDNS();
   if ($("#settings-audit")) {
     api("audit", new URLSearchParams({ limit: 50 })).then((rows) => {
       const el = $("#settings-audit");
@@ -756,6 +765,48 @@ function setPrivacy(on) {
   location.reload();
 }
 
+// --- the DNS server -------------------------------------------------------------
+
+// dnsStatus is GET /api/v1/dns/server: whether netgraph answers DNS itself,
+// which decides whether lookups get Block and Allow buttons.
+let dnsStatus = null;
+let dnsStatusAt = 0;
+async function loadDNSStatus() {
+  if (Date.now() - dnsStatusAt < 30_000) return dnsStatus;
+  dnsStatusAt = Date.now();
+  dnsStatus = await api("dns/server").catch(() => null);
+  return dnsStatus;
+}
+
+async function renderSettingsDNS() {
+  const el = $("#settings-dns");
+  if (!el) return;
+  dnsStatusAt = 0;
+  const [st, rules, devs] = await Promise.all([loadDNSStatus(), api("dns/rules").catch(() => []), api("devices", new URLSearchParams({ from: "-30d", limit: 1000 })).catch(() => [])]);
+  const names = Object.fromEntries((devs || []).map((d) => [d.id, d.label]));
+  el.classList.remove("muted");
+  el.innerHTML = dnsSettingsHTML(st, rules, { canEdit: can("operator"), names });
+  const form = el.querySelector("[data-dns-add]");
+  if (form) form.onsubmit = async (e) => {
+    e.preventDefault();
+    const f = Object.fromEntries(new FormData(form));
+    try {
+      await send("POST", "dns/rules", { action: f.action, pattern: f.pattern, scope: f.scope, scope_value: f.scope === "all" ? "" : f.scope_value, note: f.note });
+      setStatus(`${f.action === "block" ? "Blocking" : "Allowing"} ${f.pattern}`);
+      renderSettingsDNS();
+    } catch (err) { setStatus(err.message, true); }
+  };
+}
+
+// dnsQuick blocks or allows a name for everyone, from a lookup.
+async function dnsQuick(name, action) {
+  try {
+    await send("POST", "dns/block", { name, action });
+    setStatus(`${action === "block" ? "Blocked" : "Allowed"} ${name} for everyone. Settings → DNS server lists the rules.`);
+    refresh();
+  } catch (err) { setStatus(err.message, true); }
+}
+
 function setTheme(t) {
   if (t) { document.documentElement.dataset.theme = t; store.set("netgraph.theme", t); }
   else { delete document.documentElement.dataset.theme; store.remove("netgraph.theme"); }
@@ -763,6 +814,11 @@ function setTheme(t) {
 }
 
 function settingsClick(e) {
+  const dnsDel = e.target.closest("[data-dns-delete]");
+  if (dnsDel) {
+    send("DELETE", `dns/rules/${dnsDel.dataset.dnsDelete}`).then(() => { setStatus("Rule deleted"); renderSettingsDNS(); }).catch((err) => setStatus(err.message, true));
+    return;
+  }
   const test = e.target.closest("[data-notify-test]");
   if (test) {
     const out = test.parentElement.querySelector("output");
@@ -783,7 +839,7 @@ function settingsClick(e) {
   }
   const del = e.target.closest("[data-view-delete]");
   if (del) { const v = savedViews(); v.splice(Number(del.dataset.viewDelete), 1); saveViews(v); renderSettings(); return; }
-  if (e.target.closest("[data-forget-visit]")) { store.remove("netgraph.visit"); homeState = { at: 0, report: null, findings: null, firstVisit: false, links: 0 }; setStatus("Last visit forgotten"); }
+  if (e.target.closest("[data-forget-visit]")) { store.remove("netgraph.visit"); homeState = { at: 0, report: null, findings: null, firstVisit: false, links: 0, dns: null }; setStatus("Last visit forgotten"); }
 }
 
 // copyClick copies a command block, saying so on the button.
@@ -840,6 +896,7 @@ async function renderTab(seq) {
       return;
     }
     if (t === "insights") return await renderInsights(seq);
+    if (t === "dns") await loadDNSStatus();
     const path = tablePath[t];
     const extra = state.limits[t] ? { limit: state.limits[t] } : {};
     if (t === "destinations" && $("#dest-group")?.value) extra.group = $("#dest-group").value;
@@ -1041,17 +1098,20 @@ const tables = {
     id: peerID,
   },
   dns: {
-    cols: ["Time", "Device", "Type", "Name", "Result", "ms", "Answers (TTL)"],
+    cols: ["Time", "Device", "Type", "Name", "Result", "ms", "Answers (TTL)", ""],
     num: [5],
     row: (q) => [
       when(q.ts), esc(q.device_name || q.client_ip), esc(q.qtype),
       esc(q.qname) + (q.count > 1 ? ` <span class="muted">×${q.count}</span>` : ""),
-      q.rcode === "NOERROR" ? esc(q.rcode) : badge(q.rcode, "err"),
+      q.rcode === "NOERROR" ? esc(q.rcode) : q.rcode === "BLOCKED" ? badge("blocked", "sev-high") + (q.blocked_by ? `<div class="sub">${esc(blockedBy(q.blocked_by))}</div>` : "") : badge(q.rcode, "err"),
       q.latency_ms ? q.latency_ms.toFixed(1) : "",
       `<span class="mono">${(q.answers || []).map((a) => `${esc(a.data)} (${a.ttl}s)`).join("<br>")}</span>`,
+      // A name in one click: blocked ones can be let through, the rest blocked.
+      dnsStatus?.enabled && can("operator") && q.qname
+        ? `<button type="button" class="small" data-dns-act="${q.rcode === "BLOCKED" ? "allow" : "block"}" data-dns-name="${esc(q.qname)}">${q.rcode === "BLOCKED" ? "Allow" : "Block"}</button>` : "",
     ],
     keys: [(q) => q.ts, (q) => q.device_name || addrKey(q.client_ip), (q) => q.qtype, (q) => q.qname, (q) => q.rcode,
-      (q) => q.latency_ms, (q) => q.answers?.length || 0],
+      (q) => q.latency_ms, (q) => q.answers?.length || 0, () => 0],
     id: (q) => `domain:${q.qname}`,
   },
   facts: {
@@ -1293,6 +1353,8 @@ function renderTable(t) {
   el.onclick = (e) => {
     const b = e.target.closest("thead button.sort");
     if (b) { sortBy(t, Number(b.dataset.col)); return; }
+    const act = e.target.closest("[data-dns-act]");
+    if (act) { dnsQuick(act.dataset.dnsName, act.dataset.dnsAct); return; }
     const tr = e.target.closest("tbody tr[data-i]");
     if (!tr) return;
     const r = rows[Number(tr.dataset.i)];

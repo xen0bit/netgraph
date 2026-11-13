@@ -16,6 +16,7 @@
 | `internal/archive` | the long-term archive's files: writing, reading, and erasing from them |
 | `internal/conntrack` | the kernel connection table, over netlink, as flow records (`-conntrack`) |
 | `internal/sources` | what runs on the server: NetFlow, IPFIX, sFlow, DNS logs, lease files |
+| `internal/dnsserver` | the optional DNS server (`serve -dns-listen`): forwards, caches, records and refuses what blocklists and DNS rules name |
 | `internal/rdns` | bounded background reverse-DNS lookups at observation time |
 | `internal/wifi` | 802.11/radiotap parsing, WEP/WPA/WPA2 key derivation and decryption, channel hopping |
 | `internal/store` | SQLite schema, ingest and correlation, queries, retention |

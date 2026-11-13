@@ -70,6 +70,7 @@ netgraph serve -db /var/lib/netgraph/netgraph.db -listen :8443
 | `-netflow-listen`, `-netflow-allow` | | receive NetFlow v5, v9 and IPFIX on a UDP address, from these addresses only: see [Other sources](#other-sources) |
 | `-sflow-listen`, `-sflow-allow` | | receive sFlow v5 on a UDP address, from these addresses only |
 | `-dns-log`, `-dns-log-format` | `dnsmasq` | follow a DNS server's log |
+| `-dns-listen`, `-dns-upstream-file`, `-dns-allow`, `-dns-block-mode` | off | be the network's DNS server, recording every lookup and refusing names you block: see [DNS server](dns.md) |
 | `-leases-file`, `-leases-format` | `dnsmasq` | read names and addresses from a DHCP server's lease file: `dnsmasq`, `isc` or `kea` |
 | `-source-local` | private ranges | the CIDRs that are "here", for those |
 | `-llm-file` | `$NETGRAPH_LLM` | let Ask use a language model: an OpenAI-compatible URL such as `http://localhost:11434/v1?model=llama3.2`, or `https://api.example.com/v1?model=name&key=KEY`. Off by default: a model on another network receives your network's data, and the page warns before sending any |

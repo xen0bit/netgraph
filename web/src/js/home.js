@@ -113,7 +113,7 @@ function firstRun(h, origin) {
 }
 
 // homeHTML is the whole page. rep is the findings report, null until it arrives.
-export function homeHTML(h, rep, { firstVisit, origin, links = 0 }) {
+export function homeHTML(h, rep, { firstVisit, origin, links = 0, extra = "" }) {
   if (h.state === "no_data") return firstRun(h, origin);
   const [cls, icon, head, sub] = status(h);
   const s = h.summary_since;
@@ -139,6 +139,7 @@ export function homeHTML(h, rep, { firstVisit, origin, links = 0 }) {
         <header class="card-head"><h2 id="h-here">${h.state === "ok" ? "Here now" : "Here at the end of the data"}</h2><span class="muted">${h.active.length}</span></header>
         ${people(h.active)}
       </section>
+      ${extra}
       <section class="card" aria-labelledby="h-busy">
         <header class="card-head"><h2 id="h-busy">Busiest in the last hour</h2></header>
         ${talkers(h.top_talkers)}

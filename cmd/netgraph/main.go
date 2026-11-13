@@ -52,6 +52,8 @@ func main() {
 		err = runPolicy(os.Args[2:])
 	case "blocklist":
 		err = runBlocklist(os.Args[2:])
+	case "dns":
+		err = runDNS(os.Args[2:])
 	case "profile":
 		err = runProfile(os.Args[2:])
 	case "decisions":
@@ -98,6 +100,7 @@ commands:
   whatif     test a proposed policy against observed traffic
   policy     save, audit, explain, export or restore policy (learn/export are still here)
   blocklist  manage parsed domain/host/address blocklists
+  dns        the DNS server's block and allow rules, and its stats
   profile    manage profiles and the network triggers that activate them
   decisions  review passive would-ask decisions
   purpose    import and look up application purpose metadata

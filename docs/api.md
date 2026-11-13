@@ -77,6 +77,11 @@ are unix milliseconds.
 | `POST /api/v1/blocklists/{id}/import` | `{text,format}`: parse and replace entries. Operator |
 | `POST /api/v1/blocklists/{id}/update` | fetch the URL now, over HTTPS to a public address only. Operator |
 | `GET/POST /api/v1/rule-groups` | blocklist groups |
+| `GET /api/v1/dns/server` | netgraph's DNS server: `{enabled:false}` when it isn't running, else its listeners, upstreams (scheme and host only), block mode, counters and rule counts |
+| `GET /api/v1/dns/stats` | over the window: lookups, refused (`BLOCKED`), per step, the names most blocked and asked for, and the busiest clients |
+| `GET/POST /api/v1/dns/rules` | the DNS server's rules: `{scope: all\|device\|group, scope_value, action: block\|allow, pattern, note}`; a pattern covers its subdomains, `*` is every name. Writes are Operator |
+| `PUT/DELETE /api/v1/dns/rules/{id}` | change or delete one rule. Operator |
+| `POST /api/v1/dns/block` | `{name, action, device}`: block (or allow) a name for everyone or one device, in one step. Operator |
 | `GET/POST /api/v1/profiles` | policy profiles; writes are Operator |
 | `GET/PUT/DELETE /api/v1/profiles/{id}` | load, replace or delete one profile |
 | `POST /api/v1/profiles/{id}/activate` | activate a profile (`204`) |

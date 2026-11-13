@@ -84,6 +84,8 @@ netgraph graph -from -1h -o window.svg
   how names and devices are correlated, and what netgraph cannot see.
 - [Host agent](docs/agent.md): naming the programs behind connections, on
   Linux, macOS and Windows.
+- [DNS server](docs/dns.md): optionally, be the network's DNS server,
+  recording every lookup and refusing names blocklists and rules block.
 - [HTTP API](docs/api.md): query endpoints and the sensor event format.
 - [Development](docs/development.md): building, testing, fuzzing, the
   Docker lab, releases.

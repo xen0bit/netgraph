@@ -1,5 +1,6 @@
 // Package blocklist parses and matches the blocklist formats netgraph
-// accepts: hosts files, plain domain lists, address/CIDR lists and Little
+// accepts: hosts files, plain domain lists, AdGuard/Adblock-style domain rules
+// (||example.com^, @@||example.com^), address/CIDR lists and Little
 // Snitch-style .lsrules JSON. It is server-only and never touches a firewall.
 package blocklist
 
@@ -26,7 +27,7 @@ const (
 
 // Entry is one parsed blocklist line.
 type Entry struct {
-	Kind  string `json:"kind"` // domain, host, ip
+	Kind  string `json:"kind"` // domain, host, ip, or except: a domain a list exempts
 	Value string `json:"value"`
 	// Disabled is only set when restoring a list someone had edited; a parsed
 	// feed never disables anything.
@@ -106,6 +107,12 @@ func parseLines(b []byte, allowIP, allowDomain bool) (*Parsed, error) {
 			}
 			if v, ok := header(line, "# Description:"); ok {
 				out.Description = v
+			}
+			continue
+		}
+		if allowDomain && (strings.HasPrefix(line, "||") || strings.HasPrefix(line, "@@||")) {
+			if !addAdblock(out, seen, line) {
+				out.Invalid++
 			}
 			continue
 		}
@@ -201,6 +208,33 @@ func addDomain(out *Parsed, seen map[string]bool, s string) bool {
 	return add(out, seen, Entry{Kind: "domain", Value: v})
 }
 
+// addAdblock reads one AdGuard/Adblock domain rule: ||name^ blocks a name and
+// its subdomains, @@||name^ excepts them. A rule with modifiers ($client,
+// $dnsrewrite, ...) or a wildcard means more than a name, and is not read as
+// one: $important only orders rules, so it is the one modifier accepted.
+func addAdblock(out *Parsed, seen map[string]bool, line string) bool {
+	kind := "domain"
+	if rest, ok := strings.CutPrefix(line, "@@"); ok {
+		kind, line = "except", rest
+	}
+	line = strings.TrimPrefix(line, "||")
+	if rule, mods, ok := strings.Cut(line, "$"); ok {
+		if strings.TrimSpace(mods) != "important" {
+			return false
+		}
+		line = rule
+	}
+	line, ok := strings.CutSuffix(strings.TrimSpace(line), "^")
+	if !ok || strings.ContainsAny(line, "*/|^") {
+		return false
+	}
+	v, ok := normalizeDomain(line)
+	if !ok {
+		return false
+	}
+	return add(out, seen, Entry{Kind: kind, Value: v})
+}
+
 func addHost(out *Parsed, seen map[string]bool, s string) bool {
 	v, ok := normalizeDomain(s)
 	if !ok {
@@ -221,6 +255,11 @@ func add(out *Parsed, seen map[string]bool, e Entry) bool {
 	out.Entries = append(out.Entries, e)
 	return true
 }
+
+// NormalizeName lower-cases a DNS name and checks it is one: letters, digits,
+// hyphens, underscores and dots, at most 253 characters. A leading "*." and a
+// trailing dot are dropped.
+func NormalizeName(s string) (string, bool) { return normalizeDomain(s) }
 
 func normalizeDomain(s string) (string, bool) {
 	s = strings.ToLower(strings.TrimSpace(s))

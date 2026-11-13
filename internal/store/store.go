@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -123,6 +124,9 @@ type Store struct {
 	findMu       sync.Mutex // serialises scans; guards the two below
 	findScanned  time.Time
 	findLearning bool
+
+	// dnsSelf is where netgraph's own DNS server answers (SetDNSSelf).
+	dnsSelf atomic.Pointer[map[netip.Addr]bool]
 
 	anomMu  sync.Mutex
 	anomGen uint64 // bumped by invalidateAnomalies

@@ -36,6 +36,19 @@ type publisher struct {
 	said       time.Time
 }
 
+// Publisher sends events as a named source, the way a sensor would. The DNS
+// server records its lookups through one.
+type Publisher struct{ p *publisher }
+
+// NewPublisher makes a Publisher named name, whose network is local.
+func NewPublisher(name string, local []netip.Prefix, sink Sink, log *slog.Logger) *Publisher {
+	return &Publisher{newPublisher(name, local, sink, log)}
+}
+
+// Send numbers and sends events (with a hello now and then). It is not safe
+// to call from more than one goroutine.
+func (p *Publisher) Send(ctx context.Context, evs []wire.Event) { p.p.send(ctx, evs) }
+
 func newPublisher(name string, local []netip.Prefix, sink Sink, log *slog.Logger) *publisher {
 	if len(local) == 0 {
 		local = DefaultLocal

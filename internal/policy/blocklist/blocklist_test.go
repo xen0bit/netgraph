@@ -103,10 +103,50 @@ func TestParseLSRules(t *testing.T) {
 	}
 }
 
+// AdGuard's own lists are written as Adblock-style rules. A rule that means
+// more than a name (a modifier, a wildcard, a regex) is counted, not guessed.
+func TestParseAdblockRules(t *testing.T) {
+	p, err := Parse(strings.NewReader(`! Title: AdGuard DNS filter
+||ads.example^
+||Tracker.Example.^
+@@||ok.ads.example^
+||important.example^$important
+||client.example^$client=192.168.1.5
+||wild*.example^
+/ads[0-9]+\.example/
+||no-caret.example
+0.0.0.0 hosts.example
+`), "auto")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"domain:ads.example": "", "domain:tracker.example": "", "except:ok.ads.example": "", "domain:important.example": "", "host:hosts.example": ""}
+	for _, e := range p.Entries {
+		k := e.Kind + ":" + e.Value
+		if _, ok := want[k]; !ok {
+			t.Errorf("unexpected entry %s", k)
+		}
+		delete(want, k)
+	}
+	if len(want) != 0 || p.Invalid != 4 {
+		t.Errorf("missing %v; invalid %d, want 4", want, p.Invalid)
+	}
+	m := New(p.Entries)
+	for name, blocked := range map[string]bool{
+		"ads.example": true, "x.ads.example": true, "ok.ads.example": false, "deep.ok.ads.example": false,
+		"tracker.example.": true, "hosts.example": true, "sub.hosts.example": false, "client.example": false,
+	} {
+		if _, ok := m.MatchName(name); ok != blocked {
+			t.Errorf("MatchName(%q) = %v, want %v", name, ok, blocked)
+		}
+	}
+}
+
 func FuzzParse(f *testing.F) {
 	f.Add([]byte("0.0.0.0 ads.example\n1.2.3.0/24\n"), "auto")
 	f.Add([]byte(`{"rules":[{"action":"deny","remote-domains":["x.example"]}]}`), "lsrules")
 	f.Add([]byte("10.0.0.1-10.0.0.9\n::/0\n"), "ips")
+	f.Add([]byte("! AdGuard\n||ads.example^\n@@||ok.ads.example^$important\n||x.example^$client=1.2.3.4\n"), "auto")
 	f.Fuzz(func(t *testing.T, b []byte, format string) {
 		p, err := Parse(strings.NewReader(string(b)), format)
 		if err != nil {
@@ -124,7 +164,17 @@ func FuzzParse(f *testing.F) {
 				if _, ok := m.MatchIP(lo); !ok {
 					t.Fatalf("entry %+v does not match its own address", e)
 				}
+			case "except":
+				if _, ok := m.Excepted(e.Value); !ok {
+					t.Fatalf("exception %+v does not exempt itself", e)
+				}
+				if _, ok := m.MatchName(e.Value); ok {
+					t.Fatalf("exception %+v is blocked", e)
+				}
 			default:
+				if _, exempt := m.Excepted(e.Value); exempt {
+					continue // a list exempting what another line blocks
+				}
 				if _, ok := m.MatchName(e.Value); !ok {
 					t.Fatalf("entry %+v does not match itself", e)
 				}

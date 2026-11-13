@@ -278,8 +278,23 @@ func (s *Server) gate(min Role, allowQuery bool, h http.HandlerFunc) http.Handle
 		if rec.status < 400 {
 			s.audit(r, id)
 			s.memo.changed()
+			if affectsDNS(r.Pattern) {
+				s.dnsChanged()
+			}
 		}
 	})
+}
+
+// affectsDNS says whether a change can alter what the DNS server answers: a
+// blocklist, a group of them, a device's groups, a restored bundle. (Its own
+// rules' routes tell it themselves.)
+func affectsDNS(pattern string) bool {
+	for _, p := range []string{"/blocklists", "/rule-groups", "/profile", "/policy/bundle"} {
+		if strings.Contains(pattern, p) {
+			return true
+		}
+	}
+	return false
 }
 
 // isChange: these POST to ask something, and change nothing.
