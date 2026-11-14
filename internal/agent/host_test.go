@@ -28,8 +28,14 @@ func TestNewConnection(t *testing.T) {
 			"tcp|10.0.0.2:50000|203.0.113.9:443|99", "out", "10.0.0.2", "203.0.113.9"},
 		{Socket{Proto: "tcp", LocalIP: "10.0.0.2", LocalPort: 22, RemoteIP: "10.0.0.9", RemotePort: 40000},
 			"tcp|10.0.0.2:22|10.0.0.9:40000", "in", "10.0.0.2", "10.0.0.9"},
+		// A connection to itself is keyed by its fixed end and program, not
+		// its ephemeral port: a health check is one row, not one a second.
 		{Socket{Proto: "tcp6", LocalIP: "::1", LocalPort: 5000, RemoteIP: "::ffff:127.0.0.1", RemotePort: 6000},
-			"tcp|::1:5000|127.0.0.1:6000", "local", "::1", "127.0.0.1"},
+			"tcp|self|server|[::1]:5000|ssh", "local", "::1", "127.0.0.1"},
+		{Socket{Proto: "tcp", LocalIP: "127.0.0.1", LocalPort: 41062, RemoteIP: "127.0.0.1", RemotePort: 8090, ID: "124483769"},
+			"tcp|self|client|127.0.0.1:8090|ssh", "local", "127.0.0.1", "127.0.0.1"},
+		{Socket{Proto: "tcp", LocalIP: "10.0.0.2", LocalPort: 41063, RemoteIP: "10.0.0.2", RemotePort: 8090},
+			"tcp|self|client|10.0.0.2:8090|ssh", "local", "10.0.0.2", "10.0.0.2"},
 	} {
 		c := NewConnection(tc.s, listening, p, 1)
 		if c.Key != tc.key || c.Direction != tc.dir || c.LocalIP != tc.local || c.RemoteIP != tc.rm || c.Proto != "tcp" || c.App != "ssh" || c.UID != 1000 {
@@ -38,6 +44,23 @@ func TestNewConnection(t *testing.T) {
 	}
 	if (Socket{RemoteIP: "0.0.0.0", RemotePort: 0}).Connected() || (Socket{RemoteIP: "::", RemotePort: 5}).Connected() || !(Socket{RemoteIP: "1.2.3.4", RemotePort: 5}).Connected() {
 		t.Fatal("Connected")
+	}
+}
+
+func TestMergeKeys(t *testing.T) {
+	p := Process{PID: 7, Path: "/usr/sbin/haproxy"}
+	var conns []Connection
+	for i := range 50 { // a health check every scan, each on a new port
+		c := NewConnection(Socket{Proto: "tcp", LocalIP: "127.0.0.1", LocalPort: 40000 + i, RemoteIP: "127.0.0.1", RemotePort: 8090, State: "SYN_SENT"}, nil, p, int64(100+i))
+		conns = append(conns, c)
+	}
+	conns = append(conns, NewConnection(Socket{Proto: "tcp", LocalIP: "10.0.0.2", LocalPort: 40000, RemoteIP: "203.0.113.9", RemotePort: 443}, nil, p, 5))
+	got := MergeKeys(conns)
+	if len(got) != 2 {
+		t.Fatalf("got %d connections, want 2: %+v", len(got), got)
+	}
+	if lo := got[0]; lo.FirstSeen != 100 || lo.LastSeen != 149 || lo.LocalPort != 40049 {
+		t.Errorf("merged loopback = %+v", lo)
 	}
 }
 

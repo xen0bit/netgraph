@@ -46,6 +46,16 @@ type anomalyDevice struct {
 const (
 	anomalyLiveEdge = 30 * time.Second
 	anomalyLiveTTL  = 10 * time.Second
+	// anomalyIngestAllowance is how old a report may be before new data
+	// marks it stale.
+	anomalyIngestAllowance = 10 * time.Second
+	// anomalyStaleMax is how old a stale report may be and still be answered
+	// while its replacement is computed.
+	anomalyStaleMax = 5 * time.Minute
+	// anomalySlots is how many reports are kept.
+	anomalySlots = 8
+	// anomalyRefreshTimeout bounds a refresh no caller is waiting for.
+	anomalyRefreshTimeout = 2 * time.Minute
 )
 
 // errAnomalyRunAborted is what waiting requests see if the run panicked.
@@ -72,10 +82,31 @@ func (s *Store) Anomalies(ctx context.Context, f model.Filter) (*model.AnomalyRe
 	}
 	for {
 		s.anomMu.Lock()
-		if s.anomRep != nil && s.anomKey == key && now.Sub(s.anomAt) < ttl {
-			rep := s.anomRep
+		sl := s.anomSlots[key]
+		if sl != nil && !sl.stale && now.Sub(sl.at) < ttl && !now.Before(sl.at) {
 			s.anomMu.Unlock()
-			return rep.At(from, to), nil
+			return sl.rep.At(from, to), nil
+		}
+		// A report gone stale is still worth answering while its
+		// replacement is computed: the checks can take many seconds.
+		if sl != nil && now.Sub(sl.at) < anomalyStaleMax && !now.Before(sl.at) {
+			if s.anomFlight[key] == nil {
+				run := &anomalyRun{done: make(chan struct{})}
+				if s.anomFlight == nil {
+					s.anomFlight = map[string]*anomalyRun{}
+				}
+				s.anomFlight[key] = run
+				gen := s.anomGen
+				go func() {
+					ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), anomalyRefreshTimeout)
+					defer cancel()
+					if _, err := s.leadAnomalies(ctx, f, from, to, key, gen, run); err != nil && ctx.Err() == nil {
+						s.log.Warn("refresh anomalies", "err", err)
+					}
+				}()
+			}
+			s.anomMu.Unlock()
+			return sl.rep.At(from, to), nil
 		}
 		run := s.anomFlight[key]
 		if run == nil {
@@ -113,6 +144,31 @@ type anomalyRun struct {
 	err  error
 }
 
+// anomalySlot is one kept report.
+type anomalySlot struct {
+	rep   *model.AnomalyReport
+	at    time.Time
+	stale bool
+}
+
+// keepAnomalies stores a report, making room by dropping the oldest. anomMu
+// is held.
+func (s *Store) keepAnomalies(key string, rep *model.AnomalyReport) {
+	if s.anomSlots == nil {
+		s.anomSlots = map[string]*anomalySlot{}
+	}
+	if _, ok := s.anomSlots[key]; !ok && len(s.anomSlots) >= anomalySlots {
+		oldest := ""
+		for k, sl := range s.anomSlots {
+			if oldest == "" || sl.at.Before(s.anomSlots[oldest].at) {
+				oldest = k
+			}
+		}
+		delete(s.anomSlots, oldest)
+	}
+	s.anomSlots[key] = &anomalySlot{rep: rep, at: s.cfg.Now()}
+}
+
 // leadAnomalies computes a report for everyone waiting on run.
 func (s *Store) leadAnomalies(ctx context.Context, f model.Filter, from, to int64, key string, gen uint64, run *anomalyRun) (*model.AnomalyReport, error) {
 	run.err = errAnomalyRunAborted
@@ -120,7 +176,7 @@ func (s *Store) leadAnomalies(ctx context.Context, f model.Filter, from, to int6
 		s.anomMu.Lock()
 		delete(s.anomFlight, key)
 		if run.err == nil && s.anomGen == gen {
-			s.anomKey, s.anomAt, s.anomRep = key, s.cfg.Now(), run.rep
+			s.keepAnomalies(key, run.rep)
 		}
 		s.anomMu.Unlock()
 		close(run.done)
@@ -319,7 +375,7 @@ func (a *anomalies) newDestinations(ctx context.Context) error {
 		clientIP string
 	}
 	rows, err := a.s.r.QueryContext(ctx, `SELECT c.client_device, c.client_ip, `+connName+`, c.remote_ip, sum(`+connBytes("bytes_out", a.from, a.to)+`), count(*), min(c.first_seen)
-		FROM connections c WHERE c.last_seen >= ? AND c.first_seen < ? AND c.client_device != 0 AND c.direction = 'out' AND c.multicast = 0
+		FROM connections c WHERE c.last_seen >= ? AND +c.first_seen < ? AND c.client_device != 0 AND c.direction = 'out' AND c.multicast = 0
 		GROUP BY 1, 2, 3, 4`, a.from, a.to)
 	if err != nil {
 		return err
@@ -477,7 +533,7 @@ func (a *anomalies) newDestinations(ctx context.Context) error {
 // the device opened count: a server answering its clients is not uploading.
 func (a *anomalies) uploadSpikes(ctx context.Context) error {
 	rows, err := a.s.r.QueryContext(ctx, `SELECT c.client_device, sum(`+connBytes("bytes_out", a.from, a.to)+`), min(c.first_seen)
-		FROM connections c WHERE c.last_seen >= ? AND c.first_seen < ? AND c.client_device != 0 AND c.multicast = 0 AND c.direction != 'in' GROUP BY 1`, a.from, a.to)
+		FROM connections c WHERE c.last_seen >= ? AND +c.first_seen < ? AND c.client_device != 0 AND c.multicast = 0 AND c.direction != 'in' GROUP BY 1`, a.from, a.to)
 	if err != nil {
 		return err
 	}

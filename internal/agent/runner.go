@@ -123,6 +123,7 @@ func (r *Runner) Run(ctx context.Context) error {
 			}
 			continue
 		}
+		conns = MergeKeys(conns)
 		for i := range conns {
 			conns[i].Predicted, conns[i].Scope, conns[i].Rule, conns[i].Reason = predict(lastPolicy, conns[i])
 			if conns[i].Actual == "" {
@@ -284,6 +285,7 @@ func (r *Runner) Once(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	conns = MergeKeys(conns)
 	for i := range conns {
 		conns[i].Predicted, conns[i].Scope, conns[i].Rule, conns[i].Reason = predict(pol, conns[i])
 		conns[i].Actual = "none"

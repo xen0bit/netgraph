@@ -139,19 +139,47 @@ func open(t *testing.T, hash, initJS string) *session {
 	return openAt(t, baseURL, hash, initJS)
 }
 
+// startBrowser starts Chrome, trying again with a fresh one when a start
+// stalls: on a cold CI runner Chrome sometimes prints its DevTools URL and
+// then never answers the WebSocket, and one stuck start shouldn't spend a
+// whole journey's timeout. The first Run allocates the browser and ties it
+// to its context, so the attempt is timed by a timer, not a timeout context.
+func startBrowser(t *testing.T, opts []chromedp.ExecAllocatorOption) context.Context {
+	t.Helper()
+	var err error
+	for attempt := 1; attempt <= 3; attempt++ {
+		actx, cancelA := chromedp.NewExecAllocator(context.Background(), opts...)
+		ctx, cancelC := chromedp.NewContext(actx)
+		done := make(chan error, 1)
+		go func() { done <- chromedp.Run(ctx) }()
+		select {
+		case err = <-done:
+		case <-time.After(60 * time.Second):
+			err = fmt.Errorf("no answer from Chrome in 60s")
+		}
+		if err == nil {
+			t.Cleanup(cancelA)
+			t.Cleanup(cancelC)
+			return ctx
+		}
+		cancelC()
+		cancelA()
+		t.Logf("starting Chrome, attempt %d: %v", attempt, err)
+	}
+	t.Fatalf("browser: %v", err)
+	return nil
+}
+
 // openAt is open against another server than the shared one.
 func openAt(t *testing.T, url, hash, initJS string) *session {
 	t.Helper()
 	opts := append(chromedp.DefaultExecAllocatorOptions[:], chromedp.NoSandbox, chromedp.WindowSize(1500, 950),
 		// A fresh CI runner can take longer than the default 20s to start Chrome at all.
-		chromedp.WSURLReadTimeout(90*time.Second))
+		chromedp.WSURLReadTimeout(55*time.Second))
 	if p := os.Getenv("NETGRAPH_CHROME"); p != "" {
 		opts = append(opts, chromedp.ExecPath(p))
 	}
-	actx, cancelA := chromedp.NewExecAllocator(context.Background(), opts...)
-	t.Cleanup(cancelA)
-	ctx, cancelC := chromedp.NewContext(actx)
-	t.Cleanup(cancelC)
+	ctx := startBrowser(t, opts)
 	ctx, cancelT := context.WithTimeout(ctx, 2*time.Minute)
 	t.Cleanup(cancelT)
 	s := &session{t: t, ctx: ctx}

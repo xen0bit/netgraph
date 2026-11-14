@@ -74,6 +74,11 @@ func (s *Store) IngestAgentBatch(ctx context.Context, b *agent.Batch) (map[strin
 		if c.Key == "" {
 			continue
 		}
+		// Agents before 0.2.2 key a host's connections to itself by their
+		// ephemeral port: one row per health check.
+		if k, ok := agent.LoopbackKey(c.Proto, c.LocalIP, c.LocalPort, c.RemoteIP, c.RemotePort, c.App, c.PID); ok {
+			c.Key = k
+		}
 		first := c.FirstSeen
 		if first == 0 {
 			first = now

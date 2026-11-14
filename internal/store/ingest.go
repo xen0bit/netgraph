@@ -33,6 +33,46 @@ type IngestResult struct {
 // already ingested for this sensor boot are skipped, so a batch retried
 // after a lost response is not counted twice. The batch is one
 // transaction: it is stored entirely or not at all.
+// DNSServerSensor is the name netgraph's own DNS server records its lookups
+// under.
+const DNSServerSensor = "dns-server"
+
+// SetDNSSelf names the addresses netgraph's own DNS server answers on. A
+// sensor that sees a lookup sent to one of them saw what the server records
+// itself (and the server knows whether it blocked it): the sensor's copy is
+// dropped, so a lookup isn't counted twice.
+func (s *Store) SetDNSSelf(addrs []netip.Addr) {
+	m := make(map[netip.Addr]bool, len(addrs))
+	for _, a := range addrs {
+		m[a.Unmap()] = true
+	}
+	s.dnsSelf.Store(&m)
+}
+
+func (s *Store) dropSelfDNS(sensor string, events []wire.Event) []wire.Event {
+	p := s.dnsSelf.Load()
+	if p == nil || len(*p) == 0 || sensor == DNSServerSensor {
+		return events
+	}
+	self := *p
+	var out []wire.Event // nil until something is dropped
+	for i, ev := range events {
+		if ev.Type == wire.TypeDNS && ev.DNS != nil && self[ev.DNS.Server.Unmap()] {
+			if out == nil {
+				out = append(make([]wire.Event, 0, len(events)), events[:i]...)
+			}
+			continue
+		}
+		if out != nil {
+			out = append(out, ev)
+		}
+	}
+	if out == nil {
+		return events
+	}
+	return out
+}
+
 func (s *Store) Ingest(ctx context.Context, sensor, boot string, events []wire.Event) (res IngestResult, err error) {
 	if s.w == nil {
 		return IngestResult{}, errors.New("database is open read-only")
@@ -55,6 +95,7 @@ func (s *Store) Ingest(ctx context.Context, sensor, boot string, events []wire.E
 			s.reloadNets(context.WithoutCancel(ctx))
 		}
 	}()
+	events = s.dropSelfDNS(sensor, events)
 	res, live, err := s.ing.batch(ctx, sensor, boot, events)
 	if err != nil {
 		// Caches may now describe rows that were rolled back.
@@ -1192,9 +1233,9 @@ func (g *ingester) dns(ctx context.Context, sid, ts int64, d *wire.DNS) error {
 		latency = d.LatencyMS
 	}
 	var id int64
-	if err := g.tx.QueryRowContext(ctx, `INSERT INTO dns (sensor_id, ts, client_ip, client_device, server_ip, proto, qname, qtype, rcode, latency_ms, answers)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
-		sid, ts, d.Client.String(), dev, d.Server.String(), d.Proto, d.QName, d.QType, d.RCode, latency, string(answers)).Scan(&id); err != nil {
+	if err := g.tx.QueryRowContext(ctx, `INSERT INTO dns (sensor_id, ts, client_ip, client_device, server_ip, proto, qname, qtype, rcode, latency_ms, answers, blocked_by)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
+		sid, ts, d.Client.String(), dev, d.Server.String(), d.Proto, d.QName, d.QType, d.RCode, latency, string(answers), clip(d.BlockedBy, 300)).Scan(&id); err != nil {
 		return err
 	}
 	g.dnsAgg[dnsKey{bucket: hourOf(ts), device: dev, client: d.Client.String(), qname: d.QName, qtype: d.QType, rcode: d.RCode}]++

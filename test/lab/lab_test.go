@@ -118,6 +118,7 @@ func TestLab(t *testing.T) {
 	t.Run("graph", func(t *testing.T) { checkGraph(t, c, whole) })
 	t.Run("agent", func(t *testing.T) { checkAgent(t, c, whole) })
 	t.Run("policy", func(t *testing.T) { checkPolicy(t, c, whole) })
+	t.Run("dns-server", func(t *testing.T) { checkDNSServer(t, c, whole) })
 	pcap := filepath.Join(t.TempDir(), "lab.pcap")
 	compose(t, "cp", "tap:/shared/lab.pcap", pcap)
 	t.Run("wireshark", func(t *testing.T) { checkWireshark(t, c, whole) })

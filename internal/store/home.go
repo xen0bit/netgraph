@@ -3,7 +3,10 @@ package store
 import (
 	"cmp"
 	"context"
+	"database/sql"
+	"errors"
 	"slices"
+	"sync"
 	"time"
 
 	"github.com/xen0bit/netgraph/internal/model"
@@ -75,10 +78,52 @@ func (s *Store) Home(ctx context.Context, since time.Time) (*model.Home, error) 
 	}
 	out.SinceMS = ms(since)
 
-	recent, err := s.Devices(ctx, model.Filter{From: end.Add(-homeTalkers), To: end})
-	if err != nil {
+	// The parts are independent reads: run them side by side.
+	var recent, seen []model.Device
+	var wg sync.WaitGroup
+	errs := make([]error, 4)
+	run := func(i int, fn func() error) {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			errs[i] = fn()
+		}()
+	}
+	run(0, func() (err error) {
+		recent, err = s.Devices(ctx, model.Filter{From: end.Add(-homeTalkers), To: end})
+		return err
+	})
+	if since.Before(end) {
+		f := model.Filter{From: since, To: end}
+		run(1, func() (err error) {
+			out.Since, err = s.Summary(ctx, f)
+			return err
+		})
+		run(2, func() error {
+			// A device new since then did everything after its own first
+			// sighting, so the window can start there: usually minutes, not
+			// the week since the last visit.
+			var first sql.NullInt64
+			if err := s.r.QueryRowContext(ctx, `SELECT min(first_seen) FROM entities WHERE kind = 'device' AND first_seen >= ?`, ms(since)).Scan(&first); err != nil {
+				return err
+			}
+			if !first.Valid || first.Int64 >= ms(end) {
+				return nil
+			}
+			var err error
+			seen, err = s.Devices(ctx, model.Filter{From: time.UnixMilli(max(first.Int64, ms(since))), To: end})
+			return err
+		})
+	}
+	run(3, func() (err error) {
+		out.Traffic, err = s.Timeseries(ctx, model.Filter{From: end.Add(-24 * time.Hour), To: end}, 15*time.Minute)
+		return err
+	})
+	wg.Wait()
+	if err := errors.Join(errs...); err != nil {
 		return nil, err
 	}
+
 	activeFrom := ms(end.Add(-homeActive))
 	for _, d := range recent {
 		if d.ActiveTo >= activeFrom {
@@ -95,27 +140,13 @@ func (s *Store) Home(ctx context.Context, since time.Time) (*model.Home, error) 
 			out.TopTalkers = append(out.TopTalkers, d)
 		}
 	}
-
-	if since.Before(end) {
-		f := model.Filter{From: since, To: end}
-		if out.Since, err = s.Summary(ctx, f); err != nil {
-			return nil, err
+	for _, d := range seen {
+		if d.FirstSeen >= ms(since) {
+			out.NewDevices = append(out.NewDevices, d)
 		}
-		seen, err := s.Devices(ctx, f)
-		if err != nil {
-			return nil, err
-		}
-		for _, d := range seen {
-			if d.FirstSeen >= ms(since) {
-				out.NewDevices = append(out.NewDevices, d)
-			}
-		}
-		slices.SortFunc(out.NewDevices, func(a, b model.Device) int {
-			return cmp.Or(cmp.Compare(b.FirstSeen, a.FirstSeen), cmp.Compare(a.Label, b.Label))
-		})
 	}
-	if out.Traffic, err = s.Timeseries(ctx, model.Filter{From: end.Add(-24 * time.Hour), To: end}, 15*time.Minute); err != nil {
-		return nil, err
-	}
+	slices.SortFunc(out.NewDevices, func(a, b model.Device) int {
+		return cmp.Or(cmp.Compare(b.FirstSeen, a.FirstSeen), cmp.Compare(a.Label, b.Label))
+	})
 	return out, nil
 }

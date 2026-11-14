@@ -155,6 +155,9 @@ type DNS struct {
 	RCode     string     `json:"rcode"`
 	LatencyMS float64    `json:"latency_ms,omitempty"`
 	Answers   []Answer   `json:"answers,omitempty"`
+	// BlockedBy is set by netgraph's own DNS server on a lookup it refused:
+	// "rule:<id>" or "list:<name>".
+	BlockedBy string `json:"blocked_by,omitempty"`
 }
 
 // Answer is one resource record. Data is the address for A/AAAA, the target

@@ -2,7 +2,10 @@
 
 netgraph simulates and stores policy; it never touches a firewall. A policy
 can be exported to nftables, OpenWrt or OPNsense, or enforced by an optional
-host agent, but the server itself remains read-only with respect to traffic.
+host agent, but the server itself remains read-only with respect to traffic,
+with one opt-in exception: run as your network's DNS server
+(`-dns-listen`, see [DNS server](dns.md)), it refuses the names enabled
+blocklists and DNS rules name. What-if and decisions read the same blocklists.
 
 ## Versions
 

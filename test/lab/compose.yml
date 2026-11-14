@@ -82,6 +82,10 @@ services:
       NETGRAPH_TOKEN: lab-ingest-token
       NETGRAPH_READ_TOKEN: lab-read-token
       NETGRAPH_AGENT_TOKEN: lab-agent-token
+      # netgraph's own DNS server, forwarding to the router's dnsmasq. The image
+      # runs as nonroot, so not on 53.
+      NETGRAPH_DNS_LISTEN: ":5353"
+      NETGRAPH_DNS_UPSTREAM: "udp://10.77.0.10"
     volumes: [data:/data]
     networks:
       lan:

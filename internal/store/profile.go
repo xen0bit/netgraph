@@ -41,25 +41,177 @@ type typeCache struct {
 	mu   sync.Mutex
 	at   time.Time
 	byID map[int64]*deviceFacts
+	// gen counts resets, so a refresh that started before a person's edit
+	// can't put the old answer back.
+	gen        uint64
+	refreshing bool
+	// build lets one caller classify at a time; the rest wait for its answer.
+	build sync.Mutex
+	ports servedPorts
 }
 
+// reset drops the classifications, so a person's edit shows at once. The ports
+// devices served stay: an edit doesn't change them.
 func (c *typeCache) reset() {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.at = time.Time{}
 	c.byID = nil
+	c.gen++
+}
+
+// forget also drops the ports, for when devices or their traffic were deleted.
+func (c *typeCache) forget() {
+	c.reset()
+	c.ports.mu.Lock()
+	defer c.ports.mu.Unlock()
+	c.ports.last, c.ports.upTo, c.ports.full = nil, 0, time.Time{}
+}
+
+// servedPorts is the ports each device answered on over serveWindow, kept up
+// to date by reading only the newest hours of traffic_hourly: a fresh
+// 7-day DISTINCT over a busy server's inbound traffic took a second.
+type servedPorts struct {
+	mu sync.Mutex
+	// last is the newest hour bucket each (device, port, proto) was seen in.
+	last map[servedPort]int64
+	// upTo is the hour bucket read last; it is read again next time, as it
+	// may still have been filling.
+	upTo int64
+	// full is when the set was last rebuilt from scratch, which also catches
+	// hours an import filled in behind upTo.
+	full time.Time
+}
+
+type servedPort struct {
+	dev   int64
+	port  int
+	proto int
+}
+
+// servedPortsFullEvery bounds how long a backfilled hour can go unnoticed.
+const servedPortsFullEvery = time.Hour
+
+// served answers, for each device, the ports it served in the serveWindow
+// before now, as "port/proto" in port then protocol order.
+func (s *Store) served(ctx context.Context, now time.Time) (map[int64][]string, error) {
+	p := &s.types.ports
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	floor := hourOf(ms(now.Add(-serveWindow)))
+	from := max(p.upTo, floor)
+	if p.last == nil || now.Sub(p.full) >= servedPortsFullEvery || now.Before(p.full) {
+		p.last, from, p.full = map[servedPort]int64{}, floor, now
+	}
+	rows, err := s.r.QueryContext(ctx, `SELECT client_device, remote_port, proto, max(bucket) FROM traffic_hourly
+		WHERE bucket >= ? AND direction = 'in' GROUP BY 1, 2, 3`, from)
+	if err != nil {
+		p.last = nil
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var k servedPort
+		var b int64
+		if err := rows.Scan(&k.dev, &k.port, &k.proto, &b); err != nil {
+			p.last = nil
+			return nil, err
+		}
+		p.last[k] = max(p.last[k], b)
+	}
+	if err := rows.Err(); err != nil {
+		p.last = nil
+		return nil, err
+	}
+	p.upTo = hourOf(ms(now))
+	keys := make([]servedPort, 0, len(p.last))
+	for k, b := range p.last {
+		if b < floor {
+			delete(p.last, k)
+			continue
+		}
+		keys = append(keys, k)
+	}
+	slices.SortFunc(keys, func(a, b servedPort) int {
+		return cmp.Or(cmp.Compare(a.dev, b.dev), cmp.Compare(a.port, b.port), cmp.Compare(a.proto, b.proto))
+	})
+	out := map[int64][]string{}
+	for _, k := range keys {
+		out[k.dev] = append(out[k.dev], strings.TrimSpace(portProto(k.port, uint8(k.proto))))
+	}
+	return out, nil
 }
 
 // deviceFacts classifies every device, from everything known about it ever: a
 // printer that was quiet this week is still a printer.
+//
+// Once there is an answer, a stale one is returned at once and refreshed in the
+// background: a page shouldn't wait a second for what changes so rarely.
 func (s *Store) deviceFacts(ctx context.Context) (map[int64]*deviceFacts, error) {
 	c := &s.types
 	c.mu.Lock()
-	defer c.mu.Unlock()
 	now := s.cfg.Now()
 	if c.byID != nil && now.Sub(c.at) < typeCacheTTL && !now.Before(c.at) {
+		defer c.mu.Unlock()
 		return c.byID, nil
 	}
+	if c.byID != nil {
+		stale := c.byID
+		if !c.refreshing {
+			c.refreshing = true
+			go s.refreshTypes(c.gen)
+		}
+		c.mu.Unlock()
+		return stale, nil
+	}
+	c.mu.Unlock()
+	c.build.Lock()
+	defer c.build.Unlock()
+	c.mu.Lock()
+	if c.byID != nil { // classified while this caller waited
+		defer c.mu.Unlock()
+		return c.byID, nil
+	}
+	gen := c.gen
+	c.mu.Unlock()
+	out, err := s.classifyAll(ctx, now)
+	if err != nil {
+		return nil, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.gen == gen {
+		c.byID, c.at = out, now
+	}
+	return out, nil
+}
+
+// refreshTypes reclassifies behind a stale answer. A reset since it started
+// (gen moved on) means a person changed something: its answer is dropped.
+func (s *Store) refreshTypes(gen uint64) {
+	c := &s.types
+	c.build.Lock()
+	defer c.build.Unlock()
+	now := s.cfg.Now()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	out, err := s.classifyAll(ctx, now)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.refreshing = false
+	if err != nil {
+		if ctx.Err() == nil && !errors.Is(err, sql.ErrConnDone) {
+			s.log.Warn("classify devices", "err", err)
+		}
+		return
+	}
+	if c.gen == gen {
+		c.byID, c.at = out, now
+	}
+}
+
+// classifyAll reads every device's facts and classifies each.
+func (s *Store) classifyAll(ctx context.Context, now time.Time) (map[int64]*deviceFacts, error) {
 	inputs := map[int64]*classify.Input{}
 	out := map[int64]*deviceFacts{}
 	rows, err := s.r.QueryContext(ctx, `SELECT id, key, attrs FROM entities WHERE kind = 'device'`)
@@ -130,29 +282,18 @@ func (s *Store) deviceFacts(ctx context.Context) (map[int64]*deviceFacts, error)
 	if err := facts.Err(); err != nil {
 		return nil, err
 	}
-	ports, err := s.r.QueryContext(ctx, `SELECT DISTINCT client_device, remote_port, proto FROM traffic_hourly WHERE direction = 'in' AND bucket >= ? ORDER BY 1, 2, 3`,
-		hourOf(ms(now.Add(-serveWindow))))
+	served, err := s.served(ctx, now)
 	if err != nil {
 		return nil, err
 	}
-	defer ports.Close()
-	for ports.Next() {
-		var id int64
-		var port, proto int
-		if err := ports.Scan(&id, &port, &proto); err != nil {
-			return nil, err
-		}
+	for id, ports := range served {
 		if in := inputs[id]; in != nil {
-			in.Serves = append(in.Serves, strings.TrimSpace(portProto(port, uint8(proto))))
+			in.Serves = append(in.Serves, ports...)
 		}
-	}
-	if err := ports.Err(); err != nil {
-		return nil, err
 	}
 	for id, in := range inputs {
 		out[id].verdict = classify.Classify(*in)
 	}
-	c.byID, c.at = out, now
 	return out, nil
 }
 

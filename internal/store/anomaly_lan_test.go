@@ -99,13 +99,13 @@ func TestAnomalyCacheInvalidatedByLabel(t *testing.T) {
 	if _, err := st.Anomalies(ctx, win(0, time.Hour)); err != nil {
 		t.Fatal(err)
 	}
-	if st.anomRep == nil {
+	if len(st.anomSlots) == 0 {
 		t.Fatal("anomaly report was not cached")
 	}
 	if err := st.SetDeviceLabel(ctx, testutil.Phone.MAC.String(), "phone renamed"); err != nil {
 		t.Fatal(err)
 	}
-	if st.anomRep != nil {
+	if len(st.anomSlots) != 0 {
 		t.Fatal("label change left the anomaly cache in place")
 	}
 }

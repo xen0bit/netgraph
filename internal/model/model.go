@@ -505,6 +505,9 @@ type DNSQuery struct {
 	LatencyMS  float64     `json:"latency_ms,omitempty"`
 	Count      int         `json:"count,omitempty"` // lookups this row stands for (hourly rollups)
 	Answers    []DNSAnswer `json:"answers,omitempty"`
+	// BlockedBy says what refused a lookup netgraph's own DNS server blocked:
+	// "rule:<id>", or "list:<name>" for a blocklist.
+	BlockedBy string `json:"blocked_by,omitempty"`
 }
 
 // DNSAnswer is one answer record.
@@ -1691,6 +1694,94 @@ type BlocklistEntry struct {
 	UseCount   int64  `json:"use_count,omitempty"`
 	LastUsed   int64  `json:"last_used,omitempty"`
 	Notes      string `json:"notes,omitempty"`
+}
+
+// DNS rule scopes and actions.
+const (
+	DNSScopeAll    = "all"
+	DNSScopeDevice = "device"
+	DNSScopeGroup  = "group"
+	DNSBlock       = "block"
+	DNSAllow       = "allow"
+)
+
+// DNSRule blocks or allows a name, and its subdomains, at netgraph's DNS
+// server: for everyone, one device (ScopeValue is its MAC) or a group. The
+// pattern "*" is every name: a device allowed "*" is not filtered at all.
+type DNSRule struct {
+	ID         int64  `json:"id"`
+	AUID       string `json:"auid"`
+	Scope      string `json:"scope"`
+	ScopeValue string `json:"scope_value,omitempty"`
+	Action     string `json:"action"`
+	Pattern    string `json:"pattern"`
+	Note       string `json:"note,omitempty"`
+	Created    int64  `json:"created"`
+	Modified   int64  `json:"modified"`
+}
+
+// DNSStats is what netgraph's DNS server answered and refused in a window.
+type DNSStats struct {
+	FromMS     int64           `json:"from"`
+	ToMS       int64           `json:"to"`
+	StepMS     int64           `json:"step"`
+	Precision  string          `json:"precision"`
+	Queries    int             `json:"queries"`
+	Blocked    int             `json:"blocked"`
+	Series     []DNSStatsPoint `json:"series"`
+	TopBlocked []DNSNameCount  `json:"top_blocked"`
+	TopAsked   []DNSNameCount  `json:"top_asked"`
+	Clients    []DNSClientStat `json:"clients"`
+}
+
+// DNSStatsPoint is one step of DNSStats.
+type DNSStatsPoint struct {
+	TS      int64 `json:"ts"`
+	Queries int   `json:"queries"`
+	Blocked int   `json:"blocked"`
+}
+
+// DNSNameCount is a name and how often it was asked for.
+type DNSNameCount struct {
+	Name  string `json:"name"`
+	Count int    `json:"count"`
+}
+
+// DNSClientStat is one client's lookups.
+type DNSClientStat struct {
+	Device     string `json:"device,omitempty"`
+	DeviceName string `json:"device_name,omitempty"`
+	ClientIP   string `json:"client_ip,omitempty"`
+	Queries    int    `json:"queries"`
+	Blocked    int    `json:"blocked"`
+}
+
+// DNSServerStatus is the DNS server's state, when it runs.
+type DNSServerStatus struct {
+	Enabled     bool                `json:"enabled"`
+	Listen      []string            `json:"listen,omitempty"`
+	BlockMode   string              `json:"block_mode,omitempty"`
+	Upstreams   []DNSUpstreamStatus `json:"upstreams,omitempty"`
+	Queries     uint64              `json:"queries"`
+	Blocked     uint64              `json:"blocked"`
+	CacheHits   uint64              `json:"cache_hits"`
+	Refused     uint64              `json:"refused"`
+	Failed      uint64              `json:"failed"`
+	Cached      int                 `json:"cached"`
+	Rules       int                 `json:"rules"`
+	ListEntries int                 `json:"list_entries"`
+	RulesAt     int64               `json:"rules_at,omitempty"`
+	RulesError  string              `json:"rules_error,omitempty"`
+}
+
+// DNSUpstreamStatus is one upstream resolver: named by its scheme and host
+// only, since a URL's path can hold an account's ID.
+type DNSUpstreamStatus struct {
+	Name      string  `json:"name"`
+	Healthy   bool    `json:"healthy"`
+	Answered  uint64  `json:"answered"`
+	Failed    uint64  `json:"failed"`
+	LatencyMS float64 `json:"latency_ms,omitempty"`
 }
 
 // Profile is a policy context activated by a network trigger.

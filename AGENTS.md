@@ -70,6 +70,12 @@ that are easy to break.
 - **The map keeps its places** (`web/src/js/map/`). A node with a known
   position never moves unless a person moves it or asks to re-arrange: new
   nodes give way. Don't add a layout step that shifts what is already placed.
+- **The DNS server answers only who it may, and refuses only what's named.** `internal/dnsserver`
+  runs only with `serve -dns-listen`; it answers clients in `-dns-allow` (default the private
+  ranges, never the internet: others get a rate-limited REFUSED), refuses only names an enabled
+  blocklist or a person's DNS rule matched (no default blocking), and never touches a firewall.
+  Requests are bytes off the network: bound them and keep `FuzzHandle` passing. Upstream URLs
+  are read from a file or the environment and shown by scheme and host only.
 - **netgraph never touches a firewall** — with one opt-in exception. `internal/policy` only reads and writes text.
   The optional host agent (`netgraph-agent -enforce=nftables -apply`) may change its own host's
   firewall, and only in one table it owns and replaces whole: it drops only what an explicit,

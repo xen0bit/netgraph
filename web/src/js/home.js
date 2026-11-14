@@ -72,9 +72,20 @@ function findingsBlock(rep) {
   const list = rep.findings || [];
   if (!list.length) return `<p class="muted">${rep.learning ? "Still learning this network: checks that compare with history start after a day." : rep.scanned_at ? "Nothing needs a look." : "The first check is still running."}</p>`;
   const order = { high: 0, medium: 1, low: 2 };
-  const top = [...list].sort((a, b) => order[a.severity] - order[b.severity]).slice(0, 5);
-  return `<ul class="finds">${top.map((a) => `<li><span class="badge sev-${esc(a.severity)}">${esc(a.severity)}</span> ${esc(a.summary)}</li>`).join("")}</ul>
-    ${list.length > top.length ? `<p class="muted">and ${list.length - top.length} more.</p>` : ""}
+  // The same sentence from several findings (a beacon that came back, a
+  // container recreated with a new MAC) is one line, counted.
+  const lines = new Map();
+  for (const a of [...list].sort((a, b) => order[a.severity] - order[b.severity])) {
+    const k = `${a.severity}\u0000${a.summary}`;
+    const l = lines.get(k);
+    if (l) l.n++;
+    else lines.set(k, { a, n: 1 });
+  }
+  const all = [...lines.values()];
+  const top = all.slice(0, 5);
+  const rest = top.reduce((n, l) => n - l.n, list.length);
+  return `<ul class="finds">${top.map(({ a, n }) => `<li><span class="badge sev-${esc(a.severity)}">${esc(a.severity)}</span> ${esc(a.summary)}${n > 1 ? ` <span class="muted">×${n}</span>` : ""}</li>`).join("")}</ul>
+    ${rest > 0 ? `<p class="muted">and ${rest} more.</p>` : ""}
     <button type="button" data-home-findings>Review ${esc(plural(list.length, "finding"))} →</button>`;
 }
 
@@ -102,7 +113,7 @@ function firstRun(h, origin) {
 }
 
 // homeHTML is the whole page. rep is the findings report, null until it arrives.
-export function homeHTML(h, rep, { firstVisit, origin, links = 0 }) {
+export function homeHTML(h, rep, { firstVisit, origin, links = 0, extra = "" }) {
   if (h.state === "no_data") return firstRun(h, origin);
   const [cls, icon, head, sub] = status(h);
   const s = h.summary_since;
@@ -128,6 +139,7 @@ export function homeHTML(h, rep, { firstVisit, origin, links = 0 }) {
         <header class="card-head"><h2 id="h-here">${h.state === "ok" ? "Here now" : "Here at the end of the data"}</h2><span class="muted">${h.active.length}</span></header>
         ${people(h.active)}
       </section>
+      ${extra}
       <section class="card" aria-labelledby="h-busy">
         <header class="card-head"><h2 id="h-busy">Busiest in the last hour</h2></header>
         ${talkers(h.top_talkers)}

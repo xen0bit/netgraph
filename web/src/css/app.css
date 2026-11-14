@@ -66,7 +66,7 @@ button.toggle[aria-pressed="true"] { background: var(--ok); color: var(--bg); bo
 .brand { font-size: 17px; margin: 0; display: flex; align-items: center; gap: 8px; }
 .brand .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); box-shadow: 0 0 0 3px var(--sel); }
 .window { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
-.window input[type="datetime-local"] { width: 12.5rem; }
+.window input[type="datetime-local"] { width: 12.5rem; font-size: 0.8rem; padding-left: 0.35rem; padding-right: 0.2rem; font-variant-numeric: tabular-nums; }
 .arrow { color: var(--fg-2); }
 .presets { display: inline-flex; }
 .presets button { border-radius: 0; margin-left: -1px; }
@@ -540,3 +540,13 @@ body[data-role="viewer"] .fleet-settings button[type="submit"], body[data-role="
 .policy-rules input { width: 100%; min-width: 7em; }
 .policy-row-tools { white-space: nowrap; }
 #policy-config { width: 100%; font-family: var(--mono, monospace); font-size: 12px; margin-top: var(--sp-2); }
+
+/* The DNS server's card in Settings. */
+.dns-numbers { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--sp-2); margin-bottom: var(--sp-2); }
+.dns-numbers div { display: flex; flex-direction: column; }
+.dns-numbers b { font-size: var(--text-xl); font-weight: 600; font-variant-numeric: tabular-nums; }
+.dns-numbers span { color: var(--fg-2); font-size: var(--text-xs); }
+.dns-add { display: flex; flex-wrap: wrap; gap: var(--sp-1); margin-top: var(--sp-2); }
+.dns-add input[name="pattern"] { flex: 1 1 12rem; }
+button.small { padding: 0.1rem 0.5rem; font-size: var(--text-sm); }
+@media (max-width: 600px) { .dns-numbers { grid-template-columns: repeat(2, 1fr); } }

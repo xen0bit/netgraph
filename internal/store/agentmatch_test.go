@@ -203,7 +203,9 @@ func TestAgentNamesPings(t *testing.T) {
 
 // The Processes view: each program an agent reported, with what it
 // connected to (loopback too, which the sensor never sees), the ports it
-// accepted on, and the bytes of the sensor's connections matched to it.
+// accepted on, and the bytes of the sensor's connections matched to it. An
+// old agent's loopback keys are folded at ingest: nginx's two connections to
+// :8080 are one.
 func TestPrograms(t *testing.T) {
 	ctx := context.Background()
 	st, at := inboundStore(t, Config{})
@@ -230,9 +232,9 @@ func TestPrograms(t *testing.T) {
 		t.Fatalf("programs = %+v", ps)
 	}
 	ng := ps[0]
-	if ng.Name != "nginx" || ng.Connections != 3 || ng.In != 1 || ng.Local != 2 || ng.Flows != 1 || ng.BytesOut != 50000 ||
+	if ng.Name != "nginx" || ng.Connections != 2 || ng.In != 1 || ng.Local != 1 || ng.Flows != 1 || ng.BytesOut != 50000 ||
 		ng.Device != "device:"+webMAC || ng.ID != graph.ProcessID(ng.Device, "nginx") || ng.Path != "/usr/sbin/nginx" ||
-		len(ng.Peers) != 1 || ng.Peers[0] != "127.0.0.1:8080 ×2" || len(ng.Serves) != 1 || ng.Serves[0] != "443/tcp" ||
+		len(ng.Peers) != 1 || ng.Peers[0] != "127.0.0.1:8080" || len(ng.Serves) != 1 || ng.Serves[0] != "443/tcp" ||
 		len(ng.Cmdlines) != 1 || ng.Cmdlines[0] != "pid 80: nginx" {
 		t.Fatalf("nginx = %+v", ng)
 	}

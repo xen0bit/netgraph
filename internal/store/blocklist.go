@@ -277,7 +277,9 @@ func (s *Store) SetBlocklistEntry(ctx context.Context, blocklistID, entryID int6
 	if n, _ := res.RowsAffected(); n == 0 {
 		return fmt.Errorf("%w: entry %d", ErrNotFound, entryID)
 	}
-	return nil
+	// The list was edited: what reads it (the DNS server) goes by this.
+	_, err = s.w.ExecContext(ctx, `UPDATE blocklists SET modified = max(modified + 1, ?) WHERE id = ?`, s.cfg.Now().UnixMilli(), blocklistID)
+	return err
 }
 
 // ReplaceBlocklistEntries swaps a blocklist's parsed entries while preserving

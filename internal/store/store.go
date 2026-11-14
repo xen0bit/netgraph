@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"net/netip"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -28,7 +29,6 @@ import (
 
 	"github.com/xen0bit/netgraph/internal/asn"
 	"github.com/xen0bit/netgraph/internal/geo"
-	"github.com/xen0bit/netgraph/internal/model"
 )
 
 //go:embed migrations/*.sql
@@ -125,11 +125,14 @@ type Store struct {
 	findScanned  time.Time
 	findLearning bool
 
+	// dnsSelf is where netgraph's own DNS server answers (SetDNSSelf).
+	dnsSelf atomic.Pointer[map[netip.Addr]bool]
+
 	anomMu  sync.Mutex
 	anomGen uint64 // bumped by invalidateAnomalies
-	anomKey string
-	anomAt  time.Time
-	anomRep *model.AnomalyReport
+	// anomSlots holds recent reports by cache key: a page asks for its
+	// window's, the map for its own, Home and the Recorder for theirs.
+	anomSlots map[string]*anomalySlot
 	// anomFlight holds the report being computed per cache key, so requests
 	// that arrive together (a refresh's anomaly list and its graph) share one
 	// run of the checks.
@@ -146,7 +149,10 @@ func dsn(path string, queryOnly bool) string {
 	if !queryOnly {
 		// A read-only connection must not try to switch the journal
 		// mode or run WAL recovery: that is a write.
-		pragmas = append(pragmas, "journal_mode(WAL)", "synchronous(NORMAL)")
+		// journal_size_limit: a burst (a retention pass, an import) grows the
+		// WAL, and SQLite keeps the file at its high-water mark (428 MB was
+		// seen) unless told to cut it back after a checkpoint.
+		pragmas = append(pragmas, "journal_mode(WAL)", "synchronous(NORMAL)", "journal_size_limit(67108864)")
 	}
 	for _, p := range pragmas {
 		q.Add("_pragma", p)
@@ -195,7 +201,12 @@ func Open(path string, cfg Config) (*Store, error) {
 		w.Close()
 		return nil, err
 	}
-	r.SetMaxOpenConns(max(4, runtime.GOMAXPROCS(0)))
+	readers := max(4, runtime.GOMAXPROCS(0))
+	r.SetMaxOpenConns(readers)
+	// Keep every reader open: database/sql keeps 2 idle by default and closes
+	// the rest after each query, and a new connection starts with an empty
+	// page cache and parses the schema again.
+	r.SetMaxIdleConns(readers)
 	s.r = r
 	s.nets = newLocalNets()
 	if err := s.loadSensors(context.Background()); err != nil {
@@ -392,31 +403,32 @@ func (s *Store) Backup(ctx context.Context, path string, opts ...BackupOptions) 
 	return nil
 }
 
-// invalidateAnomalies drops the short-lived anomaly report cache. New data
-// or a retention pass can change what a window finds.
 // invalidateAnomaliesThrottled is for the ingest path, which runs every few
-// seconds. A live report may be up to ten seconds stale; recomputing every
-// check on every batch would make every graph refresh wait for all of them.
+// seconds: new data marks a report more than ten seconds old as stale. A stale
+// report is still answered, at once, while a fresh one is computed behind it:
+// recomputing every check before every answer made each page wait for all of
+// them on a live server.
+//
+// It leaves the generation alone: bumping it would stop a running report
+// being cached, and checks slower than the gap between batches would then
+// never be cached at all.
 func (s *Store) invalidateAnomaliesThrottled() {
-	//
-	// It drops an old report but leaves the generation alone: bumping it would
-	// stop a running report being cached, and checks slower than the gap
-	// between batches would then never be cached at all. That report is stale
-	// by its own run time, like any other within this allowance.
 	s.anomMu.Lock()
 	defer s.anomMu.Unlock()
-	if s.anomRep != nil && s.cfg.Now().Sub(s.anomAt) < 10*time.Second {
-		return
+	now := s.cfg.Now()
+	for _, sl := range s.anomSlots {
+		if now.Sub(sl.at) >= anomalyIngestAllowance {
+			sl.stale = true
+		}
 	}
-	s.anomRep = nil
-	s.anomKey = ""
 }
 
+// invalidateAnomalies drops every report: a person changed something (a
+// label, a mute) or data was deleted, and that shows at once.
 func (s *Store) invalidateAnomalies() {
 	s.anomMu.Lock()
 	s.anomGen++
-	s.anomRep = nil
-	s.anomKey = ""
+	s.anomSlots = nil
 	s.anomMu.Unlock()
 }
 

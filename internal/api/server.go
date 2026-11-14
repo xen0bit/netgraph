@@ -72,6 +72,8 @@ type Config struct {
 	Alerts func() alert.Stats
 	// MaxBatch bounds an ingest request body (compressed); default 32 MiB.
 	MaxBatch int64
+	// DNS is netgraph's own DNS server; nil when it isn't running.
+	DNS DNSServer
 }
 
 // Server serves the API.
@@ -90,6 +92,8 @@ type Server struct {
 	modelAsks   chan struct{}
 	done        chan struct{}
 	doneOnce    sync.Once
+	memo        *memo
+	routeTimes  routeTimes
 }
 
 // SetTokens replaces the ingest and read tokens, so a SIGHUP can rotate
@@ -134,7 +138,7 @@ func New(cfg Config) *Server {
 	if cfg.MaxBatch <= 0 {
 		cfg.MaxBatch = 32 << 20
 	}
-	s := &Server{cfg: cfg, mux: http.NewServeMux(), log: cfg.Logger, done: make(chan struct{}), modelAsks: make(chan struct{}, maxModelAsks)}
+	s := &Server{cfg: cfg, mux: http.NewServeMux(), log: cfg.Logger, done: make(chan struct{}), modelAsks: make(chan struct{}, maxModelAsks), memo: newMemo()}
 	s.SetTokens(cfg.IngestToken, cfg.ReadToken)
 	s.SetAgentToken(cfg.AgentToken)
 	s.SetRoleTokens(cfg.OperatorToken, cfg.AdminToken)
@@ -145,15 +149,17 @@ func New(cfg Config) *Server {
 	s.mux.HandleFunc("GET /api/v1/version", s.version)
 	s.mux.HandleFunc("GET /healthz", s.version)
 	read := func(p string, h http.HandlerFunc) { s.mux.Handle("GET "+p, s.require(RoleViewer, h)) }
+	// The slow reads answer from the memo (memo.go).
+	slow := func(p string, live bool, h http.HandlerFunc) { read(p, s.memoized(live, h)) }
 	s.mux.HandleFunc("POST /api/v1/session", s.createSession)
 	s.mux.HandleFunc("DELETE /api/v1/session", s.endSession)
 	read("/api/v1/me", s.me)
 	s.mux.Handle("GET /api/v1/audit", s.require(RoleAdmin, s.auditLog))
 	read("/api/v1/range", s.dataRange)
-	read("/api/v1/home", s.home)
+	slow("/api/v1/home", true, s.home)
 	read("/api/v1/passport", s.passport)
 	read("/api/v1/presence", s.presence)
-	read("/api/v1/quality", s.quality)
+	slow("/api/v1/quality", false, s.quality)
 	read("/api/v1/notify", s.notifyChannels)
 	read("/api/v1/ask/config", s.askConfig)
 	s.mux.Handle("POST /api/v1/notify/test", s.require(RoleAdmin, s.notifyTest))
@@ -162,16 +168,16 @@ func New(cfg Config) *Server {
 	read("/api/v1/devices/links", s.deviceLinks)
 	read("/api/v1/reel", s.reel)
 	read("/api/v1/reel/markers", s.reelMarkers)
-	read("/api/v1/summary", s.summary)
-	read("/api/v1/devices", s.devices)
+	slow("/api/v1/summary", false, s.summary)
+	slow("/api/v1/devices", false, s.devices)
 	read("/api/v1/flows", s.flows)
-	read("/api/v1/processes", func(w http.ResponseWriter, r *http.Request) { answer(s, w, r, s.cfg.Store.Programs) })
+	slow("/api/v1/processes", false, func(w http.ResponseWriter, r *http.Request) { answer(s, w, r, s.cfg.Store.Programs) })
 	read("/api/v1/connections", s.connections)
-	read("/api/v1/destinations", s.destinations)
+	slow("/api/v1/destinations", false, s.destinations)
 	read("/api/v1/dns", s.dns)
 	read("/api/v1/facts", s.facts)
 	read("/api/v1/timeseries", s.timeseries)
-	read("/api/v1/graph", s.graph)
+	slow("/api/v1/graph", false, s.graph)
 	read("/api/v1/entity", s.entity)
 	read("/api/v1/sensors", s.sensors)
 	read("/api/v1/wifi", s.wifi)
@@ -182,10 +188,10 @@ func New(cfg Config) *Server {
 	read("/api/v1/timeline", s.timeline)
 	read("/api/v1/story", s.story)
 	read("/api/v1/diff", s.diff)
-	read("/api/v1/exposure", s.exposure)
-	read("/api/v1/coverage", s.coverage)
+	slow("/api/v1/exposure", false, s.exposure)
+	slow("/api/v1/coverage", false, s.coverage)
 	read("/api/v1/airspace", s.airspace)
-	read("/api/v1/weather", s.weather)
+	slow("/api/v1/weather", false, s.weather)
 	read("/api/v1/capsule", s.capsule)
 	read("/api/v1/annotations", s.annotations)
 	read("/api/v1/bookmarks", s.bookmarks)
@@ -215,6 +221,7 @@ func New(cfg Config) *Server {
 	s.mux.Handle("POST /api/v1/policy/export", s.require(RoleViewer, s.policyExport))
 	s.registerPolicyRoutes()
 	s.registerBlocklistRoutes()
+	s.registerDNSRoutes()
 	s.registerProfileRoutes()
 	s.registerDecisionRoutes()
 	s.registerGeoRoutes()
@@ -245,6 +252,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		httpError(w, http.StatusMethodNotAllowed, errors.New("HEAD is not supported for this endpoint"))
 		return
 	}
+	defer s.timed(r, time.Now())
 	if r.URL.Path == "/api/v1/live" || !acceptsGzip(r) {
 		s.mux.ServeHTTP(w, r)
 		return

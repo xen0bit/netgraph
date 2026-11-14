@@ -81,6 +81,11 @@ func runServe(args []string) error {
 	archiveMax := fs.Int("archive-max-mb", 0, "with -archive-dir, remove the oldest days beyond this many MiB (default no limit)")
 	gap := fs.String("fact-gap", "1h", "silence after which a relationship starts a new period")
 	exactMax := fs.String("exact-max", "48h", "longest window answered from raw records; longer ones use hourly rollups")
+	var dnsf dnsFlags
+	fs.StringVar(&dnsf.listen, "dns-listen", envOr("NETGRAPH_DNS_LISTEN", ""), "run a DNS server on this address, UDP and TCP, such as :53: it forwards lookups, records them and refuses names a blocklist or DNS rule blocks (default off); $NETGRAPH_DNS_LISTEN")
+	fs.StringVar(&dnsf.allow, "dns-allow", "", "comma-separated addresses or CIDRs the DNS server answers (default the private ranges, loopback and link-local: never the internet)")
+	fs.StringVar(&dnsf.upstreamFile, "dns-upstream-file", "", "file of upstream resolvers for -dns-listen, one a line: udp://1.1.1.1, tls://9.9.9.9#dns.quad9.net, https://dns.example/dns-query; or $NETGRAPH_DNS_UPSTREAM")
+	fs.StringVar(&dnsf.blockMode, "dns-block-mode", "null", "how -dns-listen answers a blocked name: null (0.0.0.0 and ::), nxdomain or refused")
 	logLevel := fs.String("log-level", "info", "debug, info, warn or error")
 	logFormat := fs.String("log-format", "text", "text or json")
 	if err := fs.Parse(args); err != nil {
@@ -293,6 +298,17 @@ func runServe(args []string) error {
 		}
 		cfg.Web = os.DirFS(*webDir)
 	}
+	sink := func(ctx context.Context, sensor, boot string, evs []wire.Event) error {
+		_, err := st.Ingest(ctx, sensor, boot, evs)
+		return err
+	}
+	var dnsCtl *dnsControl
+	if dnsf.listen != "" {
+		if dnsCtl, err = newDNSControl(dnsf, st, sink, localNets, log); err != nil {
+			return err
+		}
+		cfg.DNS = dnsCtl
+	}
 	apiSrv := api.New(cfg)
 	srv := &http.Server{
 		Addr:              *listen,
@@ -309,9 +325,13 @@ func runServe(args []string) error {
 	defer stop()
 	go reloadTokens(ctx, apiSrv, *tokenFile, *readTokenFile, *operatorTokenFile, *adminTokenFile, *agentTokenFile, *noAuth, log)
 	go st.RunRetention(ctx, time.Hour)
-	sink := func(ctx context.Context, sensor, boot string, evs []wire.Event) error {
-		_, err := st.Ingest(ctx, sensor, boot, evs)
-		return err
+	if dnsCtl != nil {
+		go func() {
+			if err := dnsCtl.Run(ctx); err != nil && ctx.Err() == nil {
+				log.Error("dns server", "err", err)
+			}
+		}()
+		log.Info("serving DNS", "listen", dnsf.listen, "block_mode", dnsf.blockMode)
 	}
 	if *netflowListen != "" {
 		go func() {

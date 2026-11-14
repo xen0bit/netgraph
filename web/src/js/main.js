@@ -16,6 +16,7 @@ import { sensorStatus, sensorDetail, fleetSettingsHTML, readSettings } from "./f
 import { typeBadge, typeWhy, profileForm, presenceHTML, linksHTML, qualityHTML } from "./devices.js";
 import { Pulse } from "./pulse.js";
 import { processesSpec, programDetail } from "./processes.js";
+import { blockedBy, settingsHTML as dnsSettingsHTML, homeCard as dnsHomeCard } from "./dns.js";
 
 const $ = (s) => document.querySelector(s);
 const $$ = (s) => [...document.querySelectorAll(s)];
@@ -71,6 +72,8 @@ const areas = {
 const areaOf = (t) => Object.keys(areas).find((a) => areas[a].tabs.some(([id]) => id === t));
 // Views that answer about now rather than about the window: the time controls,
 // the Recorder and the filter have nothing to say to them.
+// some lists the first n items, and how many more there are.
+const some = (list, n) => list.length <= n ? list.join(", ") : `${list.slice(0, n).join(", ")} and ${list.length - n} more`;
 const plainTabs = new Set(["home", "settings", "sensors", "incidents", "pulse", "passport", "links", "findings"]);
 
 function loadHash() {
@@ -455,13 +458,13 @@ function visitSince() {
   return v.since;
 }
 
-let homeState = { at: 0, report: null, findings: null, firstVisit: false, links: 0 };
+let homeState = { at: 0, report: null, findings: null, firstVisit: false, links: 0, dns: null };
 const homePoll = () => (homeState.report?.state === "no_data" ? 3000 : 30_000);
 
 function drawHome() {
   const el = $("#home-body");
   if (!homeState.report) return;
-  el.innerHTML = homeHTML(homeState.report, homeState.findings, { firstVisit: homeState.firstVisit, origin: location.origin, links: homeState.links });
+  el.innerHTML = homeHTML(homeState.report, homeState.findings, { firstVisit: homeState.firstVisit, origin: location.origin, links: homeState.links, extra: dnsHomeCard(homeState.dns) });
 }
 
 // renderHome draws what it has, then the findings when their checks finish: they
@@ -479,6 +482,12 @@ async function renderHome(seq, { force = false } = {}) {
   if (!sameSince) homeState.findings = null;
   drawHome();
   if (report.state === "no_data") return;
+  // What netgraph's own DNS server refused, when it runs.
+  loadDNSStatus().then((st) => (st?.enabled ? api("dns/stats", new URLSearchParams({ from: "-24h" })) : null)).then((d) => {
+    if (seq !== refreshSeq) return;
+    homeState.dns = d;
+    drawHome();
+  }).catch(() => {});
   track(api("devices/links", new URLSearchParams())).then((l) => {
     if (seq !== refreshSeq) return;
     homeState.links = l.length;
@@ -703,6 +712,7 @@ function renderSettings() {
         ${[["", "Match the system"], ["light", "Light"], ["dark", "Dark"]].map(([v, l]) => `<button type="button" data-theme-set="${v}" aria-pressed="${t === v}">${l}</button>`).join("")}
       </div></section>
     <section class="card"><h2>Long-term archive</h2><div id="settings-archive" class="muted">Reading…</div></section>
+    <section class="card"><h2>DNS server</h2><div id="settings-dns" class="muted">Reading…</div></section>
     ${can("admin") && me ? `<section class="card"><h2>What's been changed</h2><div id="settings-audit" class="muted">Reading…</div></section>` : ""}
     <section class="card"><h2>Notifications</h2><div id="settings-notify" class="muted">Reading…</div></section>
     <section class="card"><h2>Saved views</h2>
@@ -728,12 +738,13 @@ function renderSettings() {
     el.textContent = a.enabled ? `On. ${held} Read it with netgraph archive; the pages here don't show it.`
       : a.files ? `Off, with what was kept still there. ${held}` : "Off. With -archive-dir, what passes retention is kept in files instead of deleted.";
   }).catch(() => { const el = $("#settings-archive"); if (el) el.textContent = "Can't read it."; });
+  renderSettingsDNS();
   if ($("#settings-audit")) {
     api("audit", new URLSearchParams({ limit: 50 })).then((rows) => {
       const el = $("#settings-audit");
       if (!el) return;
       el.innerHTML = rows.length
-        ? `<table class="mini"><thead><tr><th>When</th><th>Who</th><th>What</th><th>On</th></tr></thead><tbody>${rows.map((a) => `<tr><td>${esc(stamp(a.ts))}</td><td>${esc(a.actor)}</td><td>${esc(a.action.replace("/api/v1/", ""))}</td><td class="mono">${esc(a.target)}</td></tr>`).join("")}</tbody></table>`
+        ? `<table class="mini"><thead><tr><th>When</th><th>Who</th><th>What</th><th>On</th></tr></thead><tbody>${rows.map((a) => `<tr><td>${esc(stamp(a.ts))}</td><td>${esc(a.actor)}</td><td title="${esc(a.action)}">${esc(auditWhat(a.action))}</td><td class="mono">${esc(a.target)}</td></tr>`).join("")}</tbody></table>`
         : "Nothing yet.";
     }).catch(() => { const el = $("#settings-audit"); if (el) el.textContent = "Can't read it."; });
   }
@@ -754,6 +765,48 @@ function setPrivacy(on) {
   location.reload();
 }
 
+// --- the DNS server -------------------------------------------------------------
+
+// dnsStatus is GET /api/v1/dns/server: whether netgraph answers DNS itself,
+// which decides whether lookups get Block and Allow buttons.
+let dnsStatus = null;
+let dnsStatusAt = 0;
+async function loadDNSStatus() {
+  if (Date.now() - dnsStatusAt < 30_000) return dnsStatus;
+  dnsStatusAt = Date.now();
+  dnsStatus = await api("dns/server").catch(() => null);
+  return dnsStatus;
+}
+
+async function renderSettingsDNS() {
+  const el = $("#settings-dns");
+  if (!el) return;
+  dnsStatusAt = 0;
+  const [st, rules, devs] = await Promise.all([loadDNSStatus(), api("dns/rules").catch(() => []), api("devices", new URLSearchParams({ from: "-30d", limit: 1000 })).catch(() => [])]);
+  const names = Object.fromEntries((devs || []).map((d) => [d.id, d.label]));
+  el.classList.remove("muted");
+  el.innerHTML = dnsSettingsHTML(st, rules, { canEdit: can("operator"), names });
+  const form = el.querySelector("[data-dns-add]");
+  if (form) form.onsubmit = async (e) => {
+    e.preventDefault();
+    const f = Object.fromEntries(new FormData(form));
+    try {
+      await send("POST", "dns/rules", { action: f.action, pattern: f.pattern, scope: f.scope, scope_value: f.scope === "all" ? "" : f.scope_value, note: f.note });
+      setStatus(`${f.action === "block" ? "Blocking" : "Allowing"} ${f.pattern}`);
+      renderSettingsDNS();
+    } catch (err) { setStatus(err.message, true); }
+  };
+}
+
+// dnsQuick blocks or allows a name for everyone, from a lookup.
+async function dnsQuick(name, action) {
+  try {
+    await send("POST", "dns/block", { name, action });
+    setStatus(`${action === "block" ? "Blocked" : "Allowed"} ${name} for everyone. Settings → DNS server lists the rules.`);
+    refresh();
+  } catch (err) { setStatus(err.message, true); }
+}
+
 function setTheme(t) {
   if (t) { document.documentElement.dataset.theme = t; store.set("netgraph.theme", t); }
   else { delete document.documentElement.dataset.theme; store.remove("netgraph.theme"); }
@@ -761,6 +814,11 @@ function setTheme(t) {
 }
 
 function settingsClick(e) {
+  const dnsDel = e.target.closest("[data-dns-delete]");
+  if (dnsDel) {
+    send("DELETE", `dns/rules/${dnsDel.dataset.dnsDelete}`).then(() => { setStatus("Rule deleted"); renderSettingsDNS(); }).catch((err) => setStatus(err.message, true));
+    return;
+  }
   const test = e.target.closest("[data-notify-test]");
   if (test) {
     const out = test.parentElement.querySelector("output");
@@ -781,7 +839,7 @@ function settingsClick(e) {
   }
   const del = e.target.closest("[data-view-delete]");
   if (del) { const v = savedViews(); v.splice(Number(del.dataset.viewDelete), 1); saveViews(v); renderSettings(); return; }
-  if (e.target.closest("[data-forget-visit]")) { store.remove("netgraph.visit"); homeState = { at: 0, report: null, findings: null, firstVisit: false, links: 0 }; setStatus("Last visit forgotten"); }
+  if (e.target.closest("[data-forget-visit]")) { store.remove("netgraph.visit"); homeState = { at: 0, report: null, findings: null, firstVisit: false, links: 0, dns: null }; setStatus("Last visit forgotten"); }
 }
 
 // copyClick copies a command block, saying so on the button.
@@ -827,8 +885,18 @@ async function renderTab(seq) {
       if (seq === refreshSeq) { homeState.links = l.length; $("#links-body").innerHTML = linksHTML(l); }
       return;
     }
-    if (t === "pulse") return;
+    if (t === "pulse") {
+      // Listening is only true while something reports: say when nothing has.
+      const r = await loadRange();
+      if (seq !== refreshSeq) return;
+      const quiet = r?.last_ms && Date.now() - r.last_ms > 2 * units.m;
+      $("#pulse-empty").textContent = !r?.last_ms ? "Waiting for a sensor's first report. New connections and DHCP appear here as sensors deliver them."
+        : quiet ? `No sensor has reported since ${stamp(r.last_ms)}, ${ago(Date.now() - r.last_ms)}. New connections and DHCP appear here when one does.`
+        : "Listening. New connections and DHCP appear here as sensors deliver them.";
+      return;
+    }
     if (t === "insights") return await renderInsights(seq);
+    if (t === "dns") await loadDNSStatus();
     const path = tablePath[t];
     const extra = state.limits[t] ? { limit: state.limits[t] } : {};
     if (t === "destinations" && $("#dest-group")?.value) extra.group = $("#dest-group").value;
@@ -988,10 +1056,12 @@ const tables = {
     sort: (d) => -(d.bytes_in + d.bytes_out),
   },
   destinations: {
+    // A name a server answers for has thousands of visitors' addresses: list a
+    // few and count the rest.
     cols: ["Destination", "Kind", "Connections", "Devices", "Sent", "Received", "First seen", "Last seen"],
     num: [2, 3, 4, 5],
-    row: (d) => [esc(d.label) + (d.remote_ips?.length > 1 ? `<div class="sub">${esc(d.remote_ips.join(", "))}</div>` : ""),
-      badge(d.kind) + (d.ports?.length ? `<div class="sub mono">${esc(d.ports.join(", "))}</div>` : ""),
+    row: (d) => [esc(d.label) + (d.remote_ips?.length > 1 ? `<div class="sub">${esc(some(d.remote_ips, 8))}</div>` : ""),
+      badge(d.kind) + (d.ports?.length ? `<div class="sub mono">${esc(some(d.ports, 8))}</div>` : ""),
       d.connections, d.devices, bytes(d.bytes_out), bytes(d.bytes_in), stamp(d.first_seen), stamp(d.last_seen)],
     keys: [(d) => d.label, (d) => d.kind, (d) => d.connections, (d) => d.devices, (d) => d.bytes_out, (d) => d.bytes_in, (d) => d.first_seen, (d) => d.last_seen],
     id: (d) => d.kind === "ip" ? `ip:${d.key}` : `domain:${d.key}`,
@@ -1028,17 +1098,20 @@ const tables = {
     id: peerID,
   },
   dns: {
-    cols: ["Time", "Device", "Type", "Name", "Result", "ms", "Answers (TTL)"],
+    cols: ["Time", "Device", "Type", "Name", "Result", "ms", "Answers (TTL)", ""],
     num: [5],
     row: (q) => [
       when(q.ts), esc(q.device_name || q.client_ip), esc(q.qtype),
       esc(q.qname) + (q.count > 1 ? ` <span class="muted">×${q.count}</span>` : ""),
-      q.rcode === "NOERROR" ? esc(q.rcode) : badge(q.rcode, "err"),
+      q.rcode === "NOERROR" ? esc(q.rcode) : q.rcode === "BLOCKED" ? badge("blocked", "sev-high") + (q.blocked_by ? `<div class="sub">${esc(blockedBy(q.blocked_by))}</div>` : "") : badge(q.rcode, "err"),
       q.latency_ms ? q.latency_ms.toFixed(1) : "",
       `<span class="mono">${(q.answers || []).map((a) => `${esc(a.data)} (${a.ttl}s)`).join("<br>")}</span>`,
+      // A name in one click: blocked ones can be let through, the rest blocked.
+      dnsStatus?.enabled && can("operator") && q.qname
+        ? `<button type="button" class="small" data-dns-act="${q.rcode === "BLOCKED" ? "allow" : "block"}" data-dns-name="${esc(q.qname)}">${q.rcode === "BLOCKED" ? "Allow" : "Block"}</button>` : "",
     ],
     keys: [(q) => q.ts, (q) => q.device_name || addrKey(q.client_ip), (q) => q.qtype, (q) => q.qname, (q) => q.rcode,
-      (q) => q.latency_ms, (q) => q.answers?.length || 0],
+      (q) => q.latency_ms, (q) => q.answers?.length || 0, () => 0],
     id: (q) => `domain:${q.qname}`,
   },
   facts: {
@@ -1280,6 +1353,8 @@ function renderTable(t) {
   el.onclick = (e) => {
     const b = e.target.closest("thead button.sort");
     if (b) { sortBy(t, Number(b.dataset.col)); return; }
+    const act = e.target.closest("[data-dns-act]");
+    if (act) { dnsQuick(act.dataset.dnsName, act.dataset.dnsAct); return; }
     const tr = e.target.closest("tbody tr[data-i]");
     if (!tr) return;
     const r = rows[Number(tr.dataset.i)];
@@ -1776,7 +1851,8 @@ async function renderInsights(seq) {
     if (seq !== refreshSeq) return;
     const findings = (exposure?.findings || []).map((f) => `<li>${badge(f.severity)} <b>${esc(f.kind.replaceAll("_", " "))}</b> ${esc(f.summary)}</li>`).join("");
     const sensors = (coverage?.sensors || []).map((s) => `<tr><td>${esc(s.name)}</td><td>${s.devices}</td><td>${s.only_device}</td><td>${stamp(s.last_seen)}</td></tr>`).join("");
-    const only = (coverage?.devices || []).filter((d) => d.only_one).slice(0, 20).map((d) => `<li>${esc(d.label)} <span class="muted">only by ${esc(d.sensors.join(", "))}</span></li>`).join("");
+    // With one sensor, every device was seen by only that one: nothing to say.
+    const only = (coverage?.sensors || []).length < 2 ? "" : (coverage?.devices || []).filter((d) => d.only_one).slice(0, 20).map((d) => `<li>${esc(d.label)} <span class="muted">only by ${esc(d.sensors.join(", "))}</span></li>`).join("");
     const nets = (airspace?.networks || []).slice(0, 50).map((n) => `<tr><td class="mono">${esc(n.bssid)}</td><td>${esc(n.ssid)}</td><td>${esc(n.security || "unknown")}</td><td>${n.channel}</td><td>${(n.clients || []).length}</td><td>${n.rogue ? badge("rogue", "sev-high") : ""}</td></tr>`).join("");
     const pts = (weather?.points || []);
     // A forecast has no bytes of its own: it is drawn as its band's top.
@@ -1786,8 +1862,8 @@ async function renderInsights(seq) {
     box.innerHTML = `<div class="insight-grid">
       <section class="card"><h3>Exposure</h3><p class="muted">Reachable or weak things, from evidence.</p><ul class="tight">${findings || "<li class=\"muted\">Nothing stands out.</li>"}</ul>${(exposure?.gaps || []).map((g) => `<p class="muted">${esc(g)}</p>`).join("")}</section>
       <section class="card"><h3>Sensor coverage</h3><table class="mini"><thead><tr><th>Sensor</th><th>Devices</th><th>Only seen</th><th>Last seen</th></tr></thead><tbody>${sensors}</tbody></table>${only ? `<h4>Only one sensor saw</h4><ul class="tight">${only}</ul>` : ""}<p class="muted">Coverage is where traffic was observed, not an RF survey.</p></section>
-      <section class="card"><h3>Wi-Fi airspace</h3><table class="mini"><thead><tr><th>BSSID</th><th>SSID</th><th>Security</th><th>Ch</th><th>Clients</th><th></th></tr></thead><tbody>${nets || "<tr><td colspan=\"6\" class=\"muted\">No monitor-mode Wi-Fi data.</td></tr>"}</tbody></table></section>
-      <section class="card"><h3>Network weather</h3><div class="weather">${bars}</div><p class="muted">${weather ? `${pts.length} buckets · ${fmtSpan(weather.step_ms)} · the last six are a moving-mean forecast with a band` : "No traffic data."}</p>${(weather?.gaps || []).map((g) => `<p class="muted">${esc(g)}</p>`).join("")}</section>
+      <section class="card"><h3>Wi-Fi airspace</h3>${nets ? `<table class="mini"><thead><tr><th>BSSID</th><th>SSID</th><th>Security</th><th>Ch</th><th>Clients</th><th></th></tr></thead><tbody>${nets}</tbody></table>` : `<p class="muted">No Wi-Fi heard in this window. This needs a sensor on a monitor-mode interface: see Deployment, under Wi-Fi.</p>`}</section>
+      <section class="card"><h3>Network weather</h3><div class="weather">${bars}</div><p class="muted">${weather ? `${pts.length} buckets of ${fmtSpan(weather.step)} · the last six are a moving-mean forecast with a band` : "No traffic data."}</p>${(weather?.gaps || []).map((g) => `<p class="muted">${esc(g)}</p>`).join("")}</section>
     </div>`;
   } catch (e) {
     box.innerHTML = `<p class="muted">${esc(e.message)}</p>`;
@@ -2319,14 +2395,43 @@ function wirePolicy() {
 
 // --- manage --------------------------------------------------------------------------
 
+// auditWhat says what a change was, from the route it came through. An
+// unknown route is shown as it is.
+const auditWords = {
+  "DELETE annotations/{id}": "Deleted a note", "DELETE anomalies/mute": "Unmuted an anomaly", "DELETE blocklists/{id}": "Deleted a blocklist",
+  "DELETE bookmarks/{id}": "Deleted a bookmark", "DELETE incidents/{id}": "Deleted an incident", "DELETE map/pins": "Unpinned map nodes",
+  "DELETE network-triggers/{id}": "Deleted a network trigger", "DELETE policies/{id}": "Deleted a policy", "DELETE profiles/{id}": "Deleted a profile",
+  "DELETE purposes/{id}": "Deleted a purpose", "DELETE dns/rules/{id}": "Deleted a DNS rule",
+  "PATCH blocklists/{id}/entries/{entry}": "Changed a blocklist entry", "PATCH findings/{id}": "Changed a finding", "PATCH incidents/{id}": "Changed an incident",
+  "POST annotations": "Added a note", "POST anomalies/mute": "Muted an anomaly", "POST blocklists": "Added a blocklist",
+  "POST blocklists/{id}/import": "Imported a blocklist", "POST blocklists/{id}/update": "Updated a blocklist", "POST bookmarks": "Added a bookmark",
+  "POST decisions/expire": "Expired decisions", "POST decisions/{id}/allow": "Allowed a decision", "POST decisions/{id}/deny": "Denied a decision",
+  "POST decisions/{id}/reset": "Reopened a decision", "POST decisions/{id}/rule": "Made a rule from a decision", "POST decisions/scan": "Scanned for decisions",
+  "POST devices/{mac}/link": "Answered a device link", "POST findings/{id}/fine": "Marked a finding fine", "POST findings/seen": "Marked findings seen",
+  "POST incidents": "Opened an incident", "POST incidents/{id}/pin": "Pinned evidence to an incident", "POST network-triggers": "Added a network trigger",
+  "POST notify/test": "Sent a test notification", "POST policies": "Saved a policy", "POST policies/{id}/activate": "Activated a policy",
+  "POST policy/bundle": "Restored a policy bundle", "POST profiles": "Added a profile", "POST profiles/evaluate": "Re-evaluated profiles",
+  "POST profiles/{id}/activate": "Activated a profile", "POST purposes": "Added a purpose", "POST rule-groups": "Saved a rule group",
+  "POST dns/rules": "Added a DNS rule", "POST dns/block": "Blocked or allowed a name", "PUT dns/rules/{id}": "Changed a DNS rule",
+  "PUT blocklists/{id}": "Changed a blocklist", "PUT devices/{mac}/label": "Renamed a device", "PUT devices/{mac}/profile": "Changed a device's type, owner or groups",
+  "PUT map/pins": "Moved map nodes", "PUT policies/{id}": "Changed a policy", "PUT profiles/{id}": "Changed a profile", "PUT sensors/{name}/config": "Changed a sensor's settings",
+};
+function auditWhat(action) {
+  const k = action.replace("/api/v1/", "");
+  return auditWords[k] || k;
+}
+
 async function renderManage(seq) {
+  // The audit is of the active policy: without one there is nothing to ask.
+  const policiesP = api("policies").catch(() => []);
+  const auditP = policiesP.then((ps) => ((ps || []).some((p) => p.active) ? api("policy/audit") : { findings: [] })).catch(() => ({ findings: [] }));
   const [policies, blocklists, profiles, triggers, decisions, audit, purposes, network, agents] = await Promise.all([
-    api("policies").catch(() => []),
+    policiesP,
     api("blocklists").catch(() => []),
     api("profiles").catch(() => []),
     api("network-triggers").catch(() => []),
     api("decisions", new URLSearchParams({ status: "open" })).catch(() => []),
-    api("policy/audit").catch(() => ({ findings: [] })),
+    auditP,
     api("purposes").catch(() => []),
     api("network").catch(() => null),
     api("agents").catch(() => []),
