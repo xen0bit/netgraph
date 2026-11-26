@@ -58,10 +58,14 @@ func runServe(args []string) error {
 	sflowListen := fs.String("sflow-listen", "", "receive sFlow v5 on this UDP address, such as :6343 (needs -sflow-allow)")
 	sflowAllow := fs.String("sflow-allow", "", "comma-separated addresses or CIDRs to accept sFlow from")
 	dnsLog := fs.String("dns-log", "", "follow this DNS server's log: dnsmasq's log-queries output, Pi-hole's pihole.log, or AdGuard Home's querylog.json")
-	dnsLogFormat := fs.String("dns-log-format", "dnsmasq", "dnsmasq (also Pi-hole) or adguard")
+	dnsLogFormat := fs.String("dns-log-format", "dnsmasq", "dnsmasq (also Pi-hole), adguard, unbound or bind")
+	dnsSyslogListen := fs.String("dns-syslog-listen", "", "receive a DNS server's syslog (dnsmasq, Pi-hole, Unbound, BIND) on this UDP address, such as :5514 (needs -dns-syslog-allow)")
+	dnsSyslogAllow := fs.String("dns-syslog-allow", "", "comma-separated addresses or CIDRs to accept DNS syslog from")
+	ipfixListen := fs.String("ipfix-listen", "", "receive IPFIX over TCP on this address, such as :4739 (needs -ipfix-allow)")
+	ipfixAllow := fs.String("ipfix-allow", "", "comma-separated addresses or CIDRs to accept IPFIX over TCP from")
 	leasesFile := fs.String("leases-file", "", "read device names and addresses from this DHCP server's lease file")
 	leasesFormat := fs.String("leases-format", "dnsmasq", "dnsmasq, isc (dhcpd.leases, also OPNsense and pfSense) or kea (memfile CSV)")
-	sourceLocal := fs.String("source-local", "", "comma-separated CIDRs that are \"here\", for -netflow-listen, -sflow-listen, -dns-log and -leases-file (default the private ranges)")
+	sourceLocal := fs.String("source-local", "", "comma-separated CIDRs that are \"here\", for the other sources (default the private ranges)")
 	llmFile := fs.String("llm-file", "", "file holding an OpenAI-compatible model's URL, to let Ask use it: http://localhost:11434/v1?model=llama3.2; or $NETGRAPH_LLM. Off by default: a model elsewhere receives your network's data")
 	alertAnomalies := fs.String("alert-anomalies", "", "also POST anomalies at or above this severity: low, medium or high (default off)")
 	alertKinds := fs.String("alert-anomaly-kinds", "", "comma-separated anomaly kinds to alert on (default: all kinds at the chosen severity)")
@@ -202,6 +206,20 @@ func runServe(args []string) error {
 	if *sflowListen != "" && len(allowSFlow) == 0 {
 		return errors.New("-sflow-listen needs -sflow-allow: UDP has no login, so this says who to believe")
 	}
+	allowDNSSyslog, err := parsePrefixes("-dns-syslog-allow", *dnsSyslogAllow)
+	if err != nil {
+		return err
+	}
+	if *dnsSyslogListen != "" && len(allowDNSSyslog) == 0 {
+		return errors.New("-dns-syslog-listen needs -dns-syslog-allow: UDP has no login, so this says who to believe")
+	}
+	allowIPFIX, err := parsePrefixes("-ipfix-allow", *ipfixAllow)
+	if err != nil {
+		return err
+	}
+	if *ipfixListen != "" && len(allowIPFIX) == 0 {
+		return errors.New("-ipfix-listen needs -ipfix-allow: TCP has no login, so this says who to believe")
+	}
 	if !sources.ValidLeaseFormat(*leasesFormat) {
 		return fmt.Errorf("-leases-format: %q is not dnsmasq, isc or kea", *leasesFormat)
 	}
@@ -210,7 +228,7 @@ func runServe(args []string) error {
 		return err
 	}
 	if !sources.ValidDNSLogFormat(*dnsLogFormat) {
-		return fmt.Errorf("-dns-log-format: %q is not dnsmasq or adguard", *dnsLogFormat)
+		return fmt.Errorf("-dns-log-format: %q is not dnsmasq, pihole, adguard, unbound or bind", *dnsLogFormat)
 	}
 	if *trimRollups && *maxDB <= 0 {
 		return errors.New("-trim-rollups needs -max-db-mb")
@@ -325,6 +343,7 @@ func runServe(args []string) error {
 	defer stop()
 	go reloadTokens(ctx, apiSrv, *tokenFile, *readTokenFile, *operatorTokenFile, *adminTokenFile, *agentTokenFile, *noAuth, log)
 	go st.RunRetention(ctx, time.Hour)
+	go runBlocklistRefresh(ctx, st, log)
 	if dnsCtl != nil {
 		go func() {
 			if err := dnsCtl.Run(ctx); err != nil && ctx.Err() == nil {
@@ -359,6 +378,24 @@ func runServe(args []string) error {
 			}
 		}()
 		log.Info("following a DNS log", "path", *dnsLog, "format", *dnsLogFormat)
+	}
+	if *dnsSyslogListen != "" {
+		go func() {
+			cfg := sources.SyslogConfig{Addr: *dnsSyslogListen, Allow: allowDNSSyslog, Format: *dnsLogFormat, Local: localNets, Log: log}
+			if err := sources.RunSyslog(ctx, cfg, sink); err != nil && ctx.Err() == nil {
+				log.Error("dns syslog", "err", err)
+			}
+		}()
+		log.Info("receiving DNS syslog", "listen", *dnsSyslogListen, "format", *dnsLogFormat)
+	}
+	if *ipfixListen != "" {
+		go func() {
+			i := &sources.IPFIXTCP{Listen: *ipfixListen, Allow: allowIPFIX, Local: localNets, Sink: sink, Log: log}
+			if err := i.Run(ctx); err != nil && ctx.Err() == nil {
+				log.Error("ipfix over tcp", "err", err)
+			}
+		}()
+		log.Info("receiving IPFIX over TCP", "listen", *ipfixListen)
 	}
 	if *leasesFile != "" {
 		go func() {

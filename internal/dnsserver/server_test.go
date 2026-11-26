@@ -498,3 +498,23 @@ func FuzzHandle(f *testing.F) {
 		}
 	})
 }
+
+// A reply built here (a blocked name, an error) echoes the client's OPT so an
+// EDNS client sees the server's payload size, and a plain query gets none.
+func TestHandleEchoesEDNS(t *testing.T) {
+	s, _ := newTestServer(t, BlockNull, &fakeUpstream{name: "up"})
+	hasOPT := func(out []byte) bool {
+		for _, a := range parse(t, out).Additional {
+			if a.Type == 41 {
+				return true
+			}
+		}
+		return false
+	}
+	if out := s.Handle(context.Background(), query(t, 4, "tracker.example.", dnsmessage.TypeA, true), kid, here, "udp"); !hasOPT(out) {
+		t.Error("no OPT record in the reply to an EDNS query")
+	}
+	if out := s.Handle(context.Background(), query(t, 5, "tracker.example.", dnsmessage.TypeA, false), kid, here, "udp"); hasOPT(out) {
+		t.Error("OPT record in the reply to a plain query")
+	}
+}
