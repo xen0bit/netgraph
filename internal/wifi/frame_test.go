@@ -138,6 +138,10 @@ func TestEthernetRebuild(t *testing.T) {
 func FuzzParse(f *testing.F) {
 	f.Add([]byte{0x80, 0})
 	f.Add(make([]byte, 24))
+	// Radiotap-prefixed frames, so the header parser starts from a valid
+	// header rather than only reaching it through random bytes above.
+	f.Add(radiotap(2412, -50, 0, frameBytes(0x0080, []byte{1, 2, 3, 4, 5, 6}, []byte{1, 2, 3, 4, 5, 6}, []byte{1, 2, 3, 4, 5, 6}, "", nil)))
+	f.Add(radiotap(5180, -70, 0, frameBytes(0x0108, []byte{1, 2, 3, 4, 5, 6}, []byte{7, 8, 9, 10, 11, 12}, []byte{13, 14, 15, 16, 17, 18}, string([]byte{0xaa, 0xaa, 0x03, 0, 0, 0, 8, 0}), nil)))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		fr, _ := Parse(b)
 		if fr != nil {

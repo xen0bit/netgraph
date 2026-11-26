@@ -585,6 +585,7 @@ const (
 	priRouter = 10
 	priLLDP   = 20
 	priLLMNR  = 30
+	priSNMP   = 33
 	priNBNS   = 35
 	priMDNS   = 40
 	priDHCP6  = 45
@@ -1539,6 +1540,8 @@ func (g *ingester) name(ctx context.Context, sid, ts int64, n *wire.Name) error 
 	switch n.Proto {
 	case "llmnr":
 		pri = priLLMNR
+	case "snmp":
+		pri = priSNMP
 	case "rdns":
 		pri = priRDNS
 	}

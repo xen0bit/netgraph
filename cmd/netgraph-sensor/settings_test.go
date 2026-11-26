@@ -8,6 +8,20 @@ import (
 	"github.com/xen0bit/netgraph/internal/wire"
 )
 
+// A sub-second flag must reach the server as a whole second (rounded up),
+// never as 0, which the server reads as "unset".
+func TestSettingsSubSecondRoundsUp(t *testing.T) {
+	var level slog.LevelVar
+	s := newSettings("info", true, 800*time.Millisecond, 1500*time.Millisecond, &level)
+	c := s.inEffect()
+	if c.ActiveTimeoutS != 1 || c.FlushS != 2 {
+		t.Errorf("reported %+v, want 1s and 2s", c)
+	}
+	if got := s.activeTimeout(); got != time.Second {
+		t.Errorf("active timeout %v, want 1s (the value the server sees)", got)
+	}
+}
+
 func TestSettingsLayOverFlagsAndClear(t *testing.T) {
 	var level slog.LevelVar
 	s := newSettings("info", true, 30*time.Second, 2*time.Second, &level)

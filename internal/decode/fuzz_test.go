@@ -42,6 +42,13 @@ func FuzzDHCPv6(f *testing.F) {
 	f.Fuzz(func(t *testing.T, b []byte) { _, _ = DHCPv6(b, "") })
 }
 
+func FuzzSNMP(f *testing.F) {
+	f.Add(snmpResponse("core-switch"))
+	f.Add([]byte{0x30, 0x84, 0xff, 0xff, 0xff, 0xff})
+	f.Add([]byte{0x30, 0x03, 0x02, 0x01, 0x01})
+	f.Fuzz(func(t *testing.T, b []byte) { _ = SNMP(b, fuzzSrc, "") })
+}
+
 func FuzzL2(f *testing.F) {
 	f.Add([]byte{0, 1, 8, 0, 6, 4, 0, 1, 1, 2, 3, 4, 5, 6, 10, 0, 0, 1, 0, 0, 0, 0, 0, 0, 10, 0, 0, 2})
 	f.Add(append(lldpTLV(1, []byte{4, 1, 2, 3, 4, 5, 6}), lldpTLV(8, []byte{5, 1, 1, 2, 3, 4})...))

@@ -23,7 +23,6 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
-	"net"
 	"net/netip"
 	"net/url"
 	"os"
@@ -179,12 +178,19 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
+		if token == "" {
+			// A server with -no-auth accepts an empty token; one that
+			// requires a token refuses every batch, which the sensor can
+			// only discover by trying. Say so once, loudly, instead of
+			// losing a capture silently.
+			log.Warn("no ingest token set: if the server requires one, every batch will be refused. Set NETGRAPH_TOKEN or -token-file; netgraph-sensor check tests it")
+		}
 		tlsCfg, err := tlsConfig(*caFile, *insecure)
 		if err != nil {
 			return err
 		}
 		base := strings.TrimRight(*server, "/")
-		self, err := newSelfFilter(ctx, base)
+		self, err := newSelfFilter(base)
 		if err != nil {
 			return err
 		}
@@ -403,7 +409,14 @@ func run(args []string) error {
 				}
 			}
 			if *wifi6 {
-				frequencies = append(wifi.DefaultFrequencies(), wifi.SixGHzFrequencies()...)
+				// Add 6 GHz to whatever was asked for. Only fall back to
+				// the default plan when no frequencies were given, so
+				// -wifi-frequencies and -wifi-6ghz combine instead of the
+				// latter silently discarding the former.
+				if len(frequencies) == 0 {
+					frequencies = wifi.DefaultFrequencies()
+				}
+				frequencies = append(frequencies, wifi.SixGHzFrequencies()...)
 			}
 			started := 0
 			for _, src := range sources {
@@ -565,21 +578,17 @@ func newLevelLogger(level slog.Leveler, format string) *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, opts))
 }
 
-// selfFilter recognises the sensor's own connection to the server, so
-// shipping events does not itself become events. The server's name is
-// re-resolved periodically in case it moves.
+// selfFilter recognises the sensor's own connections to the server, so
+// shipping events does not itself become events.
 type selfFilter struct {
-	host string
-	port uint16
-	mu   sync.RWMutex
-	ips  map[netip.Addr]bool
+	mu sync.Mutex
 	// own holds the exact connections the shipper opened. Matching those,
 	// not every flow to the server address, keeps other devices' use of
 	// the netgraph UI visible.
 	own map[string]time.Time
 }
 
-func newSelfFilter(ctx context.Context, base string) (*selfFilter, error) {
+func newSelfFilter(base string) (*selfFilter, error) {
 	u, err := url.Parse(base)
 	if err != nil || u.Host == "" {
 		return nil, fmt.Errorf("invalid -server URL %q", base)
@@ -588,39 +597,10 @@ func newSelfFilter(ctx context.Context, base string) (*selfFilter, error) {
 	if port == "" {
 		port = map[string]string{"https": "443", "http": "80"}[u.Scheme]
 	}
-	p, err := strconv.ParseUint(port, 10, 16)
-	if err != nil {
+	if _, err := strconv.ParseUint(port, 10, 16); err != nil {
 		return nil, fmt.Errorf("invalid port in -server URL %q", base)
 	}
-	f := &selfFilter{host: u.Hostname(), port: uint16(p), ips: map[netip.Addr]bool{}, own: map[string]time.Time{}}
-	f.resolve()
-	go func() {
-		t := time.NewTicker(5 * time.Minute)
-		defer t.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-t.C:
-				f.resolve()
-			}
-		}
-	}()
-	return f, nil
-}
-
-func (f *selfFilter) resolve() {
-	ips := map[netip.Addr]bool{}
-	if a, err := netip.ParseAddr(f.host); err == nil {
-		ips[a.Unmap()] = true
-	} else if addrs, err := net.DefaultResolver.LookupNetIP(context.Background(), "ip", f.host); err == nil {
-		for _, a := range addrs {
-			ips[a.Unmap()] = true
-		}
-	}
-	f.mu.Lock()
-	f.ips = ips
-	f.mu.Unlock()
+	return &selfFilter{own: map[string]time.Time{}}, nil
 }
 
 func (f *selfFilter) observe(local, remote netip.AddrPort) {

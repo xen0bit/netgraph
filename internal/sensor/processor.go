@@ -120,6 +120,25 @@ type packetState struct {
 	last    time.Time
 }
 
+// less orders fragment-cache keys so eviction is deterministic when two
+// datagrams were last seen at the same instant: a replay must make the same
+// choice twice.
+func (k packetKey) less(o packetKey) bool {
+	if c := k.src.Compare(o.src); c != 0 {
+		return c < 0
+	}
+	if c := k.dst.Compare(o.dst); c != 0 {
+		return c < 0
+	}
+	if k.id != o.id {
+		return k.id < o.id
+	}
+	if k.proto != o.proto {
+		return k.proto < o.proto
+	}
+	return !k.v6 && o.v6
+}
+
 // NewProcessor returns a processor emitting to out.
 func NewProcessor(cfg Config, out wire.Emitter) *Processor {
 	if cfg.DNSTimeout <= 0 {
@@ -204,6 +223,8 @@ func (p *Processor) handleEthernet(ts time.Time, data []byte, link int) {
 	case etherLLDP:
 		if ev, err := decode.LLDP(f.l3, mac); err == nil {
 			p.dedupe(ts, wire.Event{Type: wire.TypeLLDP, TS: ts, LLDP: ev}, "lldp", ev.MAC, ev.ChassisID, ev.PortID, ev.SystemName)
+		} else {
+			p.decodeErrors.Add(1)
 		}
 		return
 	}
@@ -236,12 +257,14 @@ func (p *Processor) reassemble(ts time.Time, f *frame, mac string) {
 		if len(p.fragPkts) >= 1024 {
 			// Drop the oldest incomplete datagram, not the one that
 			// just arrived: a host parking 1024 fragments must not
-			// permanently stop legitimate ones from reassembling.
+			// permanently stop legitimate ones from reassembling. Ties
+			// go to the lower key, so identical replays evict the same.
 			var oldest packetKey
 			var at time.Time
+			have := false
 			for k, v := range p.fragPkts {
-				if at.IsZero() || v.last.Before(at) {
-					oldest, at = k, v.last
+				if !have || v.last.Before(at) || (v.last.Equal(at) && k.less(oldest)) {
+					oldest, at, have = k, v.last, true
 				}
 			}
 			delete(p.fragPkts, oldest)
@@ -396,7 +419,7 @@ func (p *Processor) udp(ts time.Time, f *frame, mac string) {
 					}
 				}
 			}
-			p.dedupe(ts, wire.Event{Type: wire.TypeMDNS, TS: ts, MDNS: ev}, "mdns", fmt.Sprint(ev))
+			p.dedupePrintf(ts, p.cfg.Dedupe, wire.Event{Type: wire.TypeMDNS, TS: ts, MDNS: ev}, "mdns\x00%v", ev)
 		}
 	case f.sport == 5355:
 		if m, _ := decode.ParseDNS(f.payload); m != nil {
@@ -413,18 +436,25 @@ func (p *Processor) udp(ts time.Time, f *frame, mac string) {
 	case (f.sport == 67 || f.sport == 68) && (f.dport == 67 || f.dport == 68):
 		if ev, err := decode.DHCPv4(f.payload); err == nil {
 			p.observeDHCP(ts, ev)
-			p.dedupe(ts, wire.Event{Type: wire.TypeDHCP, TS: ts, DHCP: ev}, "dhcp4", fmt.Sprint(ev))
+			p.dedupePrintf(ts, p.cfg.Dedupe, wire.Event{Type: wire.TypeDHCP, TS: ts, DHCP: ev}, "dhcp4\x00%v", ev)
 		} else {
 			p.decodeErrors.Add(1)
 		}
 	case (f.sport == 546 || f.sport == 547) && (f.dport == 546 || f.dport == 547):
 		if ev, err := decode.DHCPv6(f.payload, mac); err == nil {
 			p.observeDHCP(ts, ev)
-			p.dedupe(ts, wire.Event{Type: wire.TypeDHCP, TS: ts, DHCP: ev}, "dhcp6", fmt.Sprint(ev))
+			p.dedupePrintf(ts, p.cfg.Dedupe, wire.Event{Type: wire.TypeDHCP, TS: ts, DHCP: ev}, "dhcp6\x00%v", ev)
+		} else {
+			p.decodeErrors.Add(1)
 		}
 	case f.dport == 1900 || f.sport == 1900:
 		if ev := decode.SSDP(f.payload, f.src, mac); ev != nil {
 			p.dedupe(ts, wire.Event{Type: wire.TypeSSDP, TS: ts, SSDP: ev}, "ssdp", ev.IP.String(), ev.Method, ev.USN, ev.NT, ev.Server)
+		}
+	case f.dport == 161 || f.sport == 161:
+		// SNMP sysName is a name a host announces about itself, like NBNS.
+		if n := decode.SNMP(f.payload, f.src, mac); n != nil {
+			p.dedupe(ts, wire.Event{Type: wire.TypeName, TS: ts, Name: n}, "name", n.Proto, n.MAC, n.IP.String(), n.Name)
 		}
 	}
 }
@@ -649,24 +679,59 @@ func (p *Processor) dedupeFor(ts time.Time, ttl time.Duration, ev wire.Event, pa
 		h.Write([]byte(s))
 		h.Write([]byte{0})
 	}
-	k := h.Sum64()
+	p.dedupeHash(ts, ttl, ev, h.Sum64())
+}
+
+// dedupePrintf is dedupeFor for an event whose whole content is its key:
+// formatting writes straight into the hash, with no intermediate string
+// allocated on the capture path.
+func (p *Processor) dedupePrintf(ts time.Time, ttl time.Duration, ev wire.Event, format string, args ...any) {
+	h := fnv.New64a()
+	_, _ = fmt.Fprintf(h, format, args...)
+	p.dedupeHash(ts, ttl, ev, h.Sum64())
+}
+
+func (p *Processor) dedupeHash(ts time.Time, ttl time.Duration, ev wire.Event, k uint64) {
 	p.mu.Lock()
 	last, ok := p.seen[k]
 	emit := !ok || ts.Sub(last) >= ttl || ts.Before(last)
 	if emit {
-		if len(p.seen) > 200_000 {
-			for old := range p.seen {
-				if len(p.seen) <= 180_000 {
-					break
-				}
-				delete(p.seen, old)
-			}
+		if len(p.seen) > 220_000 {
+			p.trimSeen(180_000)
 		}
 		p.seen[k] = ts
 	}
 	p.mu.Unlock()
 	if emit {
 		p.out.Emit(ev)
+	}
+}
+
+// trimSeen drops the oldest dedupe entries down to keep, newest first. It
+// sorts deterministically (age, then hash) instead of deleting in map order,
+// so a replay that emits more than the cap still produces the same events
+// twice. The map only reaches the cap when the network itself generates more
+// than 220k distinct announcements, so the occasional sort is acceptable.
+func (p *Processor) trimSeen(keep int) {
+	if len(p.seen) <= keep {
+		return
+	}
+	type entry struct {
+		k  uint64
+		at time.Time
+	}
+	all := make([]entry, 0, len(p.seen))
+	for k, at := range p.seen {
+		all = append(all, entry{k, at})
+	}
+	sort.Slice(all, func(i, j int) bool {
+		if !all[i].at.Equal(all[j].at) {
+			return all[i].at.Before(all[j].at)
+		}
+		return all[i].k < all[j].k
+	})
+	for _, e := range all[:len(all)-keep] {
+		delete(p.seen, e.k)
 	}
 }
 
