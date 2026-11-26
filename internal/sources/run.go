@@ -251,7 +251,17 @@ type DNSLog struct {
 }
 
 // ValidDNSLogFormat says whether a format is one this reads.
-func ValidDNSLogFormat(f string) bool { return f == "dnsmasq" || f == "adguard" }
+func ValidDNSLogFormat(f string) bool {
+	switch f {
+	case "", "dnsmasq", "pihole", "adguard", "unbound", "bind":
+		return true
+	}
+	return false
+}
+
+// ValidLogFormat is the shorter name for ValidDNSLogFormat, for callers that only
+// deal in DNS log formats.
+func ValidLogFormat(f string) bool { return ValidDNSLogFormat(f) }
 
 // Run follows the file until ctx ends, across rotations, and through it not existing.
 func (d *DNSLog) Run(ctx context.Context) error {
@@ -265,7 +275,7 @@ func (d *DNSLog) Run(ctx context.Context) error {
 		d.Every = 2 * time.Second
 	}
 	pub := newPublisher("dnslog", d.Local, d.Sink, d.Log)
-	parser := &DNSMasqLog{History: d.FromStart}
+	parser := newLogParser(d.Format, d.FromStart)
 	t := follower{path: d.Path, atEnd: !d.FromStart}
 	tick := time.NewTicker(d.Every)
 	defer tick.Stop()
@@ -273,12 +283,6 @@ func (d *DNSLog) Run(ctx context.Context) error {
 	for {
 		var evs []wire.Event
 		t.read(func(line string) {
-			if d.Format == "adguard" {
-				if e, ok := AdGuardLine(line); ok {
-					evs = append(evs, e)
-				}
-				return
-			}
 			evs = append(evs, parser.Line(line)...)
 		})
 		evs = append(evs, parser.Tick()...)

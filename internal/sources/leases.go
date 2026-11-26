@@ -22,9 +22,12 @@ type Lease struct {
 // maxLeases bounds what one file can make the server hold.
 const maxLeases = 65536
 
-// ParseDNSMasqLeases reads dnsmasq's lease file: "expiry mac ip hostname clientid". A
-// lease with no fixed expiry says 0. Hostnames are what the client said, so they're
-// passed along for ingest to treat like any other name off the network.
+// ParseDNSMasqLeases reads dnsmasq's lease file: "expiry mac ip hostname clientid" for
+// DHCPv4, and "expiry iaid ipv6 hostname clientid" for DHCPv6. The v6 line has no MAC:
+// the second field is the client's IAID (or a DUID, depending on the writer). A line
+// starting "duid" declares the server's own DUID and isn't a lease. A lease with no
+// fixed expiry says 0. Hostnames are what the client said, so they're passed along for
+// ingest to treat like any other name off the network.
 func ParseDNSMasqLeases(text string) []Lease {
 	var out []Lease
 	for _, line := range strings.Split(text, "\n") {
@@ -32,20 +35,37 @@ func ParseDNSMasqLeases(text string) []Lease {
 			break
 		}
 		f := strings.Fields(line)
-		if len(f) < 4 || f[0] == "duid" {
+		if len(f) == 0 || f[0] == "duid" {
 			continue
 		}
-		mac, err := net.ParseMAC(f[1])
-		if err != nil || len(mac) != 6 {
+		// Some writers repeat "duid" before the identifier on each IPv6 line.
+		idAt := 1
+		if len(f) > 4 && f[1] == "duid" {
+			idAt = 2
+		}
+		ipAt, hostAt := idAt+1, idAt+2
+		if len(f) <= hostAt {
 			continue
 		}
-		ip, err := netip.ParseAddr(f[2])
+		ip, err := netip.ParseAddr(f[ipAt])
 		if err != nil {
 			continue
 		}
-		l := Lease{MAC: mac.String(), IP: ip.Unmap()}
-		if f[3] != "*" && len(f[3]) <= 253 {
-			l.Hostname = f[3]
+		l := Lease{IP: ip.Unmap()}
+		if ip.Is6() {
+			// A DHCPv6 lease carries no MAC. Its identifier is an IAID or a DUID.
+			if !plausibleDUID(f[idAt]) {
+				continue
+			}
+		} else {
+			mac, err := net.ParseMAC(f[idAt])
+			if err != nil || len(mac) != 6 {
+				continue
+			}
+			l.MAC = mac.String()
+		}
+		if f[hostAt] != "*" && len(f[hostAt]) <= 253 {
+			l.Hostname = f[hostAt]
 		}
 		var expiry int64
 		for _, c := range f[0] {
@@ -61,6 +81,27 @@ func ParseDNSMasqLeases(text string) []Lease {
 		out = append(out, l)
 	}
 	return out
+}
+
+// plausibleDUID bounds and shapes the identifier on a DHCPv6 lease line: an IAID, or a
+// colon-separated DUID. Anything else is not a lease we can use.
+func plausibleDUID(s string) bool {
+	if s == "" || len(s) > 260 {
+		return false
+	}
+	s = strings.TrimPrefix(s, "T")
+	if s == "" {
+		return false
+	}
+	if _, err := strconv.ParseUint(s, 10, 64); err == nil {
+		return true
+	}
+	for _, c := range s {
+		if (c < '0' || c > '9') && (c < 'a' || c > 'f') && (c < 'A' || c > 'F') && c != ':' {
+			return false
+		}
+	}
+	return strings.Contains(s, ":")
 }
 
 // ValidLeaseFormat says whether a format is one this reads.
