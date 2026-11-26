@@ -42,7 +42,11 @@ type Process struct {
 	SHA256  string `json:"sha256,omitempty"`
 	Signer  string `json:"signer,omitempty"`
 	Package string `json:"package,omitempty"`
-	Start   int64  `json:"start,omitempty"`
+	// Start is when the process started, in Unix milliseconds: Linux derives
+	// it from btime and the start clock ticks, macOS from ps's lstart, and
+	// Windows from the process's creation time. A server can tell a reused
+	// PID from the process that had it.
+	Start int64 `json:"start,omitempty"`
 }
 
 // Connection is one local socket with process attribution. Key is stable for

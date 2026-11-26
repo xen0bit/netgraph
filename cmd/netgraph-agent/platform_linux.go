@@ -5,7 +5,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"net/netip"
 	"os"
 	"strings"
 	"syscall"
@@ -52,7 +51,7 @@ func newScanner(cmdlines bool, events string, logf func(string, ...any)) (agent.
 	return s, func() { r.Close() }, nil
 }
 
-func newEnforcer(mode, table string, dryRun bool, protect []netip.Addr) (agent.Enforcer, error) {
+func newEnforcer(mode, table string, dryRun bool, protect *enforce.Protect) (agent.Enforcer, error) {
 	if mode != "nftables" {
 		return nil, fmt.Errorf("-enforce %q is not off or nftables", mode)
 	}

@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"slices"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/xen0bit/netgraph/internal/agent"
@@ -32,11 +33,59 @@ import (
 type Nftables struct {
 	Table  string
 	DryRun bool
-	// Protect lists addresses never dropped: the server's.
-	Protect []netip.Addr
+	// Protect is the set of addresses never dropped: the server's. The agent
+	// replaces it when the server's name resolves anew, possibly while scans
+	// run; nil protects nothing.
+	Protect *Protect
 	// Run runs nft with script on stdin; tests replace it.
 	Run     func(ctx context.Context, script string) error
 	applied string // the ruleset last installed
+}
+
+// Protect is the set of addresses the enforcer never drops: the netgraph
+// server's. Replacing it swaps the whole set at once, so a scan reads either
+// the old addresses or the new ones, never half of each.
+type Protect struct {
+	mu    sync.RWMutex
+	addrs []netip.Addr
+}
+
+// NewProtect returns a set holding addrs.
+func NewProtect(addrs []netip.Addr) *Protect {
+	p := &Protect{}
+	p.Replace(addrs)
+	return p
+}
+
+// Replace swaps the whole set for a copy of addrs.
+func (p *Protect) Replace(addrs []netip.Addr) {
+	if p == nil {
+		return
+	}
+	cp := slices.Clone(addrs)
+	p.mu.Lock()
+	p.addrs = cp
+	p.mu.Unlock()
+}
+
+// Contains reports whether a is protected.
+func (p *Protect) Contains(a netip.Addr) bool {
+	if p == nil {
+		return false
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return slices.Contains(p.addrs, a)
+}
+
+// Len reports how many addresses are protected.
+func (p *Protect) Len() int {
+	if p == nil {
+		return 0
+	}
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	return len(p.addrs)
 }
 
 var tableName = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
@@ -109,7 +158,7 @@ func (n *Nftables) Apply(ctx context.Context, conns []agent.Connection) ([]agent
 				break
 			}
 			ip = ip.Unmap()
-			if slices.Contains(n.Protect, ip) {
+			if n.Protect.Contains(ip) {
 				a.Reason = "not enforced: this is the netgraph server"
 				break
 			}

@@ -5,13 +5,13 @@ package main
 import (
 	"context"
 	"fmt"
-	"net/netip"
 	"os"
 	"time"
 
 	"golang.org/x/sys/windows/svc"
 
 	"github.com/xen0bit/netgraph/internal/agent"
+	"github.com/xen0bit/netgraph/internal/agent/enforce"
 	"github.com/xen0bit/netgraph/internal/agent/windows"
 )
 
@@ -28,7 +28,7 @@ func newScanner(cmdlines bool, events string, _ func(string, ...any)) (agent.Sca
 // Windows reports and predicts only: enforcing would need the Windows
 // Filtering Platform, and netgraph changes no firewall it doesn't own.
 // A variable, so main's error check isn't "always true" to staticcheck here.
-var newEnforcer = func(mode, _ string, _ bool, _ []netip.Addr) (agent.Enforcer, error) {
+var newEnforcer = func(mode, _ string, _ bool, _ *enforce.Protect) (agent.Enforcer, error) {
 	return nil, fmt.Errorf("-enforce %q: Windows agents observe only; use -enforce=off", mode)
 }
 

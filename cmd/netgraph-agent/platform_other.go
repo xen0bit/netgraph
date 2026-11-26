@@ -5,10 +5,10 @@ package main
 import (
 	"context"
 	"errors"
-	"net/netip"
 	"time"
 
 	"github.com/xen0bit/netgraph/internal/agent"
+	"github.com/xen0bit/netgraph/internal/agent/enforce"
 )
 
 var errPlatform = errors.New("netgraph-agent runs on Linux, macOS and Windows")
@@ -25,6 +25,6 @@ func newScanner(bool, string, func(string, ...any)) (agent.Scanner, func(), erro
 	return noScanner{}, func() {}, nil
 }
 
-var newEnforcer = func(string, string, bool, []netip.Addr) (agent.Enforcer, error) { return nil, errPlatform }
+var newEnforcer = func(string, string, bool, *enforce.Protect) (agent.Enforcer, error) { return nil, errPlatform }
 
 func service(func(context.Context, []string) error) error { return errPlatform }
