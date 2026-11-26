@@ -68,11 +68,11 @@ build-agent:
 # (BTF) lets one object run on any kernel; there is one per byte order.
 BPF_DIR   := internal/agent/linux/bpf
 BPF_IMAGE ?= alpine:3.22
-# Native mode needs the same compiler the checked-in objects were built with
-# (clang 20), libbpf-dev and Linux headers. The objects embed the source path
-# the compiler saw, so exact reproduction needs the tree at /bpf, as in the
-# Docker build: CI bind-mounts it there. Debian and Ubuntu keep asm/types.h
-# under the multiarch triplet, which the BPF target does not search itself.
+# Native mode needs clang, libbpf-dev and Linux headers. Objects are not
+# compared byte for byte (that depends on the compiler and header versions):
+# make bpf records a hash of src/conn.c, and a Go test fails when the source
+# changed without a rebuild. Debian and Ubuntu keep asm/types.h under the
+# multiarch triplet, which the BPF target does not search itself.
 BPF_NATIVE     ?= 0
 BPF_NATIVE_DIR ?= $(CURDIR)/$(BPF_DIR)
 BPF_CC         ?= clang
@@ -94,6 +94,7 @@ else
 			clang -O2 -g -Wall -Werror -target bpf$$e -c conn.c -o ../conn_bpf$$e.o && llvm-strip -g ../conn_bpf$$e.o || exit 1; \
 		done && chown $(shell id -u):$(shell id -g) ../conn_bpf*.o'
 endif
+	cd $(CURDIR)/$(BPF_DIR)/src && { sha256sum conn.c 2>/dev/null || shasum -a 256 conn.c 2>/dev/null || openssl dgst -sha256 conn.c | sed 's/.*= //'; } > conn.c.sha256
 
 ## bpf-test: load the agent's BPF programs into this kernel and check their events (Docker, CAP_BPF)
 .PHONY: bpf-test

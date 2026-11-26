@@ -84,36 +84,29 @@ jobs:
           "$(go env GOPATH)/bin/govulncheck" ./...
 
   # The agent's BPF objects are checked in so building it needs no clang.
-  # Rebuild them from src/conn.c and fail if the checked-in ones differ: a
-  # source edit that was not followed by `make bpf` would ship old programs.
-  # clang 20 from apt.llvm.org is the compiler the checked-in objects were
-  # built with; a different version produces different bytes.
+  # This compiles src/conn.c and checks that the source the objects were built
+  # from hasn't changed without `make bpf` (a recorded source hash), plus the C
+  # and Go struct layouts. Objects aren't compared byte for byte: a compiler or
+  # header update would fail that for no reason.
   bpf:
     name: bpf objects
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
-      - name: Install clang 20 and libbpf
+      - name: Compile src/conn.c for both endiannesses
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            wget gnupg ca-certificates libbpf-dev linux-libc-dev
-          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
-            | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
-          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-20 main" \
-            | sudo tee /etc/apt/sources.list.d/llvm.list >/dev/null
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends clang-20 llvm-20
-      - name: Put the tree at /bpf, as the Docker build does
-        run: |
-          # The objects embed the compiler's source path (/bpf/src/conn.c).
-          sudo mkdir -p /bpf
-          sudo mount --bind "$PWD/internal/agent/linux/bpf" /bpf
-      - run: make bpf BPF_NATIVE=1 BPF_NATIVE_DIR=/bpf \
-          BPF_CC=clang-20 BPF_STRIP=llvm-strip-20 \
-          BPF_ARCH_DIR=/usr/include/x86_64-linux-gnu
-      - name: Checked-in objects match src/conn.c
-        run: git diff --exit-code -- internal/agent/linux/bpf
+          sudo apt-get install -y --no-install-recommends clang libbpf-dev linux-libc-dev
+          cd internal/agent/linux/bpf/src
+          for e in el eb; do
+            clang -O2 -Wall -Werror -target bpf$e -c conn.c -o /tmp/conn_bpf$e.o
+          done
+      - name: Object layout and source pin
+        # eventSize matches struct event (with a C _Static_assert of the same
+        # size), and conn.c's hash matches the one make bpf recorded. Objects
+        # are not compared byte for byte: that depends on the clang and header
+        # versions, and a rebuilt Docker image would fail it for no reason.
+        run: go test ./internal/agent/linux/bpf/
 
   # Seed corpora live in each package's testdata/fuzz and run in the normal
   # test job; here every target is fuzzed for a bounded time. Scheduled and
