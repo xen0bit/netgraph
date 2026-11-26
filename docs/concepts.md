@@ -12,7 +12,7 @@ own:
 | `binding` | ARP, NDP | this MAC uses this address |
 | `dhcp` | DHCPv4, DHCPv6 | hostname, FQDN, vendor class, parameter-request list, client ID, leased addresses |
 | `mdns` | mDNS/DNS-SD | `.local` hosts with their addresses, service instances with ports and TXT records |
-| `name` | NBNS, LLMNR, reverse DNS | names a host claims or that its address resolves to |
+| `name` | NBNS, LLMNR, reverse DNS, SNMP | names a host claims or that its address resolves to |
 | `ssdp` | SSDP | UPnP server strings, USNs, device types, description URLs |
 | `lldp` | LLDP | a neighbour's system name, port and management address |
 | `wifi` | monitor-mode 802.11 | access points, SSIDs, clients, associations and 4-way handshakes |

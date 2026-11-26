@@ -119,6 +119,8 @@ that are easy to break.
 ```sh
 gofmt -l .        # must print nothing
 make lint test    # vet (default, lab and browser tags), golangci-lint, tests with -race
+make test32       # when touching decoders or packet paths (32-bit/softfloat)
+make fuzz         # when touching a decoder (slow: FUZZTIME, 20s by default)
 make cross        # when touching dependencies or the sensor
 make browser      # when touching the web UI
 make lab          # when touching capture, decoding, ingest, queries or the web UI

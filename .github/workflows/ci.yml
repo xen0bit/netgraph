@@ -6,6 +6,9 @@ on:
   # Every pull request, including stacked ones based on another branch.
   pull_request:
   workflow_dispatch:
+  # Weekly fuzz run; too slow for every pull request.
+  schedule:
+    - cron: '0 4 * * 0'
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -80,6 +83,53 @@ jobs:
           go install golang.org/x/vuln/cmd/govulncheck@latest
           "$(go env GOPATH)/bin/govulncheck" ./...
 
+  # The agent's BPF objects are checked in so building it needs no clang.
+  # Rebuild them from src/conn.c and fail if the checked-in ones differ: a
+  # source edit that was not followed by `make bpf` would ship old programs.
+  # clang 20 from apt.llvm.org is the compiler the checked-in objects were
+  # built with; a different version produces different bytes.
+  bpf:
+    name: bpf objects
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install clang 20 and libbpf
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            wget gnupg ca-certificates libbpf-dev linux-libc-dev
+          wget -qO- https://apt.llvm.org/llvm-snapshot.gpg.key \
+            | sudo gpg --dearmor -o /usr/share/keyrings/llvm.gpg
+          echo "deb [signed-by=/usr/share/keyrings/llvm.gpg] http://apt.llvm.org/noble/ llvm-toolchain-noble-20 main" \
+            | sudo tee /etc/apt/sources.list.d/llvm.list >/dev/null
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang-20 llvm-20
+      - name: Put the tree at /bpf, as the Docker build does
+        run: |
+          # The objects embed the compiler's source path (/bpf/src/conn.c).
+          sudo mkdir -p /bpf
+          sudo mount --bind "$PWD/internal/agent/linux/bpf" /bpf
+      - run: make bpf BPF_NATIVE=1 BPF_NATIVE_DIR=/bpf \
+          BPF_CC=clang-20 BPF_STRIP=llvm-strip-20 \
+          BPF_ARCH_DIR=/usr/include/x86_64-linux-gnu
+      - name: Checked-in objects match src/conn.c
+        run: git diff --exit-code -- internal/agent/linux/bpf
+
+  # Seed corpora live in each package's testdata/fuzz and run in the normal
+  # test job; here every target is fuzzed for a bounded time. Scheduled and
+  # dispatch only: sixty seconds times dozens of targets is too slow for a PR.
+  fuzz:
+    name: fuzz (scheduled)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27"
+          cache: true
+      - run: make fuzz FUZZTIME=60s
+
   # The host agent on the platforms nobody builds the rest for: each
   # scanner's live test opens a connection and expects to see it, with its
   # own process, from the real lsof/ps (macOS) or TCP table (Windows).
@@ -130,6 +180,7 @@ jobs:
           go-version: "1.27"
           cache: true
       - run: make cross
+      - run: make test32
       - name: Build the web UI and ASN table, and the server that embeds them
         run: |
           make web.build asn.fetch

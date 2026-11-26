@@ -17,7 +17,7 @@ ENV CGO_ENABLED=0
 # The ASN table is embedded when the context has one (make asn.fetch first);
 # this build does not download it, so the lab stays offline.
 RUN tags=embed_web; [ -s internal/asn/ip2asn-combined.tsv.gz ] && [ -s internal/asn/ip2asn.date ] && tags=$tags,embed_asn; \
-    make web.build VERSION=${VERSION} \
+    make web.build \
  && go build -trimpath -ldflags "-s -w -X github.com/xen0bit/netgraph/internal/buildinfo.Version=${VERSION}" \
         -o /out/netgraph-sensor ./cmd/netgraph-sensor \
  && go build -trimpath -tags $tags -ldflags "-s -w -X github.com/xen0bit/netgraph/internal/buildinfo.Version=${VERSION}" \

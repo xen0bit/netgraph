@@ -59,6 +59,7 @@ netgraph serve -db /var/lib/netgraph/netgraph.db -listen :8443
 | `-exact-max` | `48h` | longer windows are answered from hourly rollups |
 | `-fact-gap` | `1h` | silence after which a relationship starts a new period |
 | `-asn-file` | `$NETGRAPH_ASN_FILE`; release builds: built in | an ASN table: the network and country of remote addresses ([networks](#networks-and-countries)); `none` for no table |
+| `-geo-file` | `$NETGRAPH_GEO_FILE`; empty: off | a local CSV of address ranges to city/region/organisation, read once at start ([Geo lookup](#geo-lookup)) |
 | `-notify-file` | `$NETGRAPH_NOTIFY` | notification channels, one URL a line: see [Notifications](#notifications) |
 | `-operator-token-file` | `$NETGRAPH_OPERATOR_TOKEN` | the token for changing things. With this or an admin token set, the read token only reads: see [Who can do what](#who-can-do-what) |
 | `-admin-token-file` | `$NETGRAPH_ADMIN_TOKEN` | the token for the audit log and test notifications |
@@ -69,7 +70,9 @@ netgraph serve -db /var/lib/netgraph/netgraph.db -listen :8443
 | `-archive-dir`, `-archive-raw`, `-archive-max-mb` | off | keep what retention would delete, in files: see [Long-term archive](#long-term-archive) |
 | `-netflow-listen`, `-netflow-allow` | | receive NetFlow v5, v9 and IPFIX on a UDP address, from these addresses only: see [Other sources](#other-sources) |
 | `-sflow-listen`, `-sflow-allow` | | receive sFlow v5 on a UDP address, from these addresses only |
-| `-dns-log`, `-dns-log-format` | `dnsmasq` | follow a DNS server's log |
+| `-dns-log`, `-dns-log-format` | `dnsmasq` | follow a DNS server's log: `dnsmasq` (also Pi-hole), `adguard`, `unbound` or `bind` |
+| `-dns-syslog-listen`, `-dns-syslog-allow` | off | receive a DNS server's syslog on a UDP address, from these addresses only: the same formats as `-dns-log` |
+| `-ipfix-listen`, `-ipfix-allow` | | receive IPFIX over TCP, from these addresses only |
 | `-dns-listen`, `-dns-upstream-file`, `-dns-allow`, `-dns-block-mode` | off | be the network's DNS server, recording every lookup and refusing names you block: see [DNS server](dns.md) |
 | `-leases-file`, `-leases-format` | `dnsmasq` | read names and addresses from a DHCP server's lease file: `dnsmasq`, `isc` or `kea` |
 | `-source-local` | private ranges | the CIDRs that are "here", for those |
@@ -115,6 +118,9 @@ Worth alerting on: `time() - netgraph_sensor_last_seen_timestamp_seconds`
 (capture overload), `rate(netgraph_sensor_events_dropped_total[5m])` (the
 server was unreachable longer than the spool lasts), and
 `netgraph_ingest_errors_total`.
+
+A scraper may also pass the read token as `?token=` (as it can for the live
+stream), for tooling that can't set an `Authorization` header.
 
 ### Networks and countries
 
@@ -173,6 +179,42 @@ database offline, with the built-in table or `-asn-file`. The networks'
 names are kept in the database, so `netgraph query` reading the file shows
 them without the table.
 
+### Geo lookup
+
+`-geo-file` loads a local CSV that maps address ranges to a continent,
+country, region, city and organisation. netgraph never fetches one, so it is
+whatever table you already keep (a GeoIP export, or a hand-written list of
+your own networks). It is separate from the ASN table: ASN names the network
+and country, this adds a place and an organisation. The file is read once at
+start, so restart the server after replacing it.
+
+The header is optional. Rows are either `start,end,...` or `cidr,...`:
+
+```csv
+# start,end,continent,country,region,city,org
+203.0.113.0,203.0.113.255,NA,US,California,Los Angeles,Example CDN
+2001:db8::,2001:db8:ffff:ffff:ffff:ffff:ffff:ffff,NA,US,California,Los Angeles,Example CDN
+```
+
+```csv
+cidr,continent,country,region,city,org
+198.51.100.0/24,EU,NL,North Holland,Amsterdam,Example Hosting
+```
+
+`start` and `end` must be the same family and `start` must not be after
+`end`; a CIDR covers its whole prefix. Columns after the range are
+`continent`, `country`, `region`, `city` and `org`, in that order, and each
+may be empty. The country is upper-cased; the other fields are kept as
+written. Blank lines and lines beginning with `#` are ignored, and up
+to five million ranges load. Where ranges overlap the one starting closest
+below the address (the narrower, in a nested table) answers. A malformed row
+stops the server at start with its line number.
+
+Loaded ranges fill `continent`, `region`, `city` and `geo_org` on each
+connection's remote end; `country` still comes from the ASN table.
+`GET /api/v1/geo?ip=` looks one address up and `GET /api/v1/geo/status` says
+whether a table is loaded and how many ranges it has.
+
 ### Long-term archive
 
 `-archive-dir /var/lib/netgraph/archive` keeps hourly rollups beyond `-rollup-retention`, in files
@@ -210,20 +252,27 @@ or can't run at all. Each shows up as its own entry under Sensors.
   port, or failing that the one below 32768, is taken as the server and the two are joined. With
   two ports above that, nothing says who began, so that traffic shows as two connections. A flow only says what it says: no
   names, no MACs, no fingerprints. Add a lease file, or a sensor, to tie addresses to devices.
+  `-ipfix-listen :4739 -ipfix-allow 192.168.1.1` takes IPFIX over TCP instead, for an exporter
+  that only offers that.
 - **sFlow** (`-sflow-listen :6343 -sflow-allow 192.168.1.2`): samples packets from a switch
   or router. A sample stands for as many packets as the sampling rate, so volumes are
   estimates, and a short connection between samples isn't seen at all. A sampled header
   includes MAC addresses, so unlike NetFlow it can name devices.
-- **DNS logs** (`-dns-log /var/log/pihole.log`, or `-dns-log-format adguard` for AdGuard
-  Home's `querylog.json`): gives names, and shows lookups a filter blocked as `BLOCKED`.
-  dnsmasq needs `log-queries`. It reads from the end of the file on, and follows rotation.
-  dnsmasq logs nothing for some answers, so a lookup with no reply shows as `UNKNOWN`.
-  Only the log's arrival is timed, so DNS latency isn't available from dnsmasq or Pi-hole.
-  AdGuard's entries say what was asked and whether it was blocked, not what it resolved to.
+- **DNS logs** (`-dns-log /var/log/pihole.log`, `-dns-log-format adguard` for AdGuard
+  Home's `querylog.json`, or `unbound`/`bind` for those servers' query logs): gives names,
+  and shows lookups a filter blocked as `BLOCKED`. dnsmasq needs `log-queries`. It reads
+  from the end of the file on, and follows rotation. dnsmasq logs nothing for some answers,
+  so a lookup with no reply shows as `UNKNOWN`. Only the log's arrival is timed, so DNS
+  latency isn't available from dnsmasq or Pi-hole. AdGuard's answers are decoded when its
+  querylog carries them.
+- **DNS syslog** (`-dns-syslog-listen :5514 -dns-syslog-allow 192.168.1.3`): the same log
+  lines over UDP syslog (RFC 3164 or 5424), for a DNS server that logs to a collector rather
+  than a file. The format is the `-dns-log-format` one.
 - **Lease files** (`-leases-file /var/lib/misc/dnsmasq.leases`, or `-leases-format isc` for
   `dhcpd.leases`, as OPNsense and pfSense keep too, or `-leases-format kea` for Kea's memfile
   CSV): gives each device's MAC, address and name, which also lets the others attribute
-  traffic to a device.
+  traffic to a device. dnsmasq's DHCPv6 lines (a DUID, an address and a name) are read as
+  name-to-address bindings, without a MAC.
 
 A file has to be readable from where the server runs. Routers' own APIs aren't read: copy the
 lease file across, or run a sensor there.
@@ -612,6 +661,23 @@ ssh root@router '
 The binary is about 8 MB. On routers with little flash, keep it in
 `/tmp` (RAM) and fetch it at boot, or compress it with `upx --lzma`.
 
+To install it as a package instead, build an OpenWrt `.ipk` from the tree
+(`IPK_GOARCH` and `IPK_ARCH` select the target; `opkg print-architecture` on
+the router says what its architecture is called):
+
+```sh
+make ipk IPK_GOARCH=mipsle IPK_ARCH=mipsel_24kc
+opkg install bin/ipk/netgraph-sensor_<version>_mipsel_24kc.ipk
+```
+
+An `.ipk` is an `ar` archive of `debian-binary`, `control.tar.gz` and
+`data.tar.gz`. The package installs `/usr/bin/netgraph-sensor`, the procd
+init script as `/etc/init.d/netgraph-sensor` and `/etc/config/netgraph`, and
+depends only on `libc`. It is not built by the release workflow, and the
+OpenWrt architecture names are per target rather than per CPU, so check
+`opkg print-architecture` when the default does not match. Set the server and
+token as above, then `/etc/init.d/netgraph-sensor enable && /etc/init.d/netgraph-sensor start`.
+
 ### Linux with systemd
 
 The `.deb`, `.rpm` and `.apk` packages install `netgraph-sensor.service`
@@ -634,6 +700,53 @@ when present, and `netgraph serve` uses each without a flag: a read token in
 certificate and key in `/etc/netgraph/tls.crt` and `/etc/netgraph/tls.key`.
 Do not point flags in `server.conf` at `${CREDENTIALS_DIRECTORY}`: systemd
 does not expand variables inside an `EnvironmentFile`.
+
+### Nix
+
+`packaging/nix/flake.nix` builds the three binaries with CGO off and a dev
+shell; the version is the `version` variable at the top of the file, so bump
+it with a release:
+
+```sh
+nix build ./packaging/nix#netgraph
+nix build ./packaging/nix#netgraph-sensor
+nix build ./packaging/nix#netgraph-agent
+nix develop ./packaging/nix
+```
+
+The server embeds the web UI. The ASN table is downloaded at release time and
+is not in git, so a Nix build has none: pass `-asn-file` as for a plain `go
+build`. There is no `flake.lock` in the tree; the first build writes one, and
+you can keep or ignore it. Use a git checkout (not an extracted tarball), as
+the flake's source is the repository root.
+
+## Upgrading
+
+The server creates and migrates the database when it opens it. Before a
+release that changes the schema, stop the server and keep a copy: `netgraph
+db migrate -backup FILE` writes one and then migrates, and `db backup FILE`
+does the backup alone (safe while serving). Both check the copy with `PRAGMA
+integrity_check` before renaming it into place.
+
+If the database was written by a newer netgraph, the server refuses to open
+it rather than guess: it logs `database schema is version N, newer than this
+binary's M (upgrade netgraph)`. Upgrade the server binary and leave the
+database alone. The reverse is fine: an older schema is migrated forward on
+start.
+
+Sensors report their version. One older than the server gets an `Upgrade`
+prompt in Settings → Sensors saying what to install; netgraph never changes
+software on a router itself. Sensors ask for settings every minute
+(`-remote-config`, on by default; `-remote-config=false` ignores them).
+
+A restart is not needed for tokens, Wi-Fi keys or the ASN table: `SIGHUP`
+re-reads the token files, `wifi.keys` and the ASN table. Changing a token ends
+every web session it started, so the page asks for the new one. Under
+systemd, credentials are copied when the unit starts, so after editing a
+token file reload (or restart) the unit rather than only sending `SIGHUP`.
+
+Writes made directly to the database file, such as `netgraph label` without
+`-server` (or `db vacuum`), are not seen by a running server: stop it first.
 
 ## Docker
 
@@ -716,6 +829,12 @@ dedicated nftables table, off unless asked for.
    the launchd plist in the macOS archive, or a Windows service. [Host
    agent](agent.md#installing) has each.
 3. Check it under Manage → Host agents, or with `netgraph agents list`.
+
+On Windows, `packaging/windows/install-service.ps1` installs the agent as the
+service `netgraph-agent` with `sc.exe` (elevated PowerShell; the token file
+and removal are in `packaging/windows/README.md`). The service name is fixed,
+because the agent registers with the Service Control Manager under exactly
+that name.
 
 Matching needs the sensor and the agent to see the same addresses: an agent
 behind NAT from the sensor (a VM on a NAT network, a container on a bridge)
