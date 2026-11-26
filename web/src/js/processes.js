@@ -2,9 +2,8 @@
 // what it connected to and accepted, who started it, and the bytes of the
 // sensor's connections matched to it. Command lines and paths come from the
 // hosts and peers off the network: everything goes through esc().
-import { esc, bytes, stamp } from "./util.js";
+import { esc, bytes, stamp, badge } from "./util.js";
 
-const badge = (t, cls = "") => `<span class="badge ${esc(cls)}">${esc(t)}</span>`;
 const list = (xs) => (xs || []).map((x) => `<div class="mono">${esc(x)}</div>`).join("");
 
 // processesSpec is the table's columns; when formats a time as the other

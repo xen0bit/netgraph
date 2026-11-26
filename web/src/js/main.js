@@ -2,15 +2,15 @@
 // drawn here, on a canvas (map/map.js).
 import { LivingMap } from "./map/map.js";
 import { reelFrame, reelDiff } from "./reel.js";
-import { esc, units, parseSpan, fmtSpan, bytes, pad2, clock, stamp, ago } from "./util.js";
+import { esc, units, parseSpan, fmtSpan, bytes, pad2, clock, stamp, ago, badge } from "./util.js";
 import { homeHTML, installBlock } from "./home.js";
 import { parseWhen, fuzzy } from "./palette.js";
-import { tokens, lastToken, localSuggestions, searched } from "./filters.js";
+import { tokens, lastToken, localSuggestions, searched, dirs } from "./filters.js";
 import { passportHTML } from "./passport.js";
 import { Privacy } from "./privacy.js";
 import { findingsHTML, findingDetail } from "./findings.js";
 import { airspaceHTML } from "./airspace.js";
-import { emptyPolicy, loadDraft, saveDraft, addEdge, policyHTML, impactHTML, readRule } from "./policy.js";
+import { emptyPolicy, asDraft, loadDraft, saveDraft, addEdge, policyHTML, impactHTML, readRule } from "./policy.js";
 import { manageHTML } from "./manage.js";
 import { sensorStatus, sensorDetail, fleetSettingsHTML, readSettings } from "./fleet.js";
 import { typeBadge, typeWhy, profileForm, presenceHTML, linksHTML, qualityHTML } from "./devices.js";
@@ -41,6 +41,12 @@ const state = {
   live: false,
   filter: "",
   tab: "home",
+  // Filters on the views that are not tables' own sort: each is part of a
+  // link, and of a saved view, like the window and the filter.
+  findingsStatus: "open",
+  anomalySev: "",
+  incidentStatus: "",
+  destGroup: "",
   gopts: { collapse: true, dns: true, sites: true, anomalies: true, networks: true, processes: true, identity: false, top: 15 },
   graph: null,
   data: {},
@@ -70,8 +76,17 @@ const areas = {
   settings: { tabs: [["settings", "General"], ["sensors", "Sensors"]] },
 };
 const areaOf = (t) => Object.keys(areas).find((a) => areas[a].tabs.some(([id]) => id === t));
-// Views that answer about now rather than about the window: the time controls,
-// the Recorder and the filter have nothing to say to them.
+const tabLabel = (t) => areas[areaOf(t)]?.tabs.find(([id]) => id === t)?.[1] || t;
+
+// The page's title says where you are, and whose details are open. A device's
+// name is its label, not its address: nothing here is markup.
+let openTitle = "";
+function updateTitle() {
+  const parts = ["netgraph"];
+  if (state.tab && state.tab !== "home") parts.push(tabLabel(state.tab));
+  if (openTitle) parts.push(openTitle);
+  document.title = parts.join(" — ");
+}
 // some lists the first n items, and how many more there are.
 const some = (list, n) => list.length <= n ? list.join(", ") : `${list.slice(0, n).join(", ")} and ${list.length - n} more`;
 const plainTabs = new Set(["home", "settings", "sensors", "incidents", "pulse", "passport", "links", "findings"]);
@@ -87,6 +102,10 @@ function loadHash() {
   if (p.get("from") && to) state.span = Math.max(10_000, state.to - Number(p.get("from")));
   state.live = p.get("live") === "1" || !p.has("to");
   state.filter = p.get("q") || "";
+  state.findingsStatus = p.get("fstatus") === "all" ? "" : p.get("fstatus") || "open";
+  state.anomalySev = p.get("asev") || "";
+  state.incidentStatus = p.get("istatus") || "";
+  state.destGroup = p.get("dgroup") || "";
   // A bare address lands on Home. A link with a window and no view is from
   // when the map was the only landing page, and from saveHash, which leaves the
   // map out.
@@ -115,6 +134,10 @@ function saveHash() {
   const p = new URLSearchParams();
   if (state.live) { p.set("live", "1"); p.set("span", state.span); } else { p.set("from", state.to - state.span); p.set("to", state.to); }
   if (state.filter) p.set("q", state.filter);
+  if (state.findingsStatus !== "open") p.set("fstatus", state.findingsStatus || "all");
+  if (state.anomalySev) p.set("asev", state.anomalySev);
+  if (state.incidentStatus) p.set("istatus", state.incidentStatus);
+  if (state.destGroup) p.set("dgroup", state.destGroup);
   if (state.tab !== "graph") p.set("tab", state.tab);
   for (const k of ["collapse", "dns", "sites", "anomalies", "networks", "processes", "identity"]) p.set(k, state.gopts[k] ? "1" : "0");
   p.set("top", state.gopts.top);
@@ -340,6 +363,7 @@ function renderWindow() {
   $("#from").value = toLocalInput(state.to - state.span);
   $("#to").value = toLocalInput(state.to);
   $("#live").setAttribute("aria-pressed", String(state.live));
+  $("#refresh").hidden = state.live;
   for (const b of $$(".presets button")) b.classList.toggle("on", parseSpan(b.dataset.span) === state.span);
 }
 
@@ -528,8 +552,6 @@ function homeClick(e) {
 
 // --- findings -----------------------------------------------------------------------
 
-let findingsStatus = "open";
-
 // The count of unread findings, on the tab, whatever view is open.
 function showFindingCount(counts) {
   const el = $("#findings-count");
@@ -541,11 +563,11 @@ function showFindingCount(counts) {
 
 async function renderFindings(seq) {
   const q = new URLSearchParams();
-  if (findingsStatus) q.set("status", findingsStatus);
+  if (state.findingsStatus) q.set("status", state.findingsStatus);
   const l = await track(api("findings", q));
   if (seq !== refreshSeq) return;
   showFindingCount(l.counts);
-  $("#findings-body").innerHTML = findingsHTML(l, findingsStatus);
+  $("#findings-body").innerHTML = findingsHTML(l, state.findingsStatus);
 }
 
 let lastFindingCount = 0;
@@ -572,6 +594,8 @@ function sensorForm(path, redraw) {
 
 async function openFleetSettings() {
   $("#panel").hidden = false;
+  openTitle = "";
+  updateTitle();
   ++entityReq;
   const values = await track(api("sensors/%2A/config", new URLSearchParams())).catch(() => ({}));
   $("#panel-body").innerHTML = fleetSettingsHTML(values);
@@ -584,6 +608,8 @@ async function openFleetSettings() {
 function openProgram(p) {
   if (p.id) { openEntity(p.id); return; }
   $("#panel").hidden = false;
+  openTitle = "";
+  updateTitle();
   ++entityReq;
   state.open = "";
   $("#panel-body").innerHTML = programDetail(p);
@@ -592,6 +618,8 @@ function openProgram(p) {
 
 function openSensor(s) {
   $("#panel").hidden = false;
+  openTitle = "";
+  updateTitle();
   ++entityReq;
   state.open = `sensor:${s.name}`;
   $("#panel-body").innerHTML = sensorDetail(s);
@@ -602,6 +630,8 @@ function openSensor(s) {
 async function openFinding(id) {
   const panel = $("#panel");
   panel.hidden = false;
+  openTitle = "";
+  updateTitle();
   const req = ++entityReq;
   let f;
   try {
@@ -638,7 +668,7 @@ async function openFinding(id) {
 
 function findingsClick(e) {
   const st = e.target.closest("[data-findings-status]");
-  if (st) { findingsStatus = st.dataset.findingsStatus; refresh(); return; }
+  if (st) { state.findingsStatus = st.dataset.findingsStatus; refresh(); return; }
   if (e.target.closest("[data-findings-seen]")) {
     send("POST", "findings/seen", {}).then(() => { lastFindingCount = 0; refresh(); }).catch((err) => setStatus(err.message, true));
     return;
@@ -855,6 +885,27 @@ async function copyClick(e) {
 
 const tablePath = { devices: "devices", processes: "processes", flows: "flows", destinations: "destinations", dns: "dns", facts: "facts", wifi: "wifi", sensors: "sensors", anomalies: "anomalies", incidents: "incidents" };
 
+// showRefreshError replaces stale content with the failure and a way to ask
+// again. The footer still says what happened; this says it where the data was.
+function showRefreshError(el, e) {
+  if (!el) return;
+  el.innerHTML = `<p class="inline-error" role="alert">Couldn't refresh: ${esc(e?.message || String(e))} <button type="button" data-retry>Retry</button></p>`;
+  el.querySelector("[data-retry]").onclick = () => refresh();
+}
+
+// A table cannot hold a paragraph, so its error sits just above it.
+function tableErrorBox(t) {
+  const table = $(`#t-${t}`);
+  if (!table) return null;
+  let box = document.getElementById(`err-${t}`);
+  if (!box) {
+    box = document.createElement("div");
+    box.id = `err-${t}`;
+    table.before(box);
+  }
+  return box;
+}
+
 async function renderTab(seq) {
   const t = state.tab;
   try {
@@ -899,8 +950,8 @@ async function renderTab(seq) {
     if (t === "dns") await loadDNSStatus();
     const path = tablePath[t];
     const extra = state.limits[t] ? { limit: state.limits[t] } : {};
-    if (t === "destinations" && $("#dest-group")?.value) extra.group = $("#dest-group").value;
-    if (t === "incidents" && $("#incident-status")?.value) extra.status = $("#incident-status").value;
+    if (t === "destinations" && state.destGroup) extra.group = state.destGroup;
+    if (t === "incidents" && state.incidentStatus) extra.status = state.incidentStatus;
     Object.assign(extra, serverSort(t));
     let rows = await track(api(path, extra));
     if (seq !== refreshSeq) return;
@@ -910,13 +961,17 @@ async function renderTab(seq) {
         ? `Learning the network: history checks start after a day. Destination and traffic baselines look back ${days} days; only checks that need no history run now.`
         : `History checks active. Baselines look back ${days} days.`;
       rows = rows?.anomalies;
-      const sev = $("#anomaly-sev")?.value;
-      if (sev) rows = (rows || []).filter((a) => a.severity === sev);
+      if (state.anomalySev) rows = (rows || []).filter((a) => a.severity === state.anomalySev);
       renderMutes();
     }
     state.data[t] = rows || [];
+    document.getElementById(`err-${t}`)?.remove();
     renderTable(t);
-  } catch { /* status shows it */ }
+  } catch (e) {
+    if (seq !== refreshSeq) return;
+    const bodies = { insights: "#insights-body", quality: "#quality-body", presence: "#presence-body", airspace: "#airspace-body", links: "#links-body", findings: "#findings-body", passport: "#passport-body", home: "#home-body", policy: "#policy-body", manage: "#manage-body" };
+    showRefreshError(bodies[t] ? $(bodies[t]) : tableErrorBox(t), e);
+  }
 }
 
 let lastPrecision = "";
@@ -999,15 +1054,7 @@ function brush() {
 
 // --- tables --------------------------------------------------------------------
 
-const badge = (t, cls = "") => `<span class="badge ${cls}">${esc(t)}</span>`;
-
 // A connection's direction, from the local network's point of view.
-const dirs = {
-  out: ["out", "A device here connected out"],
-  in: ["in", "Opened from outside to a device here"],
-  local: ["lan", "Both ends are here"],
-  external: ["transit", "Neither end is here"],
-};
 const dirBadge = (d) => `<span class="badge dir-${esc(d)}" title="${esc(dirs[d]?.[1] || d)}">${esc(dirs[d]?.[0] || d)}</span>`;
 
 // hostPort is an address and port as they are written: [v6]:port.
@@ -1356,8 +1403,19 @@ function renderTable(t) {
     const act = e.target.closest("[data-dns-act]");
     if (act) { dnsQuick(act.dataset.dnsName, act.dataset.dnsAct); return; }
     const tr = e.target.closest("tbody tr[data-i]");
+    if (tr) openRow(tr);
+  };
+  el.onkeydown = (e) => {
+    if (e.key !== "Enter" && e.key !== " ") return;
+    if (e.target.closest("button, a, input, select, textarea")) return;
+    const tr = e.target.closest("tbody tr[data-i]");
     if (!tr) return;
+    e.preventDefault();
+    openRow(tr);
+  };
+  const openRow = (tr) => {
     const r = rows[Number(tr.dataset.i)];
+    if (!r) return;
     const id = spec.id(r);
     if (!id) return;
     if (spec.open) spec.open(r);
@@ -1371,7 +1429,7 @@ function renderTable(t) {
     el.innerHTML = head + `<tbody><tr><td class="empty" colspan="${span}">Nothing in this window.${windowed(t) ? emptyAction() : ""}</td></tr></tbody>`;
     return;
   }
-  const rowHTML = (r, i) => `<tr data-i="${i}">${spec.row(r).map((c, j) => (shown(j) ? `<td class="${spec.num?.includes(j) ? "num" : ""}">${c}</td>` : "")).join("")}</tr>`;
+  const rowHTML = (r, i) => `<tr data-i="${i}" tabindex="0">${spec.row(r).map((c, j) => (shown(j) ? `<td class="${spec.num?.includes(j) ? "num" : ""}">${c}</td>` : "")).join("")}</tr>`;
   if (rows.length <= chunkedFrom) {
     el.innerHTML = head + "<tbody>" + rows.map(rowHTML).join("") + "</tbody>";
     return;
@@ -1651,11 +1709,15 @@ function filterTerm(id) {
   return "";
 }
 
-const applyFilter = (f) => { applyFilterText(f); };
+// The edge whose panel is open, for its own actions (what-if, policy).
+let openEdgeData = null;
 
 function openEdge(e) {
   const panel = $("#panel");
   panel.hidden = false;
+  openTitle = "";
+  updateTitle();
+  openEdgeData = e;
   const name = (id) => state.graph?.nodes?.find((n) => n.id === id)?.label || id;
   const filter = [filterTerm(e.from), filterTerm(e.to)].filter(Boolean).join(" ");
   const body = $("#panel-body");
@@ -1667,14 +1729,6 @@ function openEdge(e) {
   body.innerHTML = `<h2>${esc(name(e.from))} → ${esc(name(e.to))}</h2>${stats}
     <p><a data-filter="${esc(filter)}">Filter the window to these</a>${e.rel === "connects" ? ` · <a data-whatif="1">What if this were blocked?</a> · In the policy: <a data-policy="allow">Allow</a> or <a data-policy="deny">Deny</a>` : ""}</p>
     <div id="edge-rows"><p class="muted">Loading…</p></div>`;
-  body.onclick = (ev) => {
-    const a = ev.target.closest("a");
-    if (!a) return;
-    if (a.dataset.id) openEntity(a.dataset.id);
-    if (a.dataset.filter) applyFilter(a.dataset.filter);
-    if (a.dataset.whatif) openWhatIf(blockPolicy(e));
-    if (a.dataset.policy) addEdgeToPolicy(e, a.dataset.policy);
-  };
   const q = {};
   for (const id of [e.from, e.to]) {
     const t = filterTerm(id);
@@ -1736,7 +1790,7 @@ function openMapMenu(target, x, y) {
     const term = filterTerm(n.id);
     items.push(["Details", () => openEntity(n.id)]);
     if (n.kind === "device") items.push(["Rename…", () => openEntity(n.id).then(() => $("#panel-body form.rename input")?.focus())]);
-    if (term) items.push([`Filter to this ${n.kind}`, () => applyFilter(term)]);
+    if (term) items.push([`Filter to this ${n.kind}`, () => applyFilterText(term)]);
     if (["device", "domain", "site", "ip", "asn"].includes(n.kind)) items.push(["Follow in Recorder", () => follow(n.id)]);
     items.push(["Add a note…", () => openNote(n.id)]);
     if (expansionQueries(n.id)) items.push([n.id.startsWith("site:") ? "Open into its names" : "Show all of them here", () => toggleExpand(n.id)]);
@@ -1751,7 +1805,7 @@ function openMapMenu(target, x, y) {
   } else if (e) {
     items.push(["Show its connections", () => openEdge(e)]);
     const f = [filterTerm(e.from), filterTerm(e.to)].filter(Boolean).join(" ");
-    if (f) items.push(["Filter to these", () => applyFilter(f)]);
+    if (f) items.push(["Filter to these", () => applyFilterText(f)]);
     if (e.rel === "connects") {
       items.push(["What if this were blocked?", () => openWhatIf(blockPolicy(e))]);
       items.push(["Allow in the policy", () => addEdgeToPolicy(e, "allow")], ["Deny in the policy", () => addEdgeToPolicy(e, "deny")]);
@@ -1866,7 +1920,7 @@ async function renderInsights(seq) {
       <section class="card"><h3>Network weather</h3><div class="weather">${bars}</div><p class="muted">${weather ? `${pts.length} buckets of ${fmtSpan(weather.step)} · the last six are a moving-mean forecast with a band` : "No traffic data."}</p>${(weather?.gaps || []).map((g) => `<p class="muted">${esc(g)}</p>`).join("")}</section>
     </div>`;
   } catch (e) {
-    box.innerHTML = `<p class="muted">${esc(e.message)}</p>`;
+    showRefreshError(box, e);
   }
 }
 
@@ -1875,6 +1929,7 @@ async function renderInsights(seq) {
 async function openEntity(id, { anomaly } = {}) {
   if (!id) return;
   if (id.startsWith("incident:")) return openIncident(Number(id.slice("incident:".length)));
+  openEdgeData = null;
   const req = ++entityReq;
   const panel = $("#panel");
   panel.hidden = false;
@@ -1892,6 +1947,8 @@ async function openEntity(id, { anomaly } = {}) {
     return;
   }
   if (req !== entityReq) return;
+  openTitle = d.kind === "device" ? d.label || d.key || "" : "";
+  updateTitle();
   const userLabel = d.attrs?.user_label || "";
   const autoLabel = d.attrs?.auto_label || "";
   const hiddenAttrs = new Set(["user_label", "auto_label", "user_type", "owner", "groups", "same_as", "not_same_as", "link_copied"]);
@@ -1994,13 +2051,6 @@ async function openEntity(id, { anomaly } = {}) {
     form.onsubmit = (e) => { e.preventDefault(); save(form.label.value.trim()); };
     form.querySelector("[data-clear]")?.addEventListener("click", () => save(""));
   }
-  $("#panel-body").onclick = (e) => {
-    const a = e.target.closest("a");
-    if (!a) return;
-    if (a.dataset.id) openEntity(a.dataset.id);
-    if (a.dataset.follow) { follow(a.dataset.follow); }
-    if (a.dataset.filter) { state.filter = a.dataset.filter; $("#filter").value = state.filter; refresh(); }
-  };
 }
 
 // procLine is the program a host agent named at one end of a connection.
@@ -2028,6 +2078,8 @@ function filterFor(d) {
 // openRest explains a graph's "N more destinations" (or "N more clients")
 // node: what Top N left out for one device, and the ways to see it.
 function openRest(id) {
+  openTitle = "";
+  updateTitle();
   const n = state.graph?.nodes?.find((x) => x.id === id);
   const clients = id.startsWith("other:clients:");
   const dev = n?.attrs?.device || id.slice(clients ? "other:clients:".length : "other:".length);
@@ -2045,14 +2097,6 @@ function openRest(id) {
     <p><a data-expand="${esc(id)}">Show all of them here</a> (or double-click the node)</p>
     <p><a data-id="${esc(dev)}">Details of ${esc(name)}</a></p>
     <p><a data-filter="${esc(devFilter + (clients ? " dir:in" : " dir:out"))}">Filter the window to these ${what}</a>, or raise Top N.</p>`;
-  $("#panel-body").onclick = (e) => {
-    const a = e.target.closest("a");
-    if (!a) return;
-    if (a.dataset.expand) toggleExpand(a.dataset.expand);
-    if (a.dataset.id) openEntity(a.dataset.id);
-    if (a.dataset.follow) { follow(a.dataset.follow); }
-    if (a.dataset.filter) { state.filter = a.dataset.filter; $("#filter").value = state.filter; refresh(); }
-  };
 }
 
 // --- live ---------------------------------------------------------------------------
@@ -2240,9 +2284,15 @@ const whatifExample = {
   dns: { block: [], allow: [] },
 };
 
-function openWhatIf(policy = whatifExample) {
+// What the What-if dialog last held, so closing it doesn't throw away edits.
+// The text is kept as typed: an unfinished policy is still someone's work.
+const whatifKey = "netgraph.whatif.policy";
+
+function openWhatIf(policy = null) {
   const dlg = $("#whatif-dialog");
-  $("#whatif-policy").value = JSON.stringify(policy, null, 2);
+  const saved = store.get(whatifKey);
+  $("#whatif-policy").value = policy ? JSON.stringify(policy, null, 2) : saved ?? JSON.stringify(whatifExample, null, 2);
+  store.set(whatifKey, $("#whatif-policy").value);
   $("#whatif-result").innerHTML = "";
   $("#whatif-status").textContent = "";
   if (!dlg.open) dlg.showModal();
@@ -2250,6 +2300,7 @@ function openWhatIf(policy = whatifExample) {
 
 async function runWhatIf() {
   const status = $("#whatif-status"), box = $("#whatif-result");
+  store.set(whatifKey, $("#whatif-policy").value);
   let policy;
   try {
     policy = JSON.parse($("#whatif-policy").value);
@@ -2267,6 +2318,30 @@ async function runWhatIf() {
   } catch (e) {
     status.textContent = e.message;
   }
+}
+
+// sendWhatIfToPolicy hands the dialog's JSON to the builder's draft. A policy
+// that doesn't validate stays here with the dialog's error: the draft is untouched.
+function sendWhatIfToPolicy() {
+  const status = $("#whatif-status");
+  let parsed;
+  try {
+    parsed = JSON.parse($("#whatif-policy").value);
+  } catch (e) {
+    status.textContent = `invalid JSON: ${e.message}`;
+    return;
+  }
+  const p = asDraft(parsed);
+  if (!p) {
+    status.textContent = "Not a policy: it needs zones, defaults and rules.";
+    return;
+  }
+  policyDraft = p;
+  saveDraft(store, p);
+  store.set(whatifKey, $("#whatif-policy").value);
+  $("#whatif-dialog").close();
+  setStatus("Policy loaded into the builder");
+  selectTab("policy");
 }
 
 // --- policy --------------------------------------------------------------------------
@@ -2448,14 +2523,14 @@ function wireManage() {
     };
     const b = e.target.closest("button");
     if (!b) return;
-    const sure = (what) => confirm(`Delete ${what}? This can't be undone.`);
+    const sure = (what) => inputDialog({ title: `Delete ${what}?`, text: "This can't be undone.", ok: "Delete", danger: true });
     if (b.dataset.policyActivate) return act(() => send("POST", `policies/${encodeURIComponent(b.dataset.policyActivate)}/activate`), "Policy activated");
-    if (b.dataset.policyDelete) return sure("this policy") && act(() => send("DELETE", `policies/${encodeURIComponent(b.dataset.policyDelete)}`), "Policy deleted");
+    if (b.dataset.policyDelete) { if (await sure("this policy")) return act(() => send("DELETE", `policies/${encodeURIComponent(b.dataset.policyDelete)}`), "Policy deleted"); return; }
     if (b.dataset.blocklistUpdate) return act(() => send("POST", `blocklists/${b.dataset.blocklistUpdate}/update`, {}), "Blocklist updated");
-    if (b.dataset.blocklistDelete) return sure("this blocklist") && act(() => send("DELETE", `blocklists/${b.dataset.blocklistDelete}`), "Blocklist deleted");
+    if (b.dataset.blocklistDelete) { if (await sure("this blocklist")) return act(() => send("DELETE", `blocklists/${b.dataset.blocklistDelete}`), "Blocklist deleted"); return; }
     if (b.dataset.profileActivate) return act(() => send("POST", `profiles/${b.dataset.profileActivate}/activate`), "Profile activated");
-    if (b.dataset.profileDelete) return sure("this profile and its triggers") && act(() => send("DELETE", `profiles/${b.dataset.profileDelete}`), "Profile deleted");
-    if (b.dataset.triggerDelete) return sure("this trigger") && act(() => send("DELETE", `network-triggers/${b.dataset.triggerDelete}`), "Trigger deleted");
+    if (b.dataset.profileDelete) { if (await sure("this profile and its triggers")) return act(() => send("DELETE", `profiles/${b.dataset.profileDelete}`), "Profile deleted"); return; }
+    if (b.dataset.triggerDelete) { if (await sure("this trigger")) return act(() => send("DELETE", `network-triggers/${b.dataset.triggerDelete}`), "Trigger deleted"); return; }
     // Once records an answer; Always adds a rule for this device and destination to the active policy.
     if (b.dataset.decision) {
       const [id, answer, action] = b.dataset.decision.split(":");
@@ -3057,9 +3132,18 @@ async function saveCurrentView() {
   const name = await inputDialog({ title: "Save this view", text: "Keeps the view, filter, map options and window length, in this browser. Opening it shows that length up to now.", input: true, placeholder: "Name", ok: "Save" });
   if (!name) return;
   const list = savedViews().filter((v) => v.name !== name);
-  list.push({ name, tab: state.tab, filter: state.filter, span: state.span, gopts: { ...state.gopts } });
+  list.push({ name, tab: state.tab, filter: state.filter, span: state.span, gopts: { ...state.gopts },
+    findingsStatus: state.findingsStatus, anomalySev: state.anomalySev, incidentStatus: state.incidentStatus, destGroup: state.destGroup });
   saveViews(list);
   setStatus(`Saved “${name}”`);
+}
+
+// syncViewControls puts the state's view filters back into their selects.
+function syncViewControls() {
+  for (const [id, v] of [["#anomaly-sev", state.anomalySev], ["#incident-status", state.incidentStatus], ["#dest-group", state.destGroup]]) {
+    const el = $(id);
+    if (el) el.value = v;
+  }
 }
 
 function openView(v) {
@@ -3069,7 +3153,12 @@ function openView(v) {
   renderChips();
   state.span = Number(v.span) >= 10_000 ? Number(v.span) : state.span;
   if (v.gopts && typeof v.gopts === "object") Object.assign(state.gopts, v.gopts);
+  state.findingsStatus = v.findingsStatus !== undefined ? String(v.findingsStatus) : "open";
+  state.anomalySev = String(v.anomalySev || "");
+  state.incidentStatus = String(v.incidentStatus || "");
+  state.destGroup = String(v.destGroup || "");
   syncGraphInputs();
+  syncViewControls();
   state.to = Date.now();
   selectTab(v.tab);
   if (!state.live) setLive(true);
@@ -3360,6 +3449,7 @@ function selectTab(t) {
   sub.innerHTML = sub.hidden ? "" : spec.tabs.map(([id, label]) => `<button type="button" data-tab="${id}" aria-current="${id === t ? "page" : "false"}">${label}</button>`).join("") +
     (spec.tools ? `<span class="spacer"></span>${spec.tools}` : "");
   document.body.toggleAttribute("data-plain", plainTabs.has(t));
+  updateTitle();
   syncFeed();
   return refresh();
 }
@@ -3370,6 +3460,9 @@ const selectArea = (area) => selectTab(lastInArea[area] || areas[area].tabs[0][0
 function closePanel() {
   $("#panel").hidden = true;
   state.open = "";
+  openEdgeData = null;
+  openTitle = "";
+  updateTitle();
   saveHash();
 }
 
@@ -3445,14 +3538,9 @@ function init() {
   if (saved) document.documentElement.dataset.theme = saved;
   loadHash();
   $("#filter").value = state.filter;
-  $("#g-collapse").checked = state.gopts.collapse;
-  $("#g-dns").checked = state.gopts.dns;
-  $("#g-sites").checked = state.gopts.sites;
-  $("#g-anomalies").checked = state.gopts.anomalies;
-  $("#g-networks").checked = state.gopts.networks;
-  $("#g-processes").checked = state.gopts.processes;
-  $("#g-identity").checked = state.gopts.identity;
-  $("#g-top").value = state.gopts.top;
+  syncGraphInputs();
+  syncViewControls();
+  $("#refresh").onclick = () => refresh();
 
   $("#back").onclick = () => setWindow(state.to - state.span / 2, state.span);
   $("#fwd").onclick = () => setWindow(state.to + state.span / 2, state.span);
@@ -3550,11 +3638,11 @@ function init() {
   $("#g-top").onchange = () => { state.gopts.top = Number($("#g-top").value) || 15; refresh(); };
   $("#connect").onclick = () => askToken().then((t) => { if (t) refresh(); });
   const sev = $("#anomaly-sev");
-  if (sev) sev.onchange = () => refresh();
+  if (sev) sev.onchange = () => { state.anomalySev = sev.value; refresh(); };
   const dg = $("#dest-group");
-  if (dg) dg.onchange = () => refresh();
+  if (dg) dg.onchange = () => { state.destGroup = dg.value; refresh(); };
   const inc = $("#incident-status");
-  if (inc) inc.onchange = () => refresh();
+  if (inc) inc.onchange = () => { state.incidentStatus = inc.value; refresh(); };
   // Only a phone shows this: its screen is for the map, not for the options.
   $("#g-more").onclick = () => {
     const open = $(".graph-tools").classList.toggle("open");
@@ -3579,6 +3667,8 @@ function init() {
   matchMedia("(prefers-color-scheme: dark)").addEventListener("change", () => { diagram.setTheme(theme()); });
   $("#ask-open").onclick = openAsk;
   $("#whatif-run").onclick = runWhatIf;
+  $("#whatif-to-policy").onclick = sendWhatIfToPolicy;
+  $("#whatif-policy").oninput = () => store.set(whatifKey, $("#whatif-policy").value);
   wirePolicy();
   wireManage();
   $("#ask-form").onsubmit = async (e) => {
@@ -3595,8 +3685,15 @@ function init() {
   };
   $("#panel-close").onclick = closePanel;
   $("#panel").addEventListener("click", (e) => {
-    const a = e.target.closest("a[data-passport]");
-    if (a) openPassport(a.dataset.passport);
+    const a = e.target.closest("a");
+    if (!a) return;
+    if (a.dataset.passport) { openPassport(a.dataset.passport); return; }
+    if (a.dataset.id) { openEntity(a.dataset.id); return; }
+    if (a.dataset.filter) { applyFilterText(a.dataset.filter); return; }
+    if (a.dataset.follow) { follow(a.dataset.follow); return; }
+    if (a.dataset.expand) { toggleExpand(a.dataset.expand); return; }
+    if (a.dataset.whatif && openEdgeData) { openWhatIf(blockPolicy(openEdgeData)); return; }
+    if (a.dataset.policy && openEdgeData) { addEdgeToPolicy(openEdgeData, a.dataset.policy); return; }
   });
   $("#panel").addEventListener("submit", async (e) => {
     const form = e.target.closest("form.profile");
@@ -3616,6 +3713,16 @@ function init() {
   });
   $("#quality-body").onclick = (e) => { const b = e.target.closest("[data-open]"); if (b) openEntity(b.dataset.open); };
   $("#presence-body").onclick = (e) => { const b = e.target.closest("[data-open]"); if (b) openEntity(b.dataset.open); };
+  for (const id of ["#quality-body", "#presence-body"]) {
+    $(id).onkeydown = (e) => {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      if (e.target.closest("button, a, input, select, textarea")) return;
+      const row = e.target.closest("[data-open]");
+      if (!row) return;
+      e.preventDefault();
+      openEntity(row.dataset.open);
+    };
+  }
   $("#links-body").onclick = async (e) => {
     const b = e.target.closest("[data-link]");
     if (!b) return;
@@ -3656,11 +3763,12 @@ function init() {
     renderChips();
     renderWindow();
     syncGraphInputs();
+    syncViewControls();
     const changed = state.live !== wasLive;
     if (changed) setLive(state.live);
     if (!changed || !state.live) selectTab(state.tab);
     if (state.open) openEntity(state.open);
-    else $("#panel").hidden = true;
+    else { $("#panel").hidden = true; openTitle = ""; updateTitle(); }
   });
   search();
   document.body.classList.toggle("privacy", privacy.on);

@@ -20,6 +20,8 @@ export const bytes = (n) => {
   do { n /= 1000; i++; } while (n >= 1000 && i < u.length - 1);
   return `${n >= 100 ? n.toFixed(0) : n.toFixed(1)}${u[i]}`;
 };
+export const badge = (text, cls = "") => `<span class="badge ${esc(cls)}">${esc(text)}</span>`;
+export const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 export const pad2 = (n) => String(n).padStart(2, "0");
 export const clock = (ms) => { const d = new Date(ms); return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`; };
 export const stamp = (ms) => { const d = new Date(ms); return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${clock(ms)}`; };
