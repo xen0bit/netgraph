@@ -287,12 +287,21 @@ func (s *Server) gate(min Role, allowQuery bool, h http.HandlerFunc) http.Handle
 
 // affectsDNS says whether a change can alter what the DNS server answers: a
 // blocklist, a group of them, a device's groups, a restored bundle. (Its own
-// rules' routes tell it themselves.)
+// rules' routes tell it themselves, through Reload.) A route added here must
+// be added below; matching whole path shapes rather than substrings keeps an
+// unrelated route from tripping it by name.
 func affectsDNS(pattern string) bool {
-	for _, p := range []string{"/blocklists", "/rule-groups", "/profile", "/policy/bundle"} {
-		if strings.Contains(pattern, p) {
-			return true
-		}
+	path := pattern
+	if i := strings.IndexByte(path, ' '); i >= 0 {
+		path = path[i+1:]
+	}
+	switch {
+	case strings.HasPrefix(path, "/api/v1/blocklists"), strings.HasPrefix(path, "/api/v1/rule-groups"):
+		return true
+	case path == "/api/v1/policy/bundle", strings.HasPrefix(path, "/api/v1/policy/bundle/"):
+		return true
+	case strings.HasPrefix(path, "/api/v1/devices/") && strings.HasSuffix(path, "/profile"):
+		return true
 	}
 	return false
 }

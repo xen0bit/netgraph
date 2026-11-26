@@ -202,7 +202,9 @@ func New(cfg Config) *Server {
 	read("/api/v1/incidents/{id}/export", s.exportIncident)
 	read("/api/v1/export", s.export)
 	s.mux.Handle("GET /api/v1/live", s.gate(RoleViewer, true, s.live))
-	read("/metrics", s.metrics)
+	// /metrics also takes ?token=: a Prometheus scraper can't carry a cookie,
+	// and giving it the read token in a URL is what its static_configs do.
+	s.mux.Handle("GET /metrics", s.gate(RoleViewer, true, s.metrics))
 	read("/api/v1/map/pins", s.mapPins)
 	s.mux.Handle("PUT /api/v1/map/pins", s.require(RoleOperator, s.setMapPins))
 	s.mux.Handle("DELETE /api/v1/map/pins", s.require(RoleOperator, s.deleteMapPins))
@@ -398,7 +400,15 @@ func (s *Server) ingest(w http.ResponseWriter, r *http.Request) {
 	_ = http.NewResponseController(w).SetReadDeadline(time.Now().Add(5 * time.Minute))
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, s.cfg.MaxBatch))
 	if err != nil {
-		httpError(w, http.StatusRequestEntityTooLarge, err)
+		// A body over the limit is the one error that's the client's
+		// fault but not a bad request: say so, and don't read it as
+		// malformed JSON.
+		var tooBig *http.MaxBytesError
+		if errors.As(err, &tooBig) {
+			httpError(w, http.StatusRequestEntityTooLarge, err)
+		} else {
+			httpError(w, http.StatusBadRequest, fmt.Errorf("reading body: %w", err))
+		}
 		return
 	}
 	var events []wire.Event

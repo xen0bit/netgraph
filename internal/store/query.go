@@ -762,13 +762,21 @@ func destinationKind(key string) string {
 	return "name"
 }
 
+// listCap bounds the address and port lists a destination carries: a CDN
+// name can front hundreds of addresses, and the table shows a few.
+const listCap = 32
+
 func splitList(s string) []string {
 	if s == "" {
 		return nil
 	}
 	parts := strings.Split(s, ",")
 	slices.Sort(parts)
-	return slices.Compact(parts)
+	parts = slices.Compact(parts)
+	if len(parts) > listCap {
+		parts = parts[:listCap]
+	}
+	return parts
 }
 
 // destinationPorts turns "443:6,53:17" into "443/tcp,53/udp".
@@ -794,6 +802,9 @@ func destinationPorts(s string) []string {
 		}
 	}
 	slices.Sort(out)
+	if len(out) > listCap {
+		out = out[:listCap]
+	}
 	return out
 }
 

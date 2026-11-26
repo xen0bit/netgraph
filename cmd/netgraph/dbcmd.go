@@ -104,8 +104,8 @@ func runDB(args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "deleted: %d flow records, %d lookups, %d answers, %d observations, %d facts, %d rollup rows, %d entities, %d Wi-Fi handshakes, %d mutes\n",
-			r.Flows, r.DNS, r.Answers, r.Observations, r.Facts, r.Rollups, r.Entities, r.Handshakes, r.Mutes)
+		fmt.Fprintf(os.Stderr, "deleted: %d flow records, %d lookups, %d answers, %d observations, %d facts, %d rollup rows, %d entities, %d Wi-Fi handshakes, %d mutes, %d audit entries, %d findings, %d policy decisions\n",
+			r.Flows, r.DNS, r.Answers, r.Observations, r.Facts, r.Rollups, r.Entities, r.Handshakes, r.Mutes, r.Audit, r.Findings, r.Decisions)
 		return nil
 	case "purge":
 		if fs.NArg() != 1 {

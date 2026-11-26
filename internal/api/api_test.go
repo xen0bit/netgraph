@@ -420,6 +420,16 @@ func TestMetrics(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("/metrics: %d", code)
 	}
+	// A scraper may put the token in the query string, as Prometheus's
+	// static_configs support, since it has no cookie to send.
+	resp, err := http.Get(srv.URL + "/metrics?token=rd-tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("/metrics?token=: %s", resp.Status)
+	}
 	sample := regexp.MustCompile(`^[a-zA-Z_:][a-zA-Z0-9_:]*(\{([a-zA-Z_][a-zA-Z0-9_]*="([^"\\]|\\.)*",?)*\})? -?[0-9.eE+-]+$`)
 	types := map[string]bool{}
 	for _, line := range strings.Split(strings.TrimSpace(body), "\n") {

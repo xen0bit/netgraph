@@ -112,6 +112,9 @@ func (s *Store) forgetInDatabase(ctx context.Context, mac string, opts ForgetOpt
 		return res, err
 	}
 	count := func(q string, args ...any) int64 {
+		if err != nil {
+			return 0 // the first error stands; don't run further deletes
+		}
 		r, err2 := tx.ExecContext(ctx, q, args...)
 		if err2 != nil {
 			err = err2
