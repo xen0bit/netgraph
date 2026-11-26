@@ -97,9 +97,12 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends clang libbpf-dev linux-libc-dev
+          # Debian and Ubuntu keep asm/types.h under the multiarch triplet,
+          # which the BPF target does not search itself.
+          inc="-I/usr/include/$(gcc -dumpmachine)"
           cd internal/agent/linux/bpf/src
           for e in el eb; do
-            clang -O2 -Wall -Werror -target bpf$e -c conn.c -o /tmp/conn_bpf$e.o
+            clang $inc -O2 -Wall -Werror -target bpf$e -c conn.c -o /tmp/conn_bpf$e.o
           done
       - name: Object layout and source pin
         # eventSize matches struct event (with a C _Static_assert of the same
