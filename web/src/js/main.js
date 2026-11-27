@@ -1718,6 +1718,7 @@ function openEdge(e) {
   openTitle = "";
   updateTitle();
   openEdgeData = e;
+  $("#panel-body").onclick = null;
   const name = (id) => state.graph?.nodes?.find((n) => n.id === id)?.label || id;
   const filter = [filterTerm(e.from), filterTerm(e.to)].filter(Boolean).join(" ");
   const body = $("#panel-body");
@@ -1930,6 +1931,9 @@ async function openEntity(id, { anomaly } = {}) {
   if (!id) return;
   if (id.startsWith("incident:")) return openIncident(Number(id.slice("incident:".length)));
   openEdgeData = null;
+  // The panel's own links go through #panel's listener; a finding's or a
+  // sensor's handler from before must not stay on.
+  $("#panel-body").onclick = null;
   const req = ++entityReq;
   const panel = $("#panel");
   panel.hidden = false;

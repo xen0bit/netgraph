@@ -451,8 +451,10 @@ func (p *Processor) udp(ts time.Time, f *frame, mac string) {
 		if ev := decode.SSDP(f.payload, f.src, mac); ev != nil {
 			p.dedupe(ts, wire.Event{Type: wire.TypeSSDP, TS: ts, SSDP: ev}, "ssdp", ev.IP.String(), ev.Method, ev.USN, ev.NT, ev.Server)
 		}
-	case f.dport == 161 || f.sport == 161:
+	case f.sport == 161:
 		// SNMP sysName is a name a host announces about itself, like NBNS.
+		// Only an agent answers from port 161: a response sent to it would
+		// credit the manager that sent it with the agent's name.
 		if n := decode.SNMP(f.payload, f.src, mac); n != nil {
 			p.dedupe(ts, wire.Event{Type: wire.TypeName, TS: ts, Name: n}, "name", n.Proto, n.MAC, n.IP.String(), n.Name)
 		}

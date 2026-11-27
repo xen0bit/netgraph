@@ -5,8 +5,10 @@
 
   outputs = { self, nixpkgs }:
     let
-      # Bump with the release tag; the Go binaries carry it as their version.
-      version = "0.1.0";
+      # Not a release number: a hard-coded one goes stale, and a sensor that
+      # claims to be older than its server is told to upgrade. A version that
+      # isn't vX.Y.Z is compared with nothing (buildinfo.Older).
+      version = "dev-" + (self.shortRev or self.dirtyShortRev or "unknown");
 
       systems = [ "x86_64-linux" "aarch64-linux" "x86_64-darwin" "aarch64-darwin" ];
       forAllSystems = f:

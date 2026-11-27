@@ -1233,10 +1233,15 @@ func (g *ingester) dns(ctx context.Context, sid, ts int64, d *wire.DNS) error {
 	if d.LatencyMS > 0 {
 		latency = d.LatencyMS
 	}
+	// A log names no server: store nothing, not netip's "invalid IP".
+	server := ""
+	if d.Server.IsValid() {
+		server = d.Server.String()
+	}
 	var id int64
 	if err := g.tx.QueryRowContext(ctx, `INSERT INTO dns (sensor_id, ts, client_ip, client_device, server_ip, proto, qname, qtype, rcode, latency_ms, answers, blocked_by)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) RETURNING id`,
-		sid, ts, d.Client.String(), dev, d.Server.String(), d.Proto, d.QName, d.QType, d.RCode, latency, string(answers), clip(d.BlockedBy, 300)).Scan(&id); err != nil {
+		sid, ts, d.Client.String(), dev, server, d.Proto, d.QName, d.QType, d.RCode, latency, string(answers), clip(d.BlockedBy, 300)).Scan(&id); err != nil {
 		return err
 	}
 	g.dnsAgg[dnsKey{bucket: hourOf(ts), device: dev, client: d.Client.String(), qname: d.QName, qtype: d.QType, rcode: d.RCode}]++

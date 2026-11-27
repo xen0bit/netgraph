@@ -18,7 +18,7 @@ import (
 const (
 	// IPFIX's length field is 16 bits, so a message cannot be larger. One
 	// connection holds at most one message at a time.
-	maxIPFIXMessage  = 65535
+	maxIPFIXMessage  = 1<<16 - 1
 	maxIPFIXTCPConns = 64
 	ipfixTCPIdle     = 2 * time.Minute
 )
@@ -103,6 +103,9 @@ func (i *IPFIXTCP) Run(ctx context.Context) error {
 }
 
 func (i *IPFIXTCP) handle(ctx context.Context, conn net.Conn, from netip.Addr) {
+	// Shutting down ends the read at once rather than at the idle timeout.
+	stop := context.AfterFunc(ctx, func() { conn.Close() })
+	defer stop()
 	pub := newPublisher("ipfix-tcp-"+from.String(), i.Local, i.Sink, i.Log)
 	r := bufio.NewReaderSize(conn, 64<<10)
 	var tmpl Templates
@@ -143,41 +146,25 @@ func (i *IPFIXTCP) handle(ctx context.Context, conn net.Conn, from netip.Addr) {
 	}
 }
 
-// readIPFIXMessage reads one framed message. IPFIX-over-TCP normally begins with the
-// message's own version and length fields; some exporters put a two-byte length in
-// front instead. Both are accepted, and nothing is allocated for a length that cannot
-// be a message.
+// readIPFIXMessage reads one message. Over TCP, IPFIX messages follow each other
+// with no framing of their own (RFC 7011 §10.4): each begins with its version (10)
+// and length. Nothing is allocated for a length that cannot be a message.
 func readIPFIXMessage(r *bufio.Reader) ([]byte, error) {
 	var hdr [4]byte
-	if _, err := io.ReadFull(r, hdr[:2]); err != nil {
+	if _, err := io.ReadFull(r, hdr[:]); err != nil {
 		return nil, err
 	}
-	first := binary.BigEndian.Uint16(hdr[:2])
-	if first == 10 { // the message starts here: the length is its third field
-		if _, err := io.ReadFull(r, hdr[2:]); err != nil {
-			return nil, err
-		}
-		length := int(binary.BigEndian.Uint16(hdr[2:]))
-		if length < 16 || length > maxIPFIXMessage {
-			return nil, errIPFIXLength
-		}
-		msg := make([]byte, length)
-		copy(msg, hdr[:4])
-		if _, err := io.ReadFull(r, msg[4:]); err != nil {
-			return nil, err
-		}
-		return msg, nil
+	if v := binary.BigEndian.Uint16(hdr[:2]); v != 10 {
+		return nil, fmt.Errorf("ipfix-tcp: version %d is not IPFIX", v)
 	}
-	length := int(first)
-	if length < 16 || length > maxIPFIXMessage {
+	length := int(binary.BigEndian.Uint16(hdr[2:]))
+	if length < 16 {
 		return nil, errIPFIXLength
 	}
 	msg := make([]byte, length)
-	if _, err := io.ReadFull(r, msg); err != nil {
+	copy(msg, hdr[:])
+	if _, err := io.ReadFull(r, msg[4:]); err != nil {
 		return nil, err
-	}
-	if len(msg) < 2 || binary.BigEndian.Uint16(msg) != 10 {
-		return nil, fmt.Errorf("ipfix-tcp: message is not IPFIX")
 	}
 	return msg, nil
 }

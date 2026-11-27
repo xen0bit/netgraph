@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -40,6 +41,9 @@ func (s *Scanner) run(ctx context.Context, name string, args ...string) ([]byte,
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
+	// ps writes lstart in the locale's words ("jeu 26 nov" in French), which
+	// ParsePs would take for the start of the command: ask for C's.
+	cmd.Env = append(os.Environ(), "LC_ALL=C")
 	var out bytes.Buffer
 	cmd.Stdout = &limited{w: &out, n: maxOutput}
 	err := cmd.Run()

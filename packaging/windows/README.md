@@ -24,11 +24,9 @@ tables give UDP sockets no peer, so UDP traffic stays unnamed.
   -TokenFile C:\ProgramData\netgraph\agent.token
 ```
 
-The script creates the service named `netgraph-agent` with `sc.exe`, sets it
-to start automatically, and starts it. The service name is fixed: the agent
-registers with the Service Control Manager under exactly that name, so
-installing it under another name would start and then fail. LocalSystem is
-the default account and can read other users' processes.
+The script creates the service `netgraph-agent` with `New-Service`, sets it
+to start automatically, and starts it. LocalSystem is the default account and
+can read other users' processes.
 
 Useful flags go through `-AgentArgs`, for example a stable name when the
 hostname changes, or a private CA:
@@ -53,7 +51,7 @@ To test without installing, run one scan in a console:
 
 This stops and deletes the service. The binary and token file are left in
 place. To change the server or flags, remove the service and install it
-again (or edit it with `sc.exe config netgraph-agent binPath= "..."`).
+again.
 
 ## Logs and checks
 

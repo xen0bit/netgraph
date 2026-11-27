@@ -259,10 +259,6 @@ func ValidDNSLogFormat(f string) bool {
 	return false
 }
 
-// ValidLogFormat is the shorter name for ValidDNSLogFormat, for callers that only
-// deal in DNS log formats.
-func ValidLogFormat(f string) bool { return ValidDNSLogFormat(f) }
-
 // Run follows the file until ctx ends, across rotations, and through it not existing.
 func (d *DNSLog) Run(ctx context.Context) error {
 	if !ValidDNSLogFormat(d.Format) {

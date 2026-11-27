@@ -340,7 +340,9 @@ func AdGuardLine(line string) (wire.Event, bool) {
 		reason = strings.ToLower(jsonText(r.Reason))
 	}
 	if r.Result.IsFiltered || strings.HasPrefix(reason, "filtered") || strings.Contains(reason, "block") {
-		d.RCode = RCodeBlocked
+		// A blocked lookup's answer is the filter's (0.0.0.0, ::, a block
+		// page), not the name's: it would tie the name to that address.
+		d.RCode, d.Answers = RCodeBlocked, nil
 	}
 	if r.Elapsed > 0 { // nanoseconds
 		d.LatencyMS = float64(r.Elapsed) / 1e6
@@ -683,12 +685,13 @@ func stripRFC5424(s string, now time.Time) (time.Time, string, bool) {
 
 // logParser reads one DNS server's log lines in the format it was told.
 type logParser struct {
-	format string
-	dns    *DNSMasqLog
+	format  string
+	history bool
+	dns     *DNSMasqLog
 }
 
 func newLogParser(format string, history bool) *logParser {
-	p := &logParser{format: format}
+	p := &logParser{format: format, history: history}
 	switch format {
 	case "", "dnsmasq", "pihole":
 		p.format = "dnsmasq"
@@ -702,15 +705,15 @@ func (p *logParser) Line(line string) []wire.Event {
 	switch p.format {
 	case "adguard":
 		if e, ok := AdGuardLine(line); ok {
-			return []wire.Event{e}
+			return p.one(e)
 		}
 	case "unbound":
 		if e, ok := UnboundLine(line); ok {
-			return []wire.Event{e}
+			return p.one(e)
 		}
 	case "bind":
 		if e, ok := BindLine(line); ok {
-			return []wire.Event{e}
+			return p.one(e)
 		}
 	default:
 		if p.dns != nil {
@@ -725,15 +728,15 @@ func (p *logParser) Message(msg string, ts time.Time) []wire.Event {
 	switch p.format {
 	case "adguard":
 		if e, ok := AdGuardLine(msg); ok {
-			return []wire.Event{e}
+			return p.one(e)
 		}
 	case "unbound":
 		if e, ok := unboundLine(msg, ts); ok {
-			return []wire.Event{e}
+			return p.one(e)
 		}
 	case "bind":
 		if e, ok := bindLine(msg, ts); ok {
-			return []wire.Event{e}
+			return p.one(e)
 		}
 	default:
 		if p.dns != nil {
@@ -741,6 +744,19 @@ func (p *logParser) Message(msg string, ts time.Time) []wire.Event {
 		}
 	}
 	return nil
+}
+
+// one takes a line's time as written only when reading history: live, a time
+// far from the clock is the writer's clock (or a forged datagram), and a lookup
+// placed days away would tie names to addresses in the wrong window. dnsmasq's
+// lines get the same treatment in DNSMasqLog. AdGuard is the exception: it
+// buffers its query log and writes entries long after they happened, so its
+// own time is the right one.
+func (p *logParser) one(e wire.Event) []wire.Event {
+	if now := time.Now(); !p.history && p.format != "adguard" && (e.TS.Sub(now) > clockDisagrees || now.Sub(e.TS) > clockDisagrees) {
+		e.TS = now
+	}
+	return []wire.Event{e}
 }
 
 func (p *logParser) Tick() []wire.Event {

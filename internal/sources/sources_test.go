@@ -472,6 +472,30 @@ func TestAdGuardLineAnswers(t *testing.T) {
 	if !slices.Equal(e.DNS.Answers, want) {
 		t.Errorf("answers %+v, want %+v", e.DNS.Answers, want)
 	}
+
+	// A blocked lookup's answer is the filter's 0.0.0.0, which says nothing
+	// about the name.
+	sink := dnsAnswerPacket(0, "tracker.example", dnsRR([]byte{0xc0, 0x0c}, 1, 10, []byte{0, 0, 0, 0}))
+	line = fmt.Sprintf(`{"T":"2026-10-25T12:00:00Z","QH":"tracker.example","QT":"A","Answer":%q,"Result":{"IsFiltered":true,"Reason":3},"IP":"192.168.1.5"}`, base64.StdEncoding.EncodeToString(sink))
+	if e, ok := AdGuardLine(line); !ok || e.DNS.RCode != RCodeBlocked || len(e.DNS.Answers) != 0 {
+		t.Errorf("blocked: %+v, %v", e.DNS, ok)
+	}
+}
+
+// Live, a line timed far from the clock is placed now, as dnsmasq's are;
+// history keeps it. AdGuard writes late by design, so its time stands.
+func TestLogParserClampsLiveTimes(t *testing.T) {
+	old := "[1621847131] unbound[1:0] info: 192.168.1.5 a.example. A IN NOERROR 0.001 0 74"
+	if evs := newLogParser("unbound", false).Line(old); len(evs) != 1 || time.Since(evs[0].TS) > time.Minute {
+		t.Errorf("live unbound: %+v", evs)
+	}
+	if evs := newLogParser("unbound", true).Line(old); len(evs) != 1 || evs[0].TS.Unix() != 1621847131 {
+		t.Errorf("history unbound: %+v", evs)
+	}
+	ag := `{"T":"2021-05-24T09:05:31Z","QH":"a.example","QT":"A","IP":"192.168.1.5"}`
+	if evs := newLogParser("adguard", false).Line(ag); len(evs) != 1 || evs[0].TS.Year() != 2021 {
+		t.Errorf("live adguard: %+v", evs)
+	}
 }
 
 // The API's JSON shape names fields in lower case and gives elapsedMs as a string.
@@ -806,11 +830,8 @@ func TestSyslogOversizedDatagram(t *testing.T) {
 func TestIPFIXTCP(t *testing.T) {
 	first := ipfixMsg(append(templateSet(2, 300, flowFields()), dataSet(300)...))
 	second := ipfixMsg(dataSet(300))
-	var stream []byte
-	for _, m := range [][]byte{first, second} {
-		stream = be16(stream, uint16(len(m)))
-		stream = append(stream, m...)
-	}
+	// RFC 7011 §10.4: messages back to back, each framed by its own header.
+	stream := append(append([]byte(nil), first...), second...)
 	c := &collected{}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -830,10 +851,10 @@ func TestIPFIXTCP(t *testing.T) {
 
 func TestReadIPFIXMessageRejectsBadLengths(t *testing.T) {
 	for name, b := range map[string][]byte{
-		"zero":            be16(nil, 0),
-		"short":           be16(nil, 15),
-		"actual ipfix":    be16(be16(nil, 10), 15),
-		"prefix too long": be16(nil, 60000),
+		"zero":         be16(nil, 0),
+		"not ipfix":    be16(be16(nil, 9), 60),
+		"short header": be16(nil, 10),
+		"too short":    be16(be16(nil, 10), 15),
 	} {
 		if _, err := readIPFIXMessage(bufio.NewReader(bytes.NewReader(b))); err == nil {
 			t.Errorf("%s: accepted", name)
@@ -843,8 +864,8 @@ func TestReadIPFIXMessageRejectsBadLengths(t *testing.T) {
 
 func FuzzReadIPFIXMessage(f *testing.F) {
 	first := ipfixMsg(append(templateSet(2, 300, flowFields()), dataSet(300)...))
-	f.Add(append(be16(nil, uint16(len(first))), first...))
 	f.Add(first)
+	f.Add(append(append([]byte(nil), first...), first...))
 	f.Add(be16(nil, 0))
 	f.Fuzz(func(t *testing.T, b []byte) {
 		r := bufio.NewReader(bytes.NewReader(b))

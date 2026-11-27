@@ -17,7 +17,7 @@ var sysNameOID = []byte{0x2b, 0x06, 0x01, 0x02, 0x01, 0x01, 0x05, 0x00}
 // string is neither stored nor returned.
 //
 // The message is attacker-controlled bytes, so every length is bound and the
-// walk is capped: maxSNMPVarbinds varbinds, an OID no longer than the one
+// walk is capped: maxVarbinds varbinds, an OID no longer than the one
 // compared, and a value of at most 255 bytes.
 func SNMP(b []byte, src netip.Addr, mac string) *wire.Name {
 	const maxVarbinds = 64
@@ -27,11 +27,9 @@ func SNMP(b []byte, src netip.Addr, mac string) *wire.Name {
 	}
 	// version INTEGER, community OCTET STRING
 	tag, ver, rest, ok := berTLV(msg)
-	if !ok || tag != 0x02 || len(ver) == 0 || len(ver) > 4 {
-		return nil
-	}
-	// Only 0 (v1) and 1 (v2c): v3 has a different, encrypted-ish shape.
-	if ver[len(ver)-1] > 1 {
+	// Only 0 (v1) and 1 (v2c), each one byte: v3 has a different shape, and a
+	// longer INTEGER ending in 0 or 1 is not either of them.
+	if !ok || tag != 0x02 || len(ver) != 1 || ver[0] > 1 {
 		return nil
 	}
 	if tag, _, rest, ok = berTLV(rest); !ok || tag != 0x04 {

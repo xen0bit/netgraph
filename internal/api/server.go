@@ -202,9 +202,7 @@ func New(cfg Config) *Server {
 	read("/api/v1/incidents/{id}/export", s.exportIncident)
 	read("/api/v1/export", s.export)
 	s.mux.Handle("GET /api/v1/live", s.gate(RoleViewer, true, s.live))
-	// /metrics also takes ?token=: a Prometheus scraper can't carry a cookie,
-	// and giving it the read token in a URL is what its static_configs do.
-	s.mux.Handle("GET /metrics", s.gate(RoleViewer, true, s.metrics))
+	read("/metrics", s.metrics)
 	read("/api/v1/map/pins", s.mapPins)
 	s.mux.Handle("PUT /api/v1/map/pins", s.require(RoleOperator, s.setMapPins))
 	s.mux.Handle("DELETE /api/v1/map/pins", s.require(RoleOperator, s.deleteMapPins))

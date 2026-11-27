@@ -264,7 +264,13 @@ func LeaseEvents(l Lease, now time.Time) []wire.Event {
 		secs = uint32(min(d, 365*24*time.Hour) / time.Second)
 	}
 	if l.IP.Is6() { // a DHCP event here means DHCPv4's fields
-		evs := []wire.Event{{Type: wire.TypeBinding, TS: now, Binding: &wire.Binding{MAC: l.MAC, IP: l.IP, Source: "lease"}}}
+		// dnsmasq's DHCPv6 leases have no MAC, and a binding without one
+		// says nothing ingest can use: only the name goes, to the device
+		// the network says holds the address.
+		var evs []wire.Event
+		if l.MAC != "" {
+			evs = append(evs, wire.Event{Type: wire.TypeBinding, TS: now, Binding: &wire.Binding{MAC: l.MAC, IP: l.IP, Source: "lease"}})
+		}
 		if l.Hostname != "" {
 			evs = append(evs, wire.Event{Type: wire.TypeName, TS: now, Name: &wire.Name{MAC: l.MAC, IP: l.IP, Name: l.Hostname, Proto: "dhcp"}})
 		}

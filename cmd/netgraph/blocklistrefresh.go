@@ -56,13 +56,23 @@ func runBlocklistRefresh(ctx context.Context, st *store.Store, log *slog.Logger)
 	}
 }
 
+// blocklistRetry is the longest a failed list waits before it is tried again.
+const blocklistRetry = int64(time.Hour / time.Millisecond)
+
 // blocklistDue says whether a list's UpdateInterval has passed since it was
 // last fetched. Now is unix ms; UpdateInterval is seconds, and 0 means the
-// store's default of a day.
+// store's default of a day. A list whose last attempt failed waits the
+// interval or an hour, whichever is less, from that failure: a dead feed must
+// not be fetched every minute, and each failure changes the list's modified
+// time, which makes the DNS server reload its rules.
 func blocklistDue(b model.Blocklist, now int64) bool {
 	every := b.UpdateInterval
 	if every <= 0 {
 		every = 86400
 	}
-	return b.LastSuccess <= 0 || now-b.LastSuccess >= every*1000
+	every *= 1000
+	if b.LastFailure > b.LastSuccess && now-b.LastFailure < min(every, blocklistRetry) {
+		return false
+	}
+	return b.LastSuccess <= 0 || now-b.LastSuccess >= every
 }

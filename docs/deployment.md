@@ -119,9 +119,6 @@ Worth alerting on: `time() - netgraph_sensor_last_seen_timestamp_seconds`
 server was unreachable longer than the spool lasts), and
 `netgraph_ingest_errors_total`.
 
-A scraper may also pass the read token as `?token=` (as it can for the live
-stream), for tooling that can't set an `Authorization` header.
-
 ### Networks and countries
 
 With an ASN table, the server records which network (autonomous system)
@@ -670,8 +667,8 @@ make ipk IPK_GOARCH=mipsle IPK_ARCH=mipsel_24kc
 opkg install bin/ipk/netgraph-sensor_<version>_mipsel_24kc.ipk
 ```
 
-An `.ipk` is an `ar` archive of `debian-binary`, `control.tar.gz` and
-`data.tar.gz`. The package installs `/usr/bin/netgraph-sensor`, the procd
+An `.ipk` is a gzipped tar of `debian-binary`, `control.tar.gz` and
+`data.tar.gz` (OpenWrt's opkg refuses the `ar` archive a `.deb` uses). The package installs `/usr/bin/netgraph-sensor`, the procd
 init script as `/etc/init.d/netgraph-sensor` and `/etc/config/netgraph`, and
 depends only on `libc`. It is not built by the release workflow, and the
 OpenWrt architecture names are per target rather than per CPU, so check
@@ -704,8 +701,8 @@ does not expand variables inside an `EnvironmentFile`.
 ### Nix
 
 `packaging/nix/flake.nix` builds the three binaries with CGO off and a dev
-shell; the version is the `version` variable at the top of the file, so bump
-it with a release:
+shell. They call themselves `dev-<commit>`, not a release number, so the
+fleet never prompts a Nix-built sensor to "upgrade" to the server's version:
 
 ```sh
 nix build ./packaging/nix#netgraph
@@ -831,10 +828,8 @@ dedicated nftables table, off unless asked for.
 3. Check it under Manage → Host agents, or with `netgraph agents list`.
 
 On Windows, `packaging/windows/install-service.ps1` installs the agent as the
-service `netgraph-agent` with `sc.exe` (elevated PowerShell; the token file
-and removal are in `packaging/windows/README.md`). The service name is fixed,
-because the agent registers with the Service Control Manager under exactly
-that name.
+service `netgraph-agent` (elevated PowerShell; the token file and removal are
+in `packaging/windows/README.md`).
 
 Matching needs the sensor and the agent to see the same addresses: an agent
 behind NAT from the sensor (a VM on a NAT network, a container on a bridge)

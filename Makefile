@@ -205,8 +205,8 @@ cross:
 	done; \
 	exit $$fail
 
-# An OpenWrt .ipk is an ar archive of debian-binary, control.tar.gz and
-# data.tar.gz. OpenWrt names architectures per target, not per CPU, so the
+# An OpenWrt .ipk is a gzipped tar (opkg refuses a .deb's ar) of
+# debian-binary, control.tar.gz and data.tar.gz. OpenWrt names architectures per target, not per CPU, so the
 # defaults are the generic ones: override IPK_ARCH when `opkg
 # print-architecture` on the router says something else.
 IPK_GOARCH  ?= mipsle
@@ -229,18 +229,18 @@ ipk:
 		$(if $(filter mips64 mips64le,$(IPK_GOARCH)),GOMIPS64=softfloat,) \
 		$(GO) build -trimpath -ldflags "$(LDFLAGS)" \
 		-o $(IPK_BUILD)/data/usr/bin/netgraph-sensor ./cmd/netgraph-sensor
+	chmod 0755 $(IPK_BUILD)/data/usr/bin/netgraph-sensor
 	install -m 0755 packaging/openwrt/netgraph-sensor.init $(IPK_BUILD)/data/etc/init.d/netgraph-sensor
 	install -m 0644 packaging/openwrt/netgraph.config $(IPK_BUILD)/data/etc/config/netgraph
 	printf 'Package: netgraph-sensor\nVersion: %s\nArchitecture: %s\nMaintainer: netgraph\nSection: net\nPriority: optional\nDepends: libc\nDescription: netgraph capture sensor (flow, DNS, DHCP, mDNS, ARP and TLS metadata; stateless, needs CAP_NET_RAW)\n' \
 		"$(IPK_VERSION)" "$(IPK_ARCH)" > $(IPK_BUILD)/control/control
 	printf '/etc/config/netgraph\n' > $(IPK_BUILD)/control/conffiles
 	printf '2.0\n' > $(IPK_BUILD)/debian-binary
-	tar -C $(IPK_BUILD)/data -czf $(IPK_BUILD)/data.tar.gz .
-	tar -C $(IPK_BUILD)/control -czf $(IPK_BUILD)/control.tar.gz control conffiles
-	cd $(IPK_BUILD) && ar rcs $(notdir $(IPK_FILE)) debian-binary control.tar.gz data.tar.gz
+	tar --owner=0 --group=0 --numeric-owner -C $(IPK_BUILD)/data -czf $(IPK_BUILD)/data.tar.gz .
+	tar --owner=0 --group=0 --numeric-owner -C $(IPK_BUILD)/control -czf $(IPK_BUILD)/control.tar.gz ./control ./conffiles
+	tar --owner=0 --group=0 --numeric-owner -C $(IPK_BUILD) -czf $(IPK_FILE) ./debian-binary ./data.tar.gz ./control.tar.gz
 	@echo "$(IPK_FILE):"
-	@ar t $(IPK_FILE)
-	@tar -tzf $(IPK_BUILD)/data.tar.gz >/dev/null
+	@tar -tzf $(IPK_FILE)
 
 ## docker: build the sensor, server and agent images locally
 .PHONY: docker

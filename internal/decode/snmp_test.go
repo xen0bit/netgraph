@@ -56,6 +56,12 @@ func TestSNMPSysName(t *testing.T) {
 	if got := SNMP(other, src, ""); got != nil {
 		t.Errorf("sysDescr became a name: %+v", got)
 	}
+	// A two-byte version ending in 1 (257) is not v2c.
+	v257 := snmpResponse("x")
+	v257 = ber(0x30, cat(ber(0x02, []byte{1, 1}), v257[5:]))
+	if got := SNMP(v257, src, ""); got != nil {
+		t.Errorf("version 257 read as v2c: %+v", got)
+	}
 	// Truncated and overlong shapes end cleanly.
 	full := snmpResponse("x")
 	for i := range len(full) {
