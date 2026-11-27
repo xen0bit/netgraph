@@ -107,3 +107,15 @@ func TestAnUnhookedHubStillCounts(t *testing.T) {
 		t.Fatalf("%d open, want 0", n)
 	}
 }
+
+// A dual-stack listener sees an IPv4 client as ::ffff:a.b.c.d; the session
+// must say a.b.c.d, or nothing matching IPv4 addresses downstream finds it.
+func TestASessionsOuterAddressIsUnmapped(t *testing.T) {
+	var h SessionHub
+	var r recorder
+	h.SetSessionHook(r.hook)
+	h.OpenSession(SessionEvent{User: "f", Outer: netip.MustParseAddrPort("[::ffff:198.51.100.7]:51820")})
+	if got := r.evs[0].Outer.String(); got != "198.51.100.7:51820" {
+		t.Errorf("outer = %s, want 198.51.100.7:51820", got)
+	}
+}

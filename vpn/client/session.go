@@ -98,6 +98,11 @@ func (h *SessionHub) OpenSession(ev SessionEvent) uint64 {
 		ev.Time = time.Now()
 	}
 	ev.Addrs = slices.Clone(ev.Addrs)
+	// A dual-stack socket reports an IPv4 peer as ::ffff:a.b.c.d. It is the
+	// IPv4 address, and anything matching on it downstream expects that form.
+	if ev.Outer.IsValid() {
+		ev.Outer = netip.AddrPortFrom(ev.Outer.Addr().Unmap(), ev.Outer.Port())
+	}
 	if h.open == nil {
 		h.open = map[uint64]SessionEvent{}
 	}

@@ -1486,3 +1486,44 @@ func TestWedgedServerDoesNotImplementAbandonable(t *testing.T) {
 			"stopListenerLocked now has no test")
 	}
 }
+
+// An embedder following listeners (netgraph-edge capturing each TUN and
+// hooking its sessions) must hear of every server that starts, before it
+// serves, and of every one that stops -- a rebuild being one of each. If
+// this fails, the edge captures a TUN that is gone, or misses the one that
+// replaced it.
+func TestHooksSeeEveryServerStartAndStop(t *testing.T) {
+	dir := t.TempDir()
+	writeCfg(t, dir, "site-a", "wireguard")
+	ctor := &fakeCtor{}
+	mgr := NewManager(dir, testLogger(t), ctor.construct)
+	var mu sync.Mutex
+	var log []string
+	mgr.SetHooks(
+		func(cfg ListenerConfig, srv client.Server) {
+			mu.Lock()
+			defer mu.Unlock()
+			log = append(log, "start "+cfg.Name+" "+srv.TUNName())
+		},
+		func(cfg ListenerConfig, srv client.Server) {
+			mu.Lock()
+			defer mu.Unlock()
+			log = append(log, "stop "+cfg.Name+" "+srv.TUNName())
+		})
+	if err := mgr.Apply(); err != nil {
+		t.Fatal(err)
+	}
+	first := ctor.byName(t, "site-a").TUNName()
+	if err := mgr.Rebuild("site-a"); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Close(); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(log) != 4 || log[0] != "start site-a "+first || log[1] != "stop site-a "+first ||
+		!strings.HasPrefix(log[2], "start site-a ") || !strings.HasPrefix(log[3], "stop site-a ") {
+		t.Fatalf("hooks saw %q, want start, stop, start, stop", log)
+	}
+}
