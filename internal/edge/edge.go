@@ -244,7 +244,7 @@ func (e *Edge) sessionHook(cfg supervisor.ListenerConfig) func(client.SessionEve
 		}
 		e.cfg.Out.Emit(wire.Event{Type: wire.TypeVPNSession, TS: ev.Time, VPNSession: &wire.VPNSession{
 			Listener: cfg.Name, Protocol: cfg.Protocol, ID: id, Open: ev.Open,
-			User: ev.User, Name: ev.Name, Addrs: slices.Clone(ev.Addrs), Outer: ev.Outer, Reason: ev.Reason,
+			User: ev.User, Auth: ev.Auth, Name: ev.Name, Addrs: slices.Clone(ev.Addrs), Outer: ev.Outer, Reason: ev.Reason,
 		}})
 	}
 }

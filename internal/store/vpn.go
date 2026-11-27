@@ -129,11 +129,11 @@ func (g *ingester) vpnSession(ctx context.Context, sid int64, boot string, ts in
 	}
 	var id int64
 	err = g.tx.QueryRowContext(ctx, `INSERT INTO vpn_sessions
-		(sensor_id, boot, listener, session, protocol, user, name, prefixes, outer, t_start)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		(sensor_id, boot, listener, session, protocol, user, auth, name, prefixes, outer, t_start)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (sensor_id, boot, listener, session) DO UPDATE SET protocol = excluded.protocol
 		RETURNING id`,
-		sid, boot, v.Listener, v.ID, v.Protocol, truncate(v.User, 512), truncate(v.Name, 256), string(pj), outer, ts).Scan(&id)
+		sid, boot, v.Listener, v.ID, v.Protocol, truncate(v.User, 512), truncate(v.Auth, 32), truncate(v.Name, 256), string(pj), outer, ts).Scan(&id)
 	if err != nil {
 		return err
 	}
@@ -199,6 +199,7 @@ type VPNSession struct {
 	Listener string     `json:"listener"`
 	Protocol string     `json:"protocol"`
 	User     string     `json:"user"`
+	Auth     string     `json:"auth,omitempty"`
 	Name     string     `json:"name,omitempty"`
 	Prefixes []string   `json:"prefixes"`
 	Outer    string     `json:"outer,omitempty"`
@@ -216,7 +217,7 @@ func (s *Store) VPNSessions(ctx context.Context, from, to time.Time, limit int) 
 	if limit <= 0 || limit > 5000 {
 		limit = 500
 	}
-	rows, err := s.r.QueryContext(ctx, `SELECT v.id, se.name, v.listener, v.protocol, v.user, v.name, v.prefixes, v.outer,
+	rows, err := s.r.QueryContext(ctx, `SELECT v.id, se.name, v.listener, v.protocol, v.user, v.auth, v.name, v.prefixes, v.outer,
 			v.t_start, v.t_end, v.reason,
 			(SELECT count(*) FROM connections c WHERE c.vpn_session = v.id),
 			(SELECT coalesce(sum(c.bytes_out), 0) FROM connections c WHERE c.vpn_session = v.id),
@@ -234,7 +235,7 @@ func (s *Store) VPNSessions(ctx context.Context, from, to time.Time, limit int) 
 		var prefixes string
 		var start int64
 		var end sql.NullInt64
-		if err := rows.Scan(&v.ID, &v.Sensor, &v.Listener, &v.Protocol, &v.User, &v.Name, &prefixes, &v.Outer,
+		if err := rows.Scan(&v.ID, &v.Sensor, &v.Listener, &v.Protocol, &v.User, &v.Auth, &v.Name, &prefixes, &v.Outer,
 			&start, &end, &v.Reason, &v.Flows, &v.BytesOut, &v.BytesIn); err != nil {
 			return nil, err
 		}

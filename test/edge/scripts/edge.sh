@@ -22,6 +22,23 @@ cat > /etc/netgraph-edge/listeners/office.json <<JSON
   }
 }
 JSON
+printf 'alice:wonderland\n' > /etc/netgraph-edge/eap-users
+cat > /etc/netgraph-edge/listeners/remote.json <<JSON
+{
+  "name": "remote",
+  "protocol": "ikev2",
+  "setup_nat": true,
+  "wan": "${wan}",
+  "options": {
+    "psk": "edge-lab-psk",
+    "id": "vpn.example.com",
+    "public": "198.18.1.10",
+    "pool": "10.11.11.0/24",
+    "tun": "ike-remote",
+    "eap-users": "/etc/netgraph-edge/eap-users"
+  }
+}
+JSON
 echo "edge: WAN is ${wan}"
 exec netgraph-edge run -server http://10.78.0.20:8443 -name edge-lab \
   -active-timeout 5s -flush 1s -log-level debug

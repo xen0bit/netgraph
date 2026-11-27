@@ -23,8 +23,8 @@ wg-client ══ WireGuard ══► netgraph-edge ──► the inside network
 
 The protocols come from `vpn/`, sixteen of them, each with a client and a
 server (see [`vpn/README.md`](../vpn/README.md)). Any of them can run on an
-edge. In this preview only **WireGuard** (and AmneziaWG) reports sessions, so
-only its traffic is attributed to users. The others are captured and stored,
+edge. In this preview **WireGuard** (and AmneziaWG) and **IKEv2** report
+sessions, so their traffic is attributed to users. The others are captured and stored,
 and the edge says once, per protocol, that they are not attributed yet.
 
 ## Running it
@@ -69,11 +69,22 @@ Listener files hold keys: keep the directory `0700` and its files `0600`.
 ## What a session is
 
 A session opens when a handshake proves an identity and closes when that
-identity stops holding the tunnel:
+identity stops holding the tunnel. Each one records `auth`: how the identity
+was proved.
 
 | Protocol | Opens | Identity | Closes |
 |---|---|---|---|
-| WireGuard, AmneziaWG | a handshake while none is open | the peer's public key | its keys pass reject-after-time (180 s) with no rekey, timed at its last authenticated packet; or the listener stops |
+| WireGuard, AmneziaWG | a handshake while none is open | the peer's public key (`public-key`) | its keys pass reject-after-time (180 s) with no rekey, timed at its last authenticated packet; or the listener stops |
+| IKEv2 | IKE_AUTH assigns an address | the EAP username (`eap-mschapv2`), or the IKE identity a certificate matched (`certificate`) or the PSK covered (`psk`) | the peer's Delete ends the IKE SA and its lease goes back to the pool; or the listener stops. An IKE SA rekey moves the session with the lease |
+
+`auth` says how far to trust `user`. Under a PSK every client shares one key,
+so `user` is whatever IKE identity a key-holder chose to send. Under
+`public-key`, `certificate` and `eap-mschapv2`, the client proved `user`
+individually.
+
+**Known gap:** the IKEv2 server doesn't yet detect a client that disappears
+without sending a Delete (a laptop that sleeps or loses its network). That
+client's session, and its lease, stay open until the listener restarts.
 
 Every open session closes as `shutdown` when the edge stops. A flow is
 attributed only to a session on the same edge, by address and time: a flow
@@ -95,7 +106,7 @@ Sessions follow the raw records for retention, and `db purge` removes them.
 
 This is the first slice of the edge (see AGENTS.md, "vpn/ and the edge"):
 
-- Sessions for the other fifteen protocols.
+- Sessions for the other fourteen protocols, and dead-peer detection for IKEv2.
 - Users and groups in the server, with policy compiled to the edge's own
   firewall table.
 - Config the server signs and pushes, so the listener files go away.

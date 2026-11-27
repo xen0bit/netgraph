@@ -4,7 +4,9 @@ import (
 	"encoding/binary"
 	"fmt"
 	"net"
+	"net/netip"
 
+	"github.com/xen0bit/netgraph/vpn/client"
 	"github.com/xen0bit/netgraph/vpn/internal/ikev2/aggfrag"
 	"github.com/xen0bit/netgraph/vpn/internal/ikev2/eap"
 	"github.com/xen0bit/netgraph/vpn/internal/ikev2/payload"
@@ -117,6 +119,7 @@ func (s *Server) handleIKEAuth(sa *IKESA, hdr payload.Header, inners []payload.R
 	b.Add(payload.TypeAUTH, false, payload.MarshalAuth(payload.AuthPayload{
 		Method: payload.AuthSharedKeyMIC, Data: ourAuth,
 	}))
+	sa.peerAuth = "psk"
 	s.finishIKEAuth(sa, hdr, inners, b, remote)
 }
 
@@ -189,6 +192,7 @@ func (s *Server) handleCertAuth(sa *IKESA, hdr payload.Header, inners []payload.
 	}
 	b.Add(payload.TypeAUTH, false, payload.MarshalAuth(payload.AuthPayload{Method: method, Data: authData}))
 	s.log.Printf("ikev2: certificate auth ok for %s (id=%v)", remote, sa.PeerID.Type)
+	sa.peerAuth = "certificate"
 	s.finishIKEAuth(sa, hdr, inners, b, remote)
 }
 
@@ -322,6 +326,7 @@ func (s *Server) handleEAPFinalAuth(sa *IKESA, hdr payload.Header, inners []payl
 	b.Add(payload.TypeAUTH, false, payload.MarshalAuth(payload.AuthPayload{
 		Method: payload.AuthSharedKeyMIC, Data: ourAuth,
 	}))
+	sa.peerAuth = "eap-mschapv2"
 	s.finishIKEAuth(sa, hdr, inners, b, remote)
 }
 
@@ -363,6 +368,7 @@ func (s *Server) finishIKEAuth(sa *IKESA, hdr payload.Header, inners []payload.R
 	if cpPay != nil && s.cfg.AssignAddr != nil {
 		if cpReply := s.buildCPReply(sa, cpPay); cpReply != nil {
 			b.Add(payload.TypeCP, false, payload.MarshalCP(*cpReply))
+			s.openSession(sa, remote)
 		}
 	}
 
@@ -718,4 +724,34 @@ func (s *Server) acceptAggFrag(inners []payload.RawPayload) (aggfrag.Flags, bool
 		return 0, false
 	}
 	return flags, true
+}
+
+// openSession reports the session that begins with this lease: the identity
+// IKE_AUTH just proved, holding the addresses it was just assigned. It moves
+// with the lease on an IKE SA rekey and closes when deleteSA releases it, so
+// a session is exactly the time one identity held one lease.
+func (s *Server) openSession(sa *IKESA, remote *net.UDPAddr) {
+	if s.cfg.Sessions == nil || sa.session != 0 {
+		return
+	}
+	user := peerIDString(sa.PeerID)
+	if sa.peerAuth == "eap-mschapv2" && sa.EAPIdentity != "" {
+		// The EAP username is what the password proved; IDi is only what the
+		// client called itself on the way in.
+		user = sa.EAPIdentity
+	}
+	var addrs []netip.Prefix
+	for _, ip := range []net.IP{sa.assigned.IP4, sa.assigned.IP6} {
+		if a, ok := netip.AddrFromSlice(ip); ok {
+			a = a.Unmap()
+			addrs = append(addrs, netip.PrefixFrom(a, a.BitLen()))
+		}
+	}
+	var outer netip.AddrPort
+	if remote != nil {
+		outer = remote.AddrPort()
+	}
+	sa.session = s.cfg.Sessions.OpenSession(client.SessionEvent{
+		User: user, Auth: sa.peerAuth, Addrs: addrs, Outer: outer,
+	})
 }

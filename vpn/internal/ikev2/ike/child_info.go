@@ -87,6 +87,7 @@ func (s *Server) handleRekeyIKE(sa *IKESA, hdr payload.Header, inners []payload.
 	newSA.ClientIP6 = sa.ClientIP6
 	newSA.assigned = sa.assigned
 	newSA.PeerID = sa.PeerID
+	newSA.peerAuth, newSA.session = sa.peerAuth, sa.session
 	newSA.RecvMsgID = 0
 	newSA.SendMsgID = 0
 	newSA.Children = sa.Children
@@ -95,7 +96,11 @@ func (s *Server) handleRekeyIKE(sa *IKESA, hdr payload.Header, inners []payload.
 	// peer sends INFORMATIONAL{D(IKE)} next) neither tears down the inherited
 	// Child SA data paths nor releases the assigned address.
 	sa.Children = make(map[uint32]*ChildSA)
-	sa.ClientIP = nil
+	// The whole lease moves, both families: deleteSA releases whatever the SA
+	// still names, and clearing only ClientIP left a dual-stack client's
+	// IPv6 half (and with it the IPv4 half, which release() also frees)
+	// going back to the pool while the new SA still held them.
+	sa.ClientIP, sa.ClientIP6, sa.assigned, sa.session = nil, nil, Assignment{}, 0
 	sa.State = StateDeleting
 
 	// Response under the OLD SA: SA (accepted proposal carrying our new

@@ -124,6 +124,12 @@ type Server struct {
 
 	gateway  net.IP
 	gateway6 netip.Addr
+
+	// SessionHub makes the server a client.SessionReporter. A pointer, because
+	// the engine is handed it before this struct exists: a session is one
+	// identity holding one lease, opened in IKE_AUTH and closed when the IKE
+	// SA's deletion releases the lease.
+	*client.SessionHub
 }
 
 // NewServer builds a server from cfg: it opens the TUN device, creates the
@@ -205,7 +211,9 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, fmt.Errorf("ikev2: open TUN: %w", err)
 	}
 
+	sessions := &client.SessionHub{}
 	srv, err := ike.NewServer(ike.Config{
+		Sessions:               sessions,
 		ListenIP:               cfg.ListenIP,
 		Port500:                cfg.Port500,
 		Port4500:               cfg.Port4500,
@@ -274,6 +282,7 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		ike: srv, pump: pump, tun: tun,
 		pool: pool, pool6: pool6,
 		gateway: gateway, gateway6: gateway6,
+		SessionHub: sessions,
 	}, nil
 }
 
@@ -324,6 +333,7 @@ func (s *Server) Close() error {
 	s.pump.Close()
 	err := s.ike.Close()
 	s.tun.Close()
+	s.CloseAllSessions("shutdown")
 	return err
 }
 
@@ -344,6 +354,10 @@ func (s *Server) Abandon() { s.tun.Close() }
 // re-signatured Abandon compiles fine and the assertion silently starts failing,
 // which reads as the leak coming back.
 var _ client.AbandonableServer = (*Server)(nil)
+
+// Server implements client.SessionReporter, found by type assertion like the
+// two above.
+var _ client.SessionReporter = (*Server)(nil)
 
 // Peers implements client.PeerDescriber so the management panel shows who is
 // connected. One entry per established Child SA: the client's IKE identity, the
