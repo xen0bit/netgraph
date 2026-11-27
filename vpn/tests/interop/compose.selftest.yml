@@ -1,0 +1,37 @@
+# Phase 0 infra sanity: veepin client <-> veepin server, no strongSwan.
+# Proves containers + /dev/net/tun + NET_ADMIN + forced NAT-T UDP-encap ESP +
+# a cross-tunnel ping all work with our own binaries before adding strongSwan.
+name: veepin-selftest
+
+services:
+  server:
+    image: veepin:interop
+    build:
+      context: ../../..
+      dockerfile: vpn/Dockerfile
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      PSK: "interop-test-psk"
+      SERVER_ID: "vpn.example.com"
+      POOL: "10.10.10.0/24"
+    volumes:
+      - ./veepin/server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  client:
+    image: veepin:interop
+    build:
+      context: ../../..
+      dockerfile: vpn/Dockerfile
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [server]
+    environment:
+      SERVER: "server"
+      PSK: "interop-test-psk"
+      CLIENT_ID: "client.example.com"
+      SERVER_ID: "vpn.example.com"
+    volumes:
+      - ./veepin/client-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]

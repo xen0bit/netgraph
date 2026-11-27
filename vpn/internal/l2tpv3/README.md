@@ -1,0 +1,225 @@
+# internal/l2tpv3 — L2TPv3 Ethernet pseudowire
+
+RFC 3931 (L2TPv3) carrying Ethernet frames per RFC 4719, static sessions only.
+This is veepin's only working layer-2 data path — [`internal/softether`](../softether)
+is layer 2 by design but switches frames between clients without reaching a host
+TAP.
+
+## Files
+
+| File | What it holds |
+|---|---|
+| `frame.go` | the data-packet codec: `EncodeData`, `DecodeData`, cookie verification |
+| `session.go` | `SessionConfig` — session IDs, both cookies, sublayer, peer address |
+| `pump.go` | the TAP↔UDP data path and `SessionIDDemux` |
+| `control.go` | the RFC 3931 control-message codec and AVP parser |
+| `keepalive.go` | the quiescent control connection: reliable transport + HELLO |
+
+## The data path
+
+```mermaid
+flowchart LR
+    subgraph OUT["Outbound — TAP to the wire"]
+      direction TB
+      TAP1["TAP: raw Ethernet frame"] --> ENC["prepend header:<br/>Session ID, RemoteCookie, zeroed sublayer"]
+      ENC --> SHAPE["optional shaping:<br/>IP EtherTypes only"]
+      SHAPE --> UDPOUT["UDP/1701 to peer"]
+    end
+    subgraph IN["Inbound — the wire to TAP"]
+      direction TB
+      UDPIN["UDP/1701 from peer"] --> T{"T bit set?"}
+      T -->|"no, data"| DEMUX["SessionIDDemux:<br/>32-bit Session ID at offset 4"]
+      DEMUX --> CK{"LocalCookie<br/>verifies?"}
+      CK -->|no| DROP["drop, pre-built sentinel"]
+      CK -->|yes| TRIM["strip header,<br/>subslice, no copy"]
+      TRIM --> TAP2["TAP: raw Ethernet frame"]
+      T -->|"yes, control"| CTL["control connection:<br/>HELLO, ACK 20, StopCCN"]
+      CTL --> PROBE["Session.Probe reports idle time"]
+    end
+```
+
+Two things in that picture are load-bearing. One socket carries both planes, so
+the read loop dispatches on the **T bit** (`IsControl`) rather than on what the
+state machine expected next — a control message arriving mid-stream is handled,
+not mistaken for a short frame. And the cookie is verified *before* the source
+address is learned (`pump.go`), so an off-path sender cannot redirect the
+session by racing a packet in.
+
+## Why this is not a version switch inside `internal/l2tp`
+
+v2 is PPP-over-L2TP keyed by a 16-bit tunnel/session pair; v3 is a pseudowire
+keyed by a single 32-bit Session ID, carrying Ethernet rather than PPP. They
+share the AVP encoding and essentially nothing else, so ~120 lines of AVP helper
+were copied rather than threading a version flag through 2,100 lines that would
+then serve two callers with divergent needs. The AmneziaWG package set the same
+precedent.
+
+## Why this is not `dataplane.Pump`
+
+`Pump.routeOutbound` calls `innerDest`, which reads the first nibble of the
+buffer as an IP version. On an Ethernet frame that nibble is the top half of the
+destination MAC. It would not fail cleanly — it would succeed **by accident**
+whenever a MAC happened to begin `0x4` or `0x6`, which is the worst available
+failure mode for a data path.
+
+`dataplane.Demux`, `dataplane.PacketConn` and `dataplane.OpenTAP` are reused
+unchanged; only the routing decision differs, because layer 2 does not have one.
+GRO/GSO is deliberately **not** wired: both parse IP and TCP headers at fixed
+offsets that mean nothing in an Ethernet frame.
+
+## The wire format
+
+```
+ 0                   1                   2                   3
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|T|x|x|x|x|x|x|x|x|x|x|x|  Ver  |             Res               |
++-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+-+
+|                           Session ID                          |
++---------------------------------------------------------------+
+|                  Cookie (0, 4 or 8 octets)                    |
++---------------------------------------------------------------+
+|         Default L2-Specific Sublayer (0 or 4 octets)          |
++---------------------------------------------------------------+
+|                       Ethernet frame                          |
++---------------------------------------------------------------+
+```
+
+The T bit is the MSB of the first word and the version is its **low four bits**,
+with eleven unassigned bits between them. Comparing the whole word against 3
+happens to work against Linux, which zeroes those bits, and rejects any peer that
+sets one. `TestVersionIsTheLowNibble` holds that in place.
+
+## The cookie is chosen by the receiver
+
+Each end picks the value it wants to see on its own inbound packets and tells the
+peer, so `LocalCookie` is verified on receive and `RemoteCookie` is written on
+send. Swap the two at both ends and a veepin↔veepin tunnel passes perfectly —
+both halves wrong the same way — and only a real peer notices.
+`TestCookieIsChosenByTheReceiver` is written from the kernel's point of view for
+exactly that reason, and the interop cells use **asymmetric 8-octet cookies**
+because a symmetric one cannot catch the bug.
+
+## The kernel cells need kernel modules
+
+`TestInteropVeepinClientKernelL2TPv3Server` and
+`TestInteropKernelL2TPv3ClientVeepinServer` use the Linux kernel itself as the
+peer, so `l2tp_core`, `l2tp_eth` and `l2tp_netlink` must exist on the **host** —
+the containers share its kernel.
+
+GitHub's runners boot an Azure kernel that ships those modules in a separate
+`linux-modules-extra` package, so for as long as nobody installed it both cells
+skipped on every CI run — and a skip is reported as not-passed, which put a `✗`
+in the published table against a peer that had never started. The interop
+workflow now installs and loads them, from the `Modules` list the interop
+manifest carries beside the tests themselves, and **fails the shard** if they
+are still missing. `cmd/livingreadme` additionally refuses to publish a matrix
+from any run that skipped a cell, so this class of false `✗` cannot return
+quietly.
+
+They pass on any host with the modules; that is where the kernel-interop claim
+comes from, and it is how the cookie-direction and sublayer behaviour were
+actually verified. Run them yourself with:
+
+```sh
+cd tests/interop
+docker compose -f compose.l2tpv3.yml down -v --remove-orphans
+go test -tags interop -run TestInteropVeepinClientKernelL2TPv3Server -v -timeout 15m ./...
+```
+
+The veepin↔veepin cell needs no modules and runs everywhere.
+
+## The control connection is *quiescent*, not dynamic
+
+veepin runs the subset go-l2tp calls a **quiescent** tunnel: the RFC 3931 control
+connection with reliable transport, carrying HELLO keepalives and nothing else.
+Sessions are still configured statically at both ends.
+
+That is a deliberate stopping point, not laziness. **Nothing open-source
+implements a dynamic L2TPv3 control plane.** Debian ships `xl2tpd` and `l2tpns`,
+both L2TPv2/PPP. `go-l2tp` is the only implementation of an L2TPv3 control
+connection, and its `getV3MsgSpec` (`l2tp/msg.go`) returns a spec for exactly one
+message — HELLO; its dynamic tunnel calls `newV2Sccrq` and is L2TPv2 only.
+Implementing SCCRQ/SCCRP/SCCCN and ICRQ/ICRP/ICCN would therefore produce ~900
+lines testable only against themselves, which this repo's own thesis says proves
+nothing.
+
+What the quiescent connection buys is real: a static pseudowire sends nothing of
+its own, so a dead peer is indistinguishable from an idle one. HELLO makes
+silence mean something, and `Session.Probe` reports the control connection's idle
+time when one is running.
+
+**The control connection is not interop-verified, and now the reason is known.**
+`tests/interop/ql2tpd/` and `compose.l2tpv3-keepalive.yml` build a peer and the
+exchange runs, but ql2tpd wedges and eventually declares the tunnel down. The
+cause is upstream, in two lines of go-l2tp v0.1.8, and veepin's messages are
+correct.
+
+Our ACK carries `Ns` = the next sequence number we will use, which is what
+RFC 3931 §3.1 requires of a message that consumes no sequence number — so that
+`Ns` is *ahead* of the peer's `Nr`. go-l2tp's `msgIsInSequence`
+(`seqCompare(s.nr, msg.ns()) == 0`) and `msgIsStale`
+(`seqCompare(msg.ns(), s.nr) == -1`) between them classify such a message as
+neither, so `dequeueRxMessage` never returns it and it sits at the head of
+`rxQueue` forever. The line above it — `m := xport.rxQueue[0]` inside a loop
+over `i` — means nothing behind a stuck head is ever inspected either, so every
+later message piles up, `Nr` stops advancing, and the tunnel dies on the retry
+limit. It is order-dependent, which is why it first looked intermittent.
+
+**There is nothing conforming to change here.** Lowering our `Ns` would
+misstate the next sequence number to every correct peer, and sending a HELLO
+where the RFC calls for an ACK would consume a sequence number that must not be
+consumed. `TestAckCarriesTheNextSequenceNumber` in `control_test.go` pins the
+behaviour precisely so a future attempt to "fix" the cell cannot quietly make
+veepin wrong instead.
+
+So the control connection stays covered by **unit tests plus the kernel
+data-path cells** — which by this repo's own standard means the control plane is
+not proven against a foreign implementation, because no foreign implementation
+currently can prove it. The reproduction, with the packet capture and the line
+numbers, is `go test -tags interop -run TestPendingQl2tpdKeepalive`.
+
+Two details that a v2 implementation gets wrong when carried over:
+
+- **The Control Connection ID is one 32-bit field.** v2 has a 16-bit tunnel ID
+  and a 16-bit session ID; a v3 control message carries no session ID at all.
+- **An acknowledgement is an explicit ACK message (Message-Type 20)**, not v2's
+  zero-length body. Send a v3 peer a bare header and it sees a malformed message,
+  not an ack, and never clears its retransmit queue.
+  `TestAckIsAnExplicitMessageNotAnEmptyBody` holds that in place.
+
+## Caveats
+
+- **No authentication and no encryption.** The cookie is a check value against
+  mis-delivery and blind insertion (RFC 3931 §4.1.2.1), not a key: 8 octets, sent
+  in the clear on every packet, and unchanging. Anyone who can reach the UDP port
+  and observe one packet can inject frames into the bridged segment forever
+  after. This is a property of L2TPv3, not of this implementation, and it is why
+  the protocol is normally run inside IPsec.
+- **Static sessions only.** The control connection carries HELLO, ACK and
+  StopCCN; there is no SCCRQ/SCCRP/SCCCN or ICRQ/ICRP/ICCN, so sessions and
+  cookies must be configured by hand at both ends and a peer expecting to
+  negotiate will not connect. See the section above for why.
+
+  Worth knowing before picking this up: **no open-source implementation runs a
+  dynamic L2TPv3 control plane**, so building one here could not be verified
+  against a real peer. `ql2tpd` is static/acquiescent by its own description,
+  `go-l2tp`'s library refuses v3 in `newDynamicTunnel` despite the doc comment
+  above it, `xl2tpd` is v2, and the kernel runs no control protocol at all. The
+  survey and its evidence are in `doc/protocol-roadmap.md`.
+- **The control connection is unauthenticated.** RFC 3931 offers a Message
+  Digest AVP with a shared secret; it is not implemented, and an inbound hidden
+  AVP is rejected rather than mis-parsed. The Control Connection ID is checked on
+  every message, which stops an off-path sender resetting the sequence state by
+  guessing, but it is a 32-bit value in the clear, not a key.
+- **Shaping covers IP only.** `flowKeyOfFrame` shapes EtherType 0x0800 and
+  0x86DD; ARP, STP and everything else goes out unpadded, because Ethernet has no
+  length field for a receiver to trim padding by. An observer can therefore still
+  see the size of non-IP frames.
+- **No sequencing.** The Default L2-Specific Sublayer is carried when configured
+  but always emitted as zeros, and the sequence number is neither generated nor
+  checked. Out-of-order frames are delivered in the order they arrive, which is
+  what the kernel does with sequencing off too.
+- **UDP encapsulation only.** IP protocol 115 (L2TPv3 directly over IP) is not
+  implemented.
+- **IPv4 and IPv6 underlay, one session per tunnel.** Multiple sessions in one
+  tunnel are representable in `Pump` but not exposed by the facade.

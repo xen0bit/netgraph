@@ -151,21 +151,30 @@ asn.update:
 	date -u +%Y-%m-%d > $(ASN_DATE)
 	@echo "$(ASN_TABLE): $$(du -h $(ASN_TABLE) | cut -f1)"
 
-## test: run all tests with the race detector
+## test: run all tests with the race detector, then vpn/ again without it
 .PHONY: test
 test:
 	$(GO) test -race ./...
+	@# vpn/'s AllocsPerRun guards skip under -race: this pass is what runs them.
+	$(GO) test ./vpn/...
+
+## vpn.interop: vpn/'s protocol cells against real peers, in Docker (slow; VPN_RUN=regexp)
+VPN_RUN ?= .
+.PHONY: vpn.interop
+vpn.interop:
+	$(GO) test -tags interop -count=1 -timeout 25m -run '$(VPN_RUN)' ./vpn/tests/interop/...
 
 ## test32: run the packet and decoder tests as a 32-bit process
 .PHONY: test32
 test32:
 	CGO_ENABLED=0 GOARCH=386 $(GO) test ./internal/capture ./internal/decode ./internal/sensor ./internal/flow
 
-## fuzz: run every fuzz target briefly (FUZZTIME=20s)
+## fuzz: run every fuzz target briefly (FUZZTIME=20s; FUZZPKGS=./internal/... to narrow)
 FUZZTIME ?= 20s
+FUZZPKGS ?= ./...
 .PHONY: fuzz
 fuzz:
-	@for pkg in $$($(GO) list ./...); do \
+	@for pkg in $$($(GO) list $(FUZZPKGS)); do \
 		for f in $$($(GO) test -list '^Fuzz' $$pkg 2>/dev/null | grep '^Fuzz'); do \
 			echo "== $$pkg $$f"; \
 			$(GO) test -run '^$$' -fuzz "^$$f$$" -fuzztime $(FUZZTIME) $$pkg || exit 1; \
@@ -179,6 +188,7 @@ lint:
 	$(GO) vet ./...
 	$(GO) vet -tags lab ./test/lab/...
 	$(GO) vet -tags browser ./test/browser/...
+	$(GO) vet -tags interop ./vpn/tests/interop/...
 	$(GOLANGCI_LINT) run
 
 ## vulncheck: run govulncheck

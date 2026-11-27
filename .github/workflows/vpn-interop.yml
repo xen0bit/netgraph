@@ -1,0 +1,313 @@
+name: vpn-interop
+
+# Docker-based interoperability tests: every protocol against a real third-party
+# peer and against itself. Kept in its own workflow — like nm.yml — so the
+# toolchain-light core jobs never pull in Docker or the peer images. Path-filtered
+# to the code that affects a data path or handshake so it does not run on
+# unrelated changes.
+on:
+  # Manual trigger, so a suspected flake can be re-run on demand without pushing
+  # a commit. The interop suite talks to real peers over Docker, so an
+  # intermittent failure is best characterised by running it repeatedly.
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - "vpn/internal/**"
+      - "vpn/dataplane/**"
+      - "vpn/client/**"
+      - "vpn/cmd/veepin/**"
+      # One entry per public protocol package: a change confined to any of them
+      # can break that protocol's interop cells and nothing else would catch it.
+      - "vpn/ikev2/**"
+      - "vpn/wireguard/**"
+      - "vpn/openvpn/**"
+      - "vpn/sstp/**"
+      - "vpn/ssh/**"
+      - "vpn/l2tp/**"
+      - "vpn/anyconnect/**"
+      - "vpn/nebula/**"
+      - "vpn/masque/**"
+      - "vpn/fortinet/**"
+      - "vpn/gp/**"
+      - "vpn/cisco/**"
+      - "vpn/pulse/**"
+      - "vpn/amneziawg/**"
+      - "vpn/softether/**"
+      - "vpn/l2tpv3/**"
+      - "vpn/internal/l2tpv3/**"
+      - "vpn/toy/**"
+      - "vpn/Dockerfile"
+      - "vpn/tests/interop/**"
+      - "vpn/cmd/livingreadme/**"
+      - "vpn/scripts/ci/living-readme-commit.sh"
+      - "vpn/scripts/ci/living-readme-preview.sh"
+      - ".github/workflows/vpn-interop.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "vpn/internal/**"
+      - "vpn/dataplane/**"
+      - "vpn/client/**"
+      - "vpn/cmd/veepin/**"
+      # One entry per public protocol package: a change confined to any of them
+      # can break that protocol's interop cells and nothing else would catch it.
+      - "vpn/ikev2/**"
+      - "vpn/wireguard/**"
+      - "vpn/openvpn/**"
+      - "vpn/sstp/**"
+      - "vpn/ssh/**"
+      - "vpn/l2tp/**"
+      - "vpn/anyconnect/**"
+      - "vpn/nebula/**"
+      - "vpn/masque/**"
+      - "vpn/fortinet/**"
+      - "vpn/gp/**"
+      - "vpn/cisco/**"
+      - "vpn/pulse/**"
+      - "vpn/amneziawg/**"
+      - "vpn/softether/**"
+      - "vpn/l2tpv3/**"
+      - "vpn/internal/l2tpv3/**"
+      - "vpn/toy/**"
+      - "vpn/Dockerfile"
+      - "vpn/tests/interop/**"
+      - "vpn/cmd/livingreadme/**"
+      - "vpn/scripts/ci/living-readme-commit.sh"
+      - "vpn/scripts/ci/living-readme-preview.sh"
+      - ".github/workflows/vpn-interop.yml"
+
+concurrency:
+  group: vpn-interop-${{ github.ref }}
+  cancel-in-progress: true
+
+# contents:write so the push-to-main run can commit the refreshed interop matrix
+# back into the README (the "living README"). Pull-request runs only preview the
+# diff, so the elevated scope is unused there.
+permissions:
+  contents: write
+
+# veepin lives under vpn/ in this repository; every run step starts there.
+defaults:
+  run:
+    working-directory: vpn
+
+jobs:
+  # The split is derived from internal/livingreadme's manifest, not written here:
+  # that manifest already maps every protocol row to the tests backing it, and a
+  # second copy in YAML would drift. A test in no shard never runs, and a test
+  # that never runs looks exactly like one that passes -- so TestInteropShards
+  # and TestInteropMatrixMatchesTheTestFunctions fail the ordinary CI job if the
+  # manifest and tests/interop ever disagree.
+  plan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      shards: ${{ steps.derive.outputs.shards }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.27"
+          cache: true
+
+      - name: Derive the shard matrix from the interop manifest
+        id: derive
+        run: echo "shards=$(go run ./cmd/livingreadme -shards)" >> "$GITHUB_OUTPUT"
+
+  # One job per protocol. The cells are serial within a shard -- they contend for
+  # host ports and /dev/net/tun, so t.Parallel() inside one job is not an option
+  # -- but the suite is now bounded by its slowest protocol (IKEv2, ~12 cells)
+  # rather than the sum of all of them, which had reached 27.3 of a 30-minute
+  # budget and started failing with every cell passing.
+  shard:
+    needs: plan
+    name: interop (${{ matrix.shard.name }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      # One protocol's peer being broken should not hide the state of the rest;
+      # the whole point of sharding is that a failure names a protocol.
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(needs.plan.outputs.shards) }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.27"
+          cache: true
+
+      - name: Enable TUN + IPsec kernel modules
+        run: |
+          # The veepin containers need /dev/net/tun; strongSwan uses kernel XFRM.
+          sudo modprobe tun || true
+          sudo modprobe esp4 xfrm_user af_key || true
+          ls -l /dev/net/tun
+
+      # Whatever this shard's peer needs from the HOST kernel, declared in the
+      # interop manifest beside the tests that need it -- no protocol is named
+      # here, for the same reason the shard split is derived rather than written
+      # out. Only L2TPv3 has any, because its peer IS the kernel.
+      - name: Provide the kernel modules this shard's peer needs
+        env:
+          MODULES: ${{ join(matrix.shard.modules, ' ') }}
+        run: |
+          set -u
+          if [ -z "${MODULES}" ]; then
+            echo "this shard's peer needs no host modules"
+            exit 0
+          fi
+
+          # Try first: on a host that already has them this costs nothing.
+          missing=""
+          for m in ${MODULES}; do
+            sudo modprobe "$m" 2>/dev/null || missing="${missing} $m"
+          done
+
+          # GitHub's runners boot an Azure kernel that ships the l2tp modules in
+          # linux-modules-extra rather than in the base image, which is the whole
+          # reason both L2TPv3 kernel cells had never once run in CI. The package
+          # is version-locked to the running kernel, so it is installed by
+          # `uname -r` and not by a name that could resolve to a different one.
+          #
+          # Nothing here is fatal on its own -- an apt mirror having a bad
+          # morning is not the error worth printing. The assertion below is,
+          # because it names the module rather than the command that failed to
+          # fetch it, and the step runs under bash -e where an unguarded
+          # apt-get would abort before reaching it.
+          if [ -n "${missing}" ]; then
+            echo "not loaded:${missing} — installing linux-modules-extra-$(uname -r)"
+            sudo apt-get update -qq || true
+            sudo apt-get install -y "linux-modules-extra-$(uname -r)" || true
+            for m in ${missing}; do sudo modprobe "$m" || true; done
+          fi
+
+          # Asserted, not hoped for. A missing module makes the cells t.Skip,
+          # and a skipped cell is reported as not-passed -- so failing here names
+          # the real cause instead of leaving a ✗ that reads as "veepin is
+          # broken" against a peer that never started.
+          #
+          # /sys/module rather than lsmod, because a module compiled INTO the
+          # kernel is present and usable and lsmod does not list it. It is also
+          # the check requireL2TPModules makes, so the gate and the skip agree.
+          for m in ${MODULES}; do
+            [ -d "/sys/module/${m}" ] || { echo "::error::${m} is not available; this shard's peer cannot run"; exit 1; }
+          done
+          echo "available: ${MODULES}"
+
+      # Third-party images this shard's cells pull, declared in the interop
+      # manifest beside the tests that use them -- again, no protocol is named
+      # here.
+      #
+      # This exists because an anonymous Docker Hub pull from a GitHub-hosted
+      # runner shares an IP pool with every other such runner, and a throttled
+      # pool stalls rather than refusing: the softether-vpn and sstp shards both
+      # died with `compose up: signal: killed` having moved 32 kB of a 2.8 MB
+      # layer in fifteen minutes, while the same image pulled in seconds
+      # elsewhere. Pulling here retries across the window and, when it still
+      # cannot, fails with a message naming the image rather than charging the
+      # stall to a cell and blaming veepin for it.
+      - name: Pre-pull this shard's third-party images
+        env:
+          IMAGES: ${{ join(matrix.shard.images, ' ') }}
+        run: |
+          set -u
+          if [ -z "${IMAGES}" ]; then
+            echo "this shard pulls no third-party images"
+            exit 0
+          fi
+          for image in ${IMAGES}; do
+            ok=""
+            for attempt in 1 2 3 4 5; do
+              echo "pulling ${image} (attempt ${attempt})"
+              if timeout 240 docker pull "${image}"; then
+                ok=yes
+                break
+              fi
+              sleep $((attempt * 20))
+            done
+            if [ -z "${ok}" ]; then
+              echo "::error::could not pull ${image} after 5 attempts;" \
+                   "this is a registry problem, not a veepin one" >&2
+              exit 1
+            fi
+          done
+
+      - name: Run interop tests (vs real peers, over Docker)
+        run: |
+          # -json so the living-README tool can read the per-cell pass/fail; tee
+          # keeps the raw stream in the log. pipefail makes go test's exit code
+          # (not tee's) fail the job, so the report job below runs only when every
+          # cell passed.
+          set -o pipefail
+          go test -tags interop -json -count=1 -timeout 25m \
+            -run '${{ matrix.shard.run }}' ./tests/interop/... \
+            | tee 'interop-${{ matrix.shard.name }}.json'
+
+      - name: Upload this shard's results
+        uses: actions/upload-artifact@v4
+        with:
+          name: interop-${{ matrix.shard.name }}
+          path: vpn/interop-${{ matrix.shard.name }}.json
+          if-no-files-found: error
+          retention-days: 7
+
+  # Keeps the historical check name, and is the only job that touches the README:
+  # both regions are rendered from one merged stream, so they stay one commit.
+  # It needs every shard, so a failing protocol leaves the tables untouched --
+  # the same rule as before the split.
+  interop:
+    needs: shard
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          # Full history so the commit-back step can rebase onto a main that may
+          # have moved (e.g. the benchmark workflow pushing its own region).
+          fetch-depth: 0
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.27"
+          cache: true
+
+      - name: Collect every shard's results
+        uses: actions/download-artifact@v4
+        with:
+          pattern: interop-*
+          merge-multiple: true
+          path: vpn/shards
+
+      - name: Merge the shard streams
+        run: |
+          # go test -json is line-delimited, so concatenating the shards is a
+          # valid stream; the renderers key on the test name, not on ordering.
+          set -o pipefail
+          cat shards/interop-*.json > interop.json
+          echo "merged $(wc -l < interop.json) events from $(ls shards | wc -l) shards"
+
+      # One interop run feeds two regions: the pass/fail matrix and the iperf3
+      # throughput table (both parsed from interop.json), refreshed in one commit.
+      - name: Refresh interop matrix + throughput and commit (push to main)
+        if: github.event_name == 'push'
+        env:
+          SHA: ${{ github.sha }}
+          REF: ${{ github.ref_name }}
+        run: scripts/ci/living-readme-commit.sh "interop results" README.md interop interop.json interop-benchmark interop.json
+
+      - name: Preview interop matrix + throughput diff (pull request)
+        if: github.event_name == 'pull_request'
+        env:
+          SHA: ${{ github.sha }}
+          REF: ${{ github.ref_name }}
+        run: scripts/ci/living-readme-preview.sh "interop results" README.md interop interop.json interop-benchmark interop.json
