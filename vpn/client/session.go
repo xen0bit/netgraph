@@ -43,8 +43,8 @@ type SessionEvent struct {
 	// Auth says how User was proved, which is how far to trust it:
 	// "public-key" (a key only that peer holds), "certificate" (a chain to a
 	// configured CA, matching User), "eap-mschapv2" or "password" (a per-user
-	// secret), or "psk" (a key shared by everyone who has it, so User is the
-	// name a key-holder chose).
+	// secret), "password+totp" (that, and a second factor), or "psk" (a key
+	// shared by everyone who has it, so User is the name a key-holder chose).
 	Auth string
 	// Name is an optional label the operator configured for the peer.
 	Name string

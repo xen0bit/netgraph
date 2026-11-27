@@ -142,7 +142,7 @@ func (s *Server) dtlsAuthorize(conn *dtls.Conn) error {
 	if _, err := conn.Write(BuildDTLSServerHello()); err != nil {
 		if link == nil {
 			s.gate.Done()
-			s.cfg.Pool.Release(addr)
+			s.releaseAddr(addr)
 		}
 		return fmt.Errorf("writing svrhello: %w", err)
 	}
