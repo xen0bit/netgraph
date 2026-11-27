@@ -39,6 +39,12 @@ type SessionEvent struct {
 	// subject, or a public key. It is what the peer authenticated as, never a
 	// name it merely claimed.
 	User string
+	// Auth says how User was proved, which is how far to trust it:
+	// "public-key" (a key only that peer holds), "certificate" (a chain to a
+	// configured CA, matching User), "eap-mschapv2" or "password" (a per-user
+	// secret), or "psk" (a key shared by everyone who has it, so User is the
+	// name a key-holder chose).
+	Auth string
 	// Name is an optional label the operator configured for the peer.
 	Name string
 	// Addrs are the inner prefixes the session carries: an assigned /32 or

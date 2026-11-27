@@ -8,7 +8,9 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"time"
 
+	"github.com/xen0bit/netgraph/vpn/client"
 	"github.com/xen0bit/netgraph/vpn/dataplane"
 	"github.com/xen0bit/netgraph/vpn/internal/ikev2/eap"
 	"github.com/xen0bit/netgraph/vpn/internal/ikev2/payload"
@@ -105,6 +107,9 @@ type Config struct {
 	AssignAddr func(AddressRequest) (Assignment, error)
 	// ReleaseAddr, if set, reclaims the assignment when the SA is torn down.
 	ReleaseAddr func(Assignment)
+	// Sessions, if set, is told when a lease begins and ends under an
+	// authenticated identity (client.SessionReporter, through the facade).
+	Sessions *client.SessionHub
 
 	// IPTFSRate, when positive, makes every AGGFRAG Child SA transmit at that
 	// many bytes per second regardless of load. It is the traffic-flow
@@ -469,6 +474,10 @@ func (s *Server) deleteSA(sa *IKESA) {
 	}
 	if s.cfg.ReleaseAddr != nil && (sa.ClientIP != nil || sa.ClientIP6 != nil) {
 		s.cfg.ReleaseAddr(sa.assigned)
+	}
+	if sa.session != 0 && s.cfg.Sessions != nil {
+		s.cfg.Sessions.CloseSession(sa.session, "disconnected", time.Time{})
+		sa.session = 0
 	}
 }
 

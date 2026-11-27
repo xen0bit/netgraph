@@ -10,6 +10,7 @@ CREATE TABLE vpn_sessions (
     session    INTEGER NOT NULL,          -- the edge's ID, unique per listener and boot
     protocol   TEXT    NOT NULL,
     user       TEXT    NOT NULL,
+    auth       TEXT    NOT NULL DEFAULT '', -- how user was proved: public-key, certificate, eap-mschapv2, password, psk
     name       TEXT    NOT NULL DEFAULT '',
     prefixes   TEXT    NOT NULL DEFAULT '[]', -- JSON array of inner prefixes
     outer      TEXT    NOT NULL DEFAULT '',

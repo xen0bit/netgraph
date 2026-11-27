@@ -103,7 +103,7 @@ are unix milliseconds.
 | `POST /api/v1/agent/hello` | host-agent registration; agent token |
 | `POST /api/v1/agent/events` | host-agent process/connection/actual batch; agent token |
 | `GET /api/v1/agent/policy` | active policy, profile and mode for an agent; agent token |
-| `GET /api/v1/vpn/sessions` | `[{id, sensor, listener, protocol, user, name, prefixes, outer, start, end, reason, flows, bytes_out, bytes_in}]`: the VPN sessions edges reported that overlap the window, newest first (`limit`, default 500). `user` is the identity the handshake proved, `prefixes` the inner addresses the session held, `outer` where it connected from; `end` is absent while it is open. `flows` and the bytes are the connections attributed to it ([edge.md](edge.md)) |
+| `GET /api/v1/vpn/sessions` | `[{id, sensor, listener, protocol, user, auth, name, prefixes, outer, start, end, reason, flows, bytes_out, bytes_in}]`: the VPN sessions edges reported that overlap the window, newest first (`limit`, default 500). `user` is the identity the handshake proved and `auth` how (`public-key`, `certificate`, `eap-mschapv2`, `password` or `psk`), `prefixes` the inner addresses the session held, `outer` where it connected from; `end` is absent while it is open. `flows` and the bytes are the connections attributed to it ([edge.md](edge.md)) |
 | `GET /api/v1/agents` | optional host agents with counts |
 | `GET /api/v1/agents/{name}/processes` | an agent's latest processes |
 | `GET /api/v1/agents/{name}/connections` | an agent's latest process-attributed connections with `predicted`, `scope` (`host`, `process` or `default`: what decided it) and `actual` (`deny` only when the agent dropped it) |

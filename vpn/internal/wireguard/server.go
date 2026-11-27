@@ -421,6 +421,7 @@ func (s *Server) handleInitiation(pkt []byte, from *net.UDPAddr) {
 		// between this check and its ID being stored.
 		peer.session = s.OpenSession(client.SessionEvent{
 			User:  base64.StdEncoding.EncodeToString(peerStatic[:]),
+			Auth:  "public-key",
 			Addrs: peer.allowedIPs,
 			Outer: from.AddrPort(),
 		})

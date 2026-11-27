@@ -184,6 +184,11 @@ type IKESA struct {
 	// assigned records the full address assignment so teardown can release every
 	// leased address (both families) back to its pool.
 	assigned Assignment
+	// peerAuth is how IKE_AUTH proved the peer ("psk", "certificate",
+	// "eap-mschapv2"), and session the client.SessionHub ID of the session
+	// its lease belongs to, or zero. Both move with the lease on a rekey.
+	peerAuth string
+	session  uint64
 
 	Children map[uint32]*ChildSA // keyed by inbound SPI
 

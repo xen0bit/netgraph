@@ -368,6 +368,7 @@ type VPNSession struct {
 	ID       uint64         `json:"id"`
 	Open     bool           `json:"open,omitempty"`
 	User     string         `json:"user"`
+	Auth     string         `json:"auth,omitempty"` // how User was proved: public-key, certificate, eap-mschapv2, password, psk
 	Name     string         `json:"name,omitempty"`
 	Addrs    []netip.Prefix `json:"addrs,omitempty"`
 	Outer    netip.AddrPort `json:"outer,omitzero"`

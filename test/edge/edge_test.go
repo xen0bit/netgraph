@@ -1,8 +1,9 @@
 //go:build edgelab
 
-// Package edge drives test/edge/compose.yml: a real WireGuard client
-// (wireguard-go) connects to netgraph-edge and moves TCP through the tunnel to
-// a server behind it, and netgraph is asked who did what.
+// Package edge drives test/edge/compose.yml: real clients -- wireguard-go,
+// and strongSwan with EAP-MSCHAPv2 -- connect to netgraph-edge and move TCP
+// through their tunnels to a server behind it, and netgraph is asked who did
+// what.
 //
 //	make edge.lab
 package edge
@@ -54,6 +55,7 @@ type session struct {
 	Listener string     `json:"listener"`
 	Protocol string     `json:"protocol"`
 	User     string     `json:"user"`
+	Auth     string     `json:"auth"`
 	Prefixes []string   `json:"prefixes"`
 	Outer    string     `json:"outer"`
 	End      *time.Time `json:"end"`
@@ -78,16 +80,17 @@ func sessions() ([]session, error) {
 	return out, json.NewDecoder(resp.Body).Decode(&out)
 }
 
-// The whole claim of netgraph-edge, against a client it shares no code with:
-// the session is the key the handshake proved, at the address the listener
-// gave it, from where it dialled; the TCP it moved through the tunnel is
-// attributed to it; and stopping the edge closes it.
+// The whole claim of netgraph-edge, against clients it shares no code with:
+// each session is the identity its handshake proved (a WireGuard key; an EAP
+// username, not the IKE identity), at the address the listener gave it, from
+// where it dialled; the TCP it moved through the tunnel is attributed to it;
+// and stopping the edge closes it.
 func TestEdgeLab(t *testing.T) {
 	compose(t, "down", "-v", "--remove-orphans")
 	compose(t, "build")
 	t.Cleanup(func() {
 		if t.Failed() {
-			for _, svc := range []string{"edge", "wg-client", "server"} {
+			for _, svc := range []string{"edge", "wg-client", "ikev2-client", "server"} {
 				out, _ := composeErr("logs", "--tail", "40", svc)
 				t.Logf("--- %s\n%s", svc, out)
 			}
@@ -96,42 +99,60 @@ func TestEdgeLab(t *testing.T) {
 	})
 	compose(t, "up", "-d")
 
-	waitFor(t, "the client to finish its transfer", 2*time.Minute, func() bool {
-		_, err := composeErr("exec", "-T", "wg-client", "test", "-f", "/tmp/done")
-		return err == nil
-	})
-	var s session
-	waitFor(t, "the session and its traffic at the server", time.Minute, func() bool {
+	for _, svc := range []string{"wg-client", "ikev2-client"} {
+		waitFor(t, svc+" to finish its transfer", 2*time.Minute, func() bool {
+			_, err := composeErr("exec", "-T", svc, "test", "-f", "/tmp/done")
+			return err == nil
+		})
+	}
+	byListener := map[string]session{}
+	waitFor(t, "both sessions and their traffic at the server", time.Minute, func() bool {
 		all, err := sessions()
-		if err != nil || len(all) != 1 {
+		if err != nil || len(all) != 2 {
 			return false
 		}
-		s = all[0]
-		return s.Flows > 0 && s.BytesOut >= 1<<20
+		for _, s := range all {
+			byListener[s.Listener] = s
+		}
+		for _, s := range byListener {
+			if s.Flows == 0 || s.BytesOut < 1<<20 {
+				return false
+			}
+		}
+		return true
 	})
-	if s.Sensor != "edge-lab" || s.Listener != "office" || s.Protocol != "wireguard" {
-		t.Errorf("session's origin = %s/%s/%s", s.Sensor, s.Listener, s.Protocol)
+	wg := byListener["office"]
+	if wg.Sensor != "edge-lab" || wg.Protocol != "wireguard" || wg.User != clientKey || wg.Auth != "public-key" {
+		t.Errorf("WireGuard session = %+v, want the client's public key", wg)
 	}
-	if s.User != clientKey {
-		t.Errorf("session user %q, want the client's public key", s.User)
+	if len(wg.Prefixes) != 1 || wg.Prefixes[0] != clientAddr || !strings.HasPrefix(wg.Outer, "198.18.1.50:") {
+		t.Errorf("WireGuard session holds %v from %s, want [%s] from 198.18.1.50", wg.Prefixes, wg.Outer, clientAddr)
 	}
-	if len(s.Prefixes) != 1 || s.Prefixes[0] != clientAddr {
-		t.Errorf("session prefixes %v, want [%s]", s.Prefixes, clientAddr)
+	ike := byListener["remote"]
+	if ike.Protocol != "ikev2" || ike.User != "alice" || ike.Auth != "eap-mschapv2" {
+		t.Errorf("IKEv2 session = %+v, want alice by eap-mschapv2", ike)
 	}
-	if !strings.HasPrefix(s.Outer, "198.18.1.50:") {
-		t.Errorf("session outer %q, want the client's address on the public network", s.Outer)
+	if len(ike.Prefixes) != 1 || !strings.HasPrefix(ike.Prefixes[0], "10.11.11.") || !strings.HasPrefix(ike.Outer, "198.18.1.51:") {
+		t.Errorf("IKEv2 session holds %v from %s, want a pool address from 198.18.1.51", ike.Prefixes, ike.Outer)
 	}
 
 	compose(t, "stop", "-t", "20", "edge")
-	waitFor(t, "the session to close when the edge stops", 30*time.Second, func() bool {
+	waitFor(t, "the sessions to close when the edge stops", 30*time.Second, func() bool {
 		all, err := sessions()
-		if err != nil || len(all) != 1 {
+		if err != nil {
 			return false
 		}
-		s = all[0]
-		return s.End != nil
+		for _, s := range all {
+			if s.End == nil {
+				return false
+			}
+			byListener[s.Listener] = s
+		}
+		return len(all) == 2
 	})
-	if s.Reason != "shutdown" {
-		t.Errorf("closed with reason %q, want shutdown", s.Reason)
+	for name, s := range byListener {
+		if s.Reason != "shutdown" {
+			t.Errorf("%s closed with reason %q, want shutdown", name, s.Reason)
+		}
 	}
 }

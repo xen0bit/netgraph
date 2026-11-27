@@ -4,9 +4,10 @@
 #   make edge.lab      # go test -tags edgelab ./test/edge
 #
 #   public 198.18.1.0/24 (internal)          inside 10.78.0.0/24 (internal)
-#   wg-client .50 ──── edge .10 ═══════════ edge .10 ─┬─ web 10.78.0.30 (iperf3)
-#   (wireguard-go)     (netgraph-edge,                └─ server 10.78.0.20 (netgraph)
-#                       WireGuard 10.10.10.1/24)
+#   wg-client .50 ──┬─ edge .10 ═══════════ edge .10 ─┬─ web 10.78.0.30 (iperf3)
+#   (wireguard-go)  │  (netgraph-edge:                 └─ server 10.78.0.20 (netgraph)
+#   ikev2-client .51┘   WireGuard 10.10.10.1/24,
+#   (strongSwan, EAP)   IKEv2 pool 10.11.11.0/24)
 #
 # The client's tunnel address is 10.10.10.2; the edge NATs it onto the inside
 # network. Nothing here reaches the real internet.
@@ -78,4 +79,19 @@ services:
     command: ["/bin/sh", "/client.sh"]
     networks:
       public: { ipv4_address: 198.18.1.50 }
+    depends_on: [edge, web]
+
+  ikev2-client:
+    build: { context: ../../vpn/tests/interop/strongswan }
+    image: interop-strongswan
+    cap_add: [NET_ADMIN]
+    sysctls:
+      net.ipv4.conf.all.rp_filter: "0"
+      net.ipv4.conf.default.rp_filter: "0"
+    volumes:
+      - ./strongswan/swanctl.conf:/etc/swanctl/swanctl.conf:ro
+      - ./scripts/ikev2-client.sh:/client.sh:ro
+    command: ["/bin/sh", "/client.sh"]
+    networks:
+      public: { ipv4_address: 198.18.1.51 }
     depends_on: [edge, web]

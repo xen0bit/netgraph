@@ -7,15 +7,17 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xen0bit/netgraph/vpn/client"
 	"github.com/xen0bit/netgraph/vpn/internal/vlog"
 )
 
 // leaseServer is mobikeServer with a dual-stack lease and a record of every
 // release, so a test can see the pool get an address back.
-func leaseServer(t *testing.T) (p500, p4500 int, srv *Server, dp *capturingDataPath, released func() []Assignment) {
+func leaseServer(t *testing.T) (p500, p4500 int, srv *Server, dp *capturingDataPath, released func() []Assignment, hub *client.SessionHub) {
 	t.Helper()
 	p500, p4500 = freeUDPPort(t), freeUDPPort(t)
 	dp = newCapturingDataPath()
+	hub = &client.SessionHub{}
 	var mu sync.Mutex
 	var rel []Assignment
 	cfg := Config{
@@ -37,6 +39,7 @@ func leaseServer(t *testing.T) (p500, p4500 int, srv *Server, dp *capturingDataP
 			rel = append(rel, a)
 		},
 		DataPath: dp,
+		Sessions: hub,
 	}
 	var err error
 	srv, err = NewServer(cfg)
@@ -49,7 +52,7 @@ func leaseServer(t *testing.T) (p500, p4500 int, srv *Server, dp *capturingDataP
 		mu.Lock()
 		defer mu.Unlock()
 		return append([]Assignment(nil), rel...)
-	}
+	}, hub
 }
 
 // An IKE SA rekey hands the client's lease to the new SA, and the old SA is
@@ -60,7 +63,7 @@ func leaseServer(t *testing.T) (p500, p4500 int, srv *Server, dp *capturingDataP
 // one. A dual-stack lease is the case that matters, because both families
 // have to be detached from the old SA, not only IPv4.
 func TestAnIKERekeyDoesNotReleaseTheLeaseItHandedOn(t *testing.T) {
-	p500, p4500, srv, dp, released := leaseServer(t)
+	p500, p4500, srv, dp, released, hub := leaseServer(t)
 	defer srv.Close()
 
 	client := NewClient(ClientConfig{
@@ -90,6 +93,10 @@ func TestAnIKERekeyDoesNotReleaseTheLeaseItHandedOn(t *testing.T) {
 	time.Sleep(300 * time.Millisecond)
 	if rel := released(); len(rel) != 0 {
 		t.Fatalf("the IKE rekey released %+v while the client still holds it", rel)
+	}
+	// The session moves with the lease: still the one that opened, still open.
+	if open := hub.OpenSessions(); len(open) != 1 || open[0].ID != 1 {
+		t.Fatalf("open sessions after the rekey = %+v, want the original one", open)
 	}
 
 	// And the lease is the new SA's now, both families, so that SA's own
