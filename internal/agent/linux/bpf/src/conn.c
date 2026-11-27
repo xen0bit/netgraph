@@ -134,6 +134,12 @@ struct event {
 	char comm[16];
 };
 
+// The ring buffer records and the Go decoder both depend on this layout.
+// Make bpf (and CI's bpf job) compile this file, so a changed field or
+// padding fails the build instead of shifting every field in Parse.
+_Static_assert(sizeof(struct event) == 88,
+	       "struct event layout changed: update eventSize and the Go decoder");
+
 // Remember sends for a while, so a busy UDP flow or a long ping is one event
 // every few seconds, not one per packet.
 struct send_key {

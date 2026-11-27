@@ -11,7 +11,7 @@ import (
 
 func TestNftablesDropsOnlyExplicitHostWideDenies(t *testing.T) {
 	var scripts []string
-	n := &Nftables{Table: "netgraph_agent", Protect: []netip.Addr{netip.MustParseAddr("192.0.2.10")},
+	n := &Nftables{Table: "netgraph_agent", Protect: NewProtect([]netip.Addr{netip.MustParseAddr("192.0.2.10")}),
 		Run: func(_ context.Context, script string) error { scripts = append(scripts, script); return nil }}
 	conns := []agent.Connection{
 		{Key: "deny", Proto: "tcp6", RemoteIP: "2001:db8::9", RemotePort: 443, Predicted: "deny", Scope: agent.ScopeHost},
@@ -63,5 +63,26 @@ func TestNftablesDropsOnlyExplicitHostWideDenies(t *testing.T) {
 	}
 	if _, err := NewNftables("x; flush ruleset"); err == nil {
 		t.Fatal("a table name that isn't one was accepted")
+	}
+}
+
+// Replacing the protected set swaps it whole, and keeps no reference to the
+// caller's slice: the agent re-resolves the server while scans read the set.
+func TestProtectReplace(t *testing.T) {
+	old, next := netip.MustParseAddr("192.0.2.10"), netip.MustParseAddr("2001:db8::10")
+	addrs := []netip.Addr{old}
+	p := NewProtect(addrs)
+	addrs[0] = next
+	if !p.Contains(old) || p.Contains(next) || p.Len() != 1 {
+		t.Fatalf("NewProtect kept the caller's slice: %v", p.Contains(old))
+	}
+	p.Replace([]netip.Addr{next})
+	if p.Contains(old) || !p.Contains(next) || p.Len() != 1 {
+		t.Fatalf("after Replace: old %v, new %v", p.Contains(old), p.Contains(next))
+	}
+	var nilSet *Protect
+	nilSet.Replace([]netip.Addr{old})
+	if nilSet.Contains(old) || nilSet.Len() != 0 {
+		t.Fatal("a nil set protected an address")
 	}
 }

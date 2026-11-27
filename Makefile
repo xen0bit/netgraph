@@ -63,19 +63,38 @@ build-ech:
 build-agent:
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/netgraph-agent$(if $(filter windows,$(GOOS)),.exe) ./cmd/netgraph-agent
 
-## bpf: rebuild the agent's BPF objects from internal/agent/linux/bpf/src (clang, in Docker)
+## bpf: rebuild the agent's BPF objects from internal/agent/linux/bpf/src (clang, in Docker; BPF_NATIVE=1 for a local clang 20)
 # The objects are checked in, so building the agent needs no clang. CO-RE
 # (BTF) lets one object run on any kernel; there is one per byte order.
 BPF_DIR   := internal/agent/linux/bpf
 BPF_IMAGE ?= alpine:3.22
+# Native mode needs clang, libbpf-dev and Linux headers. Objects are not
+# compared byte for byte (that depends on the compiler and header versions):
+# make bpf records a hash of src/conn.c, and a Go test fails when the source
+# changed without a rebuild. Debian and Ubuntu keep asm/types.h under the
+# multiarch triplet, which the BPF target does not search itself.
+BPF_NATIVE     ?= 0
+BPF_NATIVE_DIR ?= $(CURDIR)/$(BPF_DIR)
+BPF_CC         ?= clang
+BPF_STRIP      ?= llvm-strip
+BPF_ARCH_DIR   := $(shell d=$$(gcc -dumpmachine 2>/dev/null); [ -n "$$d" ] && [ -d /usr/include/$$d ] && echo /usr/include/$$d)
 .PHONY: bpf
 bpf:
+ifeq ($(BPF_NATIVE),1)
+	cd $(BPF_NATIVE_DIR)/src && for e in el eb; do \
+		$(BPF_CC) $(if $(BPF_ARCH_DIR),-I$(BPF_ARCH_DIR)) \
+			-O2 -g -Wall -Werror -target bpf$$e -c conn.c -o ../conn_bpf$$e.o && \
+		$(BPF_STRIP) -g ../conn_bpf$$e.o || exit 1; \
+	done
+else
 	docker run --rm -v $(CURDIR)/$(BPF_DIR):/bpf -w /bpf/src $(BPF_IMAGE) sh -c '\
 		apk add -q --no-cache clang20 llvm20 libbpf-dev linux-headers >/dev/null && \
 		export PATH=/usr/lib/llvm20/bin:$$PATH && \
 		for e in el eb; do \
 			clang -O2 -g -Wall -Werror -target bpf$$e -c conn.c -o ../conn_bpf$$e.o && llvm-strip -g ../conn_bpf$$e.o || exit 1; \
 		done && chown $(shell id -u):$(shell id -g) ../conn_bpf*.o'
+endif
+	cd $(CURDIR)/$(BPF_DIR)/src && { sha256sum conn.c 2>/dev/null || shasum -a 256 conn.c 2>/dev/null || openssl dgst -sha256 conn.c | sed 's/.*= //'; } > conn.c.sha256
 
 ## bpf-test: load the agent's BPF programs into this kernel and check their events (Docker, CAP_BPF)
 .PHONY: bpf-test
@@ -185,6 +204,43 @@ cross:
 		then echo "ok    agent $$t"; else echo "FAIL  agent $$t"; fail=1; fi; \
 	done; \
 	exit $$fail
+
+# An OpenWrt .ipk is a gzipped tar (opkg refuses a .deb's ar) of
+# debian-binary, control.tar.gz and data.tar.gz. OpenWrt names architectures per target, not per CPU, so the
+# defaults are the generic ones: override IPK_ARCH when `opkg
+# print-architecture` on the router says something else.
+IPK_GOARCH  ?= mipsle
+IPK_GOARM   ?=
+IPK_ARCH    ?= $(if $(filter amd64,$(IPK_GOARCH)),x86_64,$(if $(filter 386,$(IPK_GOARCH)),i386_pentium4,$(if $(filter arm64,$(IPK_GOARCH)),aarch64_generic,$(if $(filter arm,$(IPK_GOARCH)),arm_cortex-a7_neon-vfpv4,$(if $(filter mips,$(IPK_GOARCH)),mips_24kc,$(if $(filter mipsle,$(IPK_GOARCH)),mipsel_24kc,$(if $(filter mips64,$(IPK_GOARCH)),mips64_octeonplus,$(if $(filter mips64le,$(IPK_GOARCH)),mips64el_octeonplus,$(if $(filter riscv64,$(IPK_GOARCH)),riscv64_riscv64,$(if $(filter ppc64le,$(IPK_GOARCH)),powerpc64le_power8,$(IPK_GOARCH)))))))))))
+IPK_VERSION ?= $(patsubst v%,%,$(VERSION))
+IPK_BUILD   := $(BIN_DIR)/ipk
+IPK_FILE    := $(IPK_BUILD)/netgraph-sensor_$(IPK_VERSION)_$(IPK_ARCH).ipk
+
+## ipk: build an OpenWrt package for netgraph-sensor (IPK_GOARCH, IPK_ARCH)
+.PHONY: ipk
+ipk:
+	rm -rf $(IPK_BUILD)
+	mkdir -p $(IPK_BUILD)/data/usr/bin $(IPK_BUILD)/data/etc/init.d \
+		$(IPK_BUILD)/data/etc/config $(IPK_BUILD)/data/etc/netgraph $(IPK_BUILD)/control
+	CGO_ENABLED=0 GOOS=linux GOARCH=$(IPK_GOARCH) \
+		$(if $(IPK_GOARM),GOARM=$(IPK_GOARM),) \
+		$(if $(filter 386,$(IPK_GOARCH)),GO386=softfloat,) \
+		$(if $(filter mips mipsle,$(IPK_GOARCH)),GOMIPS=softfloat,) \
+		$(if $(filter mips64 mips64le,$(IPK_GOARCH)),GOMIPS64=softfloat,) \
+		$(GO) build -trimpath -ldflags "$(LDFLAGS)" \
+		-o $(IPK_BUILD)/data/usr/bin/netgraph-sensor ./cmd/netgraph-sensor
+	chmod 0755 $(IPK_BUILD)/data/usr/bin/netgraph-sensor
+	install -m 0755 packaging/openwrt/netgraph-sensor.init $(IPK_BUILD)/data/etc/init.d/netgraph-sensor
+	install -m 0644 packaging/openwrt/netgraph.config $(IPK_BUILD)/data/etc/config/netgraph
+	printf 'Package: netgraph-sensor\nVersion: %s\nArchitecture: %s\nMaintainer: netgraph\nSection: net\nPriority: optional\nDepends: libc\nDescription: netgraph capture sensor (flow, DNS, DHCP, mDNS, ARP and TLS metadata; stateless, needs CAP_NET_RAW)\n' \
+		"$(IPK_VERSION)" "$(IPK_ARCH)" > $(IPK_BUILD)/control/control
+	printf '/etc/config/netgraph\n' > $(IPK_BUILD)/control/conffiles
+	printf '2.0\n' > $(IPK_BUILD)/debian-binary
+	tar --owner=0 --group=0 --numeric-owner -C $(IPK_BUILD)/data -czf $(IPK_BUILD)/data.tar.gz .
+	tar --owner=0 --group=0 --numeric-owner -C $(IPK_BUILD)/control -czf $(IPK_BUILD)/control.tar.gz ./control ./conffiles
+	tar --owner=0 --group=0 --numeric-owner -C $(IPK_BUILD) -czf $(IPK_FILE) ./debian-binary ./data.tar.gz ./control.tar.gz
+	@echo "$(IPK_FILE):"
+	@tar -tzf $(IPK_FILE)
 
 ## docker: build the sensor, server and agent images locally
 .PHONY: docker

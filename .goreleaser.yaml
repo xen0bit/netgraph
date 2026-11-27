@@ -145,6 +145,8 @@ archives:
         dst: packaging/agent.conf.example
       - src: packaging/macos/*
         dst: packaging/macos
+      - src: packaging/windows/*
+        dst: packaging/windows
 
 nfpms:
   - id: netgraph-sensor

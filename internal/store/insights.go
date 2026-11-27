@@ -190,30 +190,36 @@ func (s *Store) Airspace(ctx context.Context, f model.Filter) (*model.AirspaceRe
 			rogueSSID[a.Entity] = true
 		}
 	}
+	// One query for every access point's clients, not one per network: a
+	// busy airspace can hold hundreds of BSSIDs, and this route is memoized
+	// behind a single request. Facts run client --associates--> AP.
+	clients := map[string][]string{}
+	rows, err := s.r.QueryContext(ctx, `SELECT ap.key, coalesce(nullif(cl.label,''), cl.key)
+		FROM facts a
+		JOIN entities ap ON ap.id = a.dst
+		JOIN entities cl ON cl.id = a.src
+		WHERE a.rel = 'associates' AND a.first_seen < ? AND a.last_seen >= ? AND ap.kind = 'device'
+		GROUP BY ap.key, cl.id ORDER BY ap.key, 2`, to, from)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var bssid, label string
+		if err := rows.Scan(&bssid, &label); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		clients[bssid] = append(clients[bssid], label)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return nil, err
+	}
 	for _, n := range wifi {
 		an := model.AirspaceNetwork{BSSID: n.BSSID, SSID: n.SSID, Security: n.Security, Channel: n.Channel, Signal: n.Signal, Band: wifiBand(n.Frequency, n.Channel), FirstSeen: n.FirstSeen, LastSeen: n.LastSeen}
 		an.Rogue = rogueBSSID[n.BSSID] || (n.Security == wifipkg.Open && rogueSSID[model.EntityID(model.KindSSID, strings.ToLower(n.SSID))])
-		rows, err := s.r.QueryContext(ctx, `SELECT coalesce(nullif(d.label,''), d.key)
-			FROM facts a JOIN entities d ON d.id = a.src
-			WHERE a.rel = 'associates' AND a.dst = (SELECT id FROM entities WHERE kind = 'device' AND key = ?)
-			  AND a.first_seen < ? AND a.last_seen >= ?
-			GROUP BY d.id ORDER BY 1`, n.BSSID, to, from)
-		if err != nil {
-			return nil, err
-		}
-		for rows.Next() {
-			var label string
-			if err := rows.Scan(&label); err != nil {
-				rows.Close()
-				return nil, err
-			}
-			an.Clients = append(an.Clients, label)
-		}
-		err = rows.Err()
-		rows.Close()
-		if err != nil {
-			return nil, err
-		}
+		an.Clients = clients[n.BSSID]
 		out.Networks = append(out.Networks, an)
 	}
 	slices.SortFunc(out.Networks, func(a, b model.AirspaceNetwork) int {

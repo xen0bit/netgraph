@@ -156,6 +156,13 @@ func lldpID(v []byte) string {
 // SSDP parses an SSDP datagram (UPnP Device Architecture §1): NOTIFY or
 // M-SEARCH requests and HTTP-over-UDP responses.
 func SSDP(b []byte, src netip.Addr, mac string) *wire.SSDP {
+	// An SSDP message is a small header block. Bound what is copied and
+	// scanned before the string conversion: a flood of 64 KiB NOTIFY
+	// datagrams must not become a per-packet allocation amplifier.
+	const maxHeader = 8 << 10
+	if len(b) > maxHeader {
+		b = b[:maxHeader]
+	}
 	line, rest, ok := strings.Cut(string(b), "\r\n")
 	if !ok {
 		return nil

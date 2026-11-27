@@ -19,6 +19,7 @@ const (
 // RetentionResult counts what one retention pass deleted.
 type RetentionResult struct {
 	Flows, DNS, Answers, Observations, Facts, Rollups, Entities, Handshakes, Mutes int64
+	Audit, Findings, Decisions                                                     int64
 	Timeline                                                                       int64
 }
 
@@ -68,10 +69,10 @@ func (s *Store) Retain(ctx context.Context) (RetentionResult, error) {
 		{&r.Mutes, `DELETE FROM anomaly_mutes WHERE until < ?`, now.UnixMilli(), true},
 		// Closed findings follow the rollups their evidence came from; open ones stay
 		// until someone or a quiet week closes them.
-		{&r.Mutes, `DELETE FROM audit_log WHERE ts < ?`, roll, true},
-		{&r.Mutes, `DELETE FROM findings WHERE status IN ('resolved', 'dismissed') AND last_seen < ?`, roll, true},
+		{&r.Audit, `DELETE FROM audit_log WHERE ts < ?`, roll, true},
+		{&r.Findings, `DELETE FROM findings WHERE status IN ('resolved', 'dismissed') AND last_seen < ?`, roll, true},
 		// A decision names a device and a destination: it follows the raw records it was made from.
-		{&r.Mutes, `DELETE FROM policy_decisions WHERE rowid IN (SELECT rowid FROM policy_decisions WHERE ts < ? LIMIT 5000)`, raw, true},
+		{&r.Decisions, `DELETE FROM policy_decisions WHERE rowid IN (SELECT rowid FROM policy_decisions WHERE ts < ? LIMIT 5000)`, raw, true},
 		// A host agent's sockets are new rows for every ephemeral port: without
 		// this the table grows for as long as the agent runs.
 		{&r.Flows, `DELETE FROM agent_connections WHERE rowid IN (SELECT rowid FROM agent_connections WHERE last_seen < ? LIMIT ` + retainChunkSQL + `)`, raw, false},
@@ -199,7 +200,8 @@ func (s *Store) RunRetention(ctx context.Context, every time.Duration) {
 		if err != nil && ctx.Err() == nil {
 			s.log.Error("retention", "err", err)
 		} else if r != (RetentionResult{}) {
-			s.log.Info("retention", "flows", r.Flows, "dns", r.DNS, "observations", r.Observations, "facts", r.Facts, "rollups", r.Rollups, "entities", r.Entities)
+			s.log.Info("retention", "flows", r.Flows, "dns", r.DNS, "observations", r.Observations, "facts", r.Facts, "rollups", r.Rollups, "entities", r.Entities,
+				"mutes", r.Mutes, "audit", r.Audit, "findings", r.Findings, "decisions", r.Decisions)
 		}
 		select {
 		case <-ctx.Done():

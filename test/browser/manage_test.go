@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"testing"
-	"time"
 
 	"github.com/chromedp/chromedp"
 )
@@ -57,14 +56,10 @@ func TestManageDecisionBecomesARule(t *testing.T) {
 	s.clickNow(`#manage-body [data-decision$=":rule:deny"]`)
 	s.waitFor("the policy to have two rules", `[...document.querySelectorAll("#manage-body tr")].some((r) => r.textContent.includes("journey") && r.children[3]?.textContent === "2")`)
 
-	// The dialog is dismissed by the test harness, so nothing is deleted.
-	before := s.dialogs.Load()
+	// Deletion asks in the app's own dialog (the suite forbids native ones);
+	// cancel it here, so the policy stays.
 	s.clickNow(`#manage-body [data-policy-delete]`)
-	for i := 0; s.dialogs.Load() == before; i++ {
-		if i > 50 {
-			t.Fatal("deleting a policy didn't ask first")
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
+	s.waitFor("the delete confirmation", `!!document.querySelector("#input-dialog[open]")`)
+	s.run(chromedp.Click(`#input-dialog button[value="cancel"]`, chromedp.ByQuery))
 	s.waitFor("the policy to stay", `document.querySelector("#manage-body")?.textContent.includes("journey")`)
 }

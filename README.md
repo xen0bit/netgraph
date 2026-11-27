@@ -5,7 +5,7 @@ time.
 
 A small sensor on your router watches the LAN and learns what it can
 without being told: which devices are there (DHCP, mDNS/DNS-SD, NetBIOS,
-LLMNR, SSDP/UPnP, LLDP, ARP/NDP, reverse DNS, MAC vendors), what they look
+LLMNR, SSDP/UPnP, LLDP, SNMP, ARP/NDP, reverse DNS, MAC vendors), what they look
 up (DNS, with answers and TTLs), and what they talk to (connections with
 bytes each way, TLS and QUIC server names, ALPN, JA4 fingerprints, HTTP
 hosts and user agents). With a monitor-mode wireless interface it also sees

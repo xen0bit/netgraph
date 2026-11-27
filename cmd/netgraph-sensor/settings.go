@@ -22,6 +22,7 @@ type settings struct {
 }
 
 func newSettings(level string, rdns bool, active, flush time.Duration, levelVar *slog.LevelVar) *settings {
+	active, flush = time.Duration(wholeSeconds(active))*time.Second, time.Duration(wholeSeconds(flush))*time.Second
 	start := wire.SensorConfig{LogLevel: level, RDNS: &rdns, ActiveTimeoutS: int(active / time.Second), FlushS: int(flush / time.Second)}
 	return &settings{level: levelVar, started: start, current: start, active: active}
 }
@@ -51,6 +52,20 @@ func (s *settings) activeTimeout() time.Duration {
 		return s.active
 	}
 	return time.Duration(s.current.ActiveTimeoutS) * time.Second
+}
+
+// wholeSeconds converts a duration to the whole seconds the wire config
+// carries, rounding up so a sub-second flag (say 800ms) is reported as 1s
+// rather than 0, which the server would read as "unset".
+func wholeSeconds(d time.Duration) int {
+	if d <= 0 {
+		return 0
+	}
+	s := int((d + time.Second - 1) / time.Second)
+	if s < 1 {
+		s = 1
+	}
+	return s
 }
 
 // update lays what the server asked over the flags, and acts on anything that changed.

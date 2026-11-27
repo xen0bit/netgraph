@@ -1758,20 +1758,21 @@ type DNSClientStat struct {
 
 // DNSServerStatus is the DNS server's state, when it runs.
 type DNSServerStatus struct {
-	Enabled     bool                `json:"enabled"`
-	Listen      []string            `json:"listen,omitempty"`
-	BlockMode   string              `json:"block_mode,omitempty"`
-	Upstreams   []DNSUpstreamStatus `json:"upstreams,omitempty"`
-	Queries     uint64              `json:"queries"`
-	Blocked     uint64              `json:"blocked"`
-	CacheHits   uint64              `json:"cache_hits"`
-	Refused     uint64              `json:"refused"`
-	Failed      uint64              `json:"failed"`
-	Cached      int                 `json:"cached"`
-	Rules       int                 `json:"rules"`
-	ListEntries int                 `json:"list_entries"`
-	RulesAt     int64               `json:"rules_at,omitempty"`
-	RulesError  string              `json:"rules_error,omitempty"`
+	Enabled       bool                `json:"enabled"`
+	Listen        []string            `json:"listen,omitempty"`
+	BlockMode     string              `json:"block_mode,omitempty"`
+	Upstreams     []DNSUpstreamStatus `json:"upstreams,omitempty"`
+	Queries       uint64              `json:"queries"`
+	Blocked       uint64              `json:"blocked"`
+	CacheHits     uint64              `json:"cache_hits"`
+	CacheHitRatio float64             `json:"cache_hit_ratio,omitempty"`
+	Refused       uint64              `json:"refused"`
+	Failed        uint64              `json:"failed"`
+	Cached        int                 `json:"cached"`
+	Rules         int                 `json:"rules"`
+	ListEntries   int                 `json:"list_entries"`
+	RulesAt       int64               `json:"rules_at,omitempty"`
+	RulesError    string              `json:"rules_error,omitempty"`
 }
 
 // DNSUpstreamStatus is one upstream resolver: named by its scheme and host

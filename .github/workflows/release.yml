@@ -26,6 +26,11 @@ jobs:
           go-version: "1.27"
           cache: true
       - run: go test -race -timeout 20m ./...
+      # A tag must not ship a target that no longer compiles (mips/armv5
+      # included), a 32-bit decoder regression, or a broken web UI.
+      - run: make cross
+      - run: make test32
+      - run: make browser
       # 2.6.5, not 2.4.x or 3.x: goreleaser-action verifies its own download
       # with the cosign on PATH (needs >= 2.6 for the bundle format), and the
       # signs stanza uses --output-certificate, which 3.x dropped.

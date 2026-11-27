@@ -17,9 +17,18 @@ export const filterKeys = [
   ["cc:", "a country code"],
 ];
 
+// How a connection's direction reads in a table: the short badge, and what it
+// means. The filter suggestions use the same words.
+export const dirs = {
+  out: ["out", "A device here connected out"],
+  in: ["in", "Opened from outside to a device here"],
+  local: ["lan", "Both ends are here"],
+  external: ["transit", "Neither end is here"],
+};
+
 const fixed = {
   type: [["router", ""], ["ap", "access point"], ["switch", ""], ["phone", ""], ["tablet", ""], ["laptop", "computer"], ["tv", ""], ["speaker", ""], ["printer", ""], ["camera", ""], ["nas", "storage"], ["server", ""], ["game", "console"], ["iot", "smart home"]],
-  dir: [["out", "a device here connected out"], ["in", "opened from outside"], ["local", "both ends here"], ["external", "neither end here"]],
+  dir: Object.entries(dirs).map(([k, [, hint]]) => [k, hint]),
   proto: [["tcp", ""], ["udp", ""], ["icmp", ""], ["icmpv6", ""]],
   app: [["tls", ""], ["quic", ""], ["http", ""], ["dns", ""], ["dhcp", ""], ["mdns", ""], ["ssdp", ""]],
 };

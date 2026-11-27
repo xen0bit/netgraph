@@ -337,19 +337,70 @@ func TestDedupe(t *testing.T) {
 	}
 }
 
+// A replay that overflows the dedupe cache must still produce the same
+// events: trimming keeps the newest entries and breaks ties by hash, not
+// by map order.
+func TestTrimSeenIsDeterministic(t *testing.T) {
+	const n, keep = 2000, 1500
+	build := func(desc bool) *Processor {
+		p := &Processor{seen: map[uint64]time.Time{}}
+		for i := range n {
+			j := i
+			if desc {
+				j = n - 1 - i
+			}
+			p.seen[uint64(j)] = time.Unix(int64(j%100), 0)
+		}
+		p.trimSeen(keep)
+		return p
+	}
+	a, b := build(false), build(true)
+	if len(a.seen) != keep || len(b.seen) != keep {
+		t.Fatalf("kept %d and %d, want %d", len(a.seen), len(b.seen), keep)
+	}
+	for k := range a.seen {
+		if _, ok := b.seen[k]; !ok {
+			t.Fatalf("key %d survived one order but not the other", k)
+		}
+	}
+	// Timestamps repeat every 100 keys, 20 keys per tick, so keeping 1500 of
+	// 2000 drops the 25 oldest ticks.
+	for k := range a.seen {
+		if k%100 < 25 {
+			t.Fatalf("old key %d survived trimming", k)
+		}
+	}
+}
+
 func FuzzHandle(f *testing.F) {
 	capt := testutil.Home(f)
 	_, frames := capt.Frames()
 	for _, fr := range frames {
 		f.Add(fr)
 	}
+	// SLL2-wrapped variants, so the cooked-v2 header parser (which the
+	// fixtures don't otherwise exercise) is fuzzed too: 20-byte header,
+	// ARPHRD_ETHER, 6-byte address.
+	for i, fr := range frames {
+		if i >= 20 || len(fr) < 14 {
+			continue
+		}
+		hdr := make([]byte, 20)
+		copy(hdr[0:], fr[12:14]) // protocol
+		binary.BigEndian.PutUint16(hdr[8:], 1)
+		hdr[11] = 6
+		copy(hdr[12:18], fr[6:12])
+		f.Add(append(hdr, fr[14:]...))
+	}
 	p := NewProcessor(Config{}, &collector{})
 	f.Fuzz(func(t *testing.T, b []byte) {
 		var fr frame
 		parseFrame(b, capture.LinkEthernet, &fr)
 		parseFrame(b, capture.LinkSLL, &fr)
+		parseFrame(b, capture.LinkSLL2, &fr)
 		parseFrame(b, capture.LinkRaw, &fr)
 		p.Handle(time.Unix(0, 0), b, capture.LinkEthernet)
+		p.Handle(time.Unix(0, 0), b, capture.LinkSLL2)
 	})
 }
 

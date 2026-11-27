@@ -212,7 +212,8 @@ The body is newline-delimited JSON events, each `{seq, type, ts, <type>:
 {...}}`, as defined in [`internal/wire/event.go`](../internal/wire/event.go).
 Event types are `hello`, `stats`, `flow`, `dns`, `binding`, `dhcp`, `mdns`,
 `name`, `ssdp`, `lldp`, `wifi`, `wifi_key` and `wifi_gtk`. A `name` from
-reverse DNS has `"proto":"rdns"`; a `wifi` event describes an access point,
+reverse DNS has `"proto":"rdns"`, one from an SNMP `sysName` `"proto":"snmp"`;
+a `wifi` event describes an access point,
 client, association or handshake and never carries key material. A
 `wifi_key` event carries a handshake's public nonces, and a `wifi_gtk` event
 an AP's group key still wrapped with a client's KEK, so keys survive a

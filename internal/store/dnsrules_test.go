@@ -122,3 +122,21 @@ func TestDNSClientsAndStats(t *testing.T) {
 		t.Errorf("lookups = %+v", qs)
 	}
 }
+
+// A lookup read from a DNS server's log names no server address: it is stored
+// as none, not as netip's "invalid IP".
+func TestLogLookupHasNoServer(t *testing.T) {
+	st, _, _ := homeStore(t)
+	ctx := context.Background()
+	at := time.Unix(1_800_000_000, 0)
+	if _, err := st.Ingest(ctx, "syslog", "boot1", []wire.Event{{Type: wire.TypeDNS, TS: at, Seq: 1, DNS: &wire.DNS{Client: testutil.Phone.IP, Proto: "log", QName: "logged.example", QType: "A", RCode: "NOERROR"}}}); err != nil {
+		t.Fatal(err)
+	}
+	qs, err := st.DNS(ctx, model.Filter{From: at, To: at.Add(time.Second), Domain: "logged.example"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(qs) != 1 || qs[0].Server != "" {
+		t.Fatalf("lookups = %+v", qs)
+	}
+}

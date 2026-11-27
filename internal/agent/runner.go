@@ -35,6 +35,10 @@ type Runner struct {
 	// Hello describes this host; Run fills in what is left empty.
 	Hello Hello
 	Logf  func(string, ...any)
+	// OnServerError, if set, is called when a request to the server fails
+	// (registration or an upload): the agent can re-resolve the server,
+	// whose address may have changed.
+	OnServerError func()
 }
 
 func (r *Runner) defaults() {
@@ -89,6 +93,9 @@ func (r *Runner) Run(ctx context.Context) error {
 			break
 		}
 		r.Logf("register: %v", err)
+		if r.OnServerError != nil {
+			r.OnServerError()
+		}
 		if !sleep(ctx, r.Interval) {
 			return ctx.Err()
 		}
@@ -170,6 +177,9 @@ func (r *Runner) Run(ctx context.Context) error {
 		if len(changed) > 0 || len(newProcs) > 0 || len(actuals) > 0 || now.Sub(lastSend) >= r.Refresh {
 			if err := r.Client.Send(ctx, &Batch{Processes: newProcs, Connections: changed, Actuals: actuals}); err != nil {
 				r.Logf("send: %v", err)
+				if r.OnServerError != nil {
+					r.OnServerError()
+				}
 				// Nothing was recorded: send it all again next time.
 				changedKeys = map[string]bool{}
 				sentOK = false

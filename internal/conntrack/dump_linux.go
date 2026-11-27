@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"sync"
 	"syscall"
 )
 
@@ -44,11 +45,12 @@ func Dump() ([]Entry, bool, error) {
 	if err := syscall.Sendto(fd, req, 0, &syscall.SockaddrNetlink{Family: syscall.AF_NETLINK}); err != nil {
 		return nil, false, permissionHint(fmt.Errorf("conntrack: netlink: %w", err))
 	}
-	buf := make([]byte, 64<<10)
+	buf := dumpBuf.Get().(*[64 << 10]byte)
+	defer dumpBuf.Put(buf)
 	var entries []Entry
 	total := 0
 	for total < maxDumpBytes {
-		n, _, err := syscall.Recvfrom(fd, buf, 0)
+		n, _, err := syscall.Recvfrom(fd, buf[:], 0)
 		if errors.Is(err, syscall.EINTR) {
 			continue
 		}
@@ -73,6 +75,11 @@ func Dump() ([]Entry, bool, error) {
 	}
 	return entries, false, nil
 }
+
+// dumpBuf reuses the receive buffer across polls: Dump runs every
+// -conntrack-every (10 s by default), and a fresh 64 KiB allocation each
+// time is needless churn on a router.
+var dumpBuf = sync.Pool{New: func() any { return new([64 << 10]byte) }}
 
 // kernelError finds the errno in a netlink error message, which Parse has already seen.
 func kernelError(b []byte, order binary.ByteOrder) error {

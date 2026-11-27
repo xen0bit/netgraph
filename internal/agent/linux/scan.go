@@ -517,6 +517,12 @@ func readStat(root string, pid int) (ppid int, ticks int64, ok bool) {
 	if err != nil {
 		return 0, 0, false
 	}
+	return parseStat(b)
+}
+
+// parseStat reads a process's parent and start time from the bytes of
+// /proc/<pid>/stat. It is pure: the caller reads the file.
+func parseStat(b []byte) (ppid int, ticks int64, ok bool) {
 	// The command, in parentheses, may hold spaces and parentheses: count
 	// fields from after its last ")".
 	i := bytes.LastIndexByte(b, ')')
@@ -528,7 +534,7 @@ func readStat(root string, pid int) (ppid int, ticks int64, ok bool) {
 		return 0, 0, false
 	}
 	ppid, _ = strconv.Atoi(rest[1])
-	ticks, err = strconv.ParseInt(rest[19], 10, 64)
+	ticks, err := strconv.ParseInt(rest[19], 10, 64)
 	return ppid, ticks, err == nil
 }
 

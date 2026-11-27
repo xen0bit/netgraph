@@ -10,6 +10,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"strconv"
 	"strings"
@@ -40,6 +41,9 @@ func (s *Scanner) run(ctx context.Context, name string, args ...string) ([]byte,
 	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
+	// ps writes lstart in the locale's words ("jeu 26 nov" in French), which
+	// ParsePs would take for the start of the command: ask for C's.
+	cmd.Env = append(os.Environ(), "LC_ALL=C")
 	var out bytes.Buffer
 	cmd.Stdout = &limited{w: &out, n: maxOutput}
 	err := cmd.Run()
@@ -60,7 +64,7 @@ func (s *Scanner) Scan(ctx context.Context) ([]agent.Process, []agent.Connection
 		return nil, nil, err
 	}
 	sockets := ParseLsof(raw)
-	psOut, err := s.run(ctx, "/bin/ps", "-axww", "-o", "pid=,ppid=,uid=,comm=")
+	psOut, err := s.run(ctx, "/bin/ps", "-axww", "-o", "pid=,ppid=,uid=,lstart=,comm=")
 	if err != nil {
 		return nil, nil, err
 	}
@@ -190,8 +194,11 @@ func hostPort(s string) (string, int) {
 	return host, p
 }
 
-// ParsePs reads "pid ppid uid comm" lines; on macOS comm is the
-// executable's full path.
+// ParsePs reads "pid ppid uid lstart comm" lines, where lstart is optional
+// (`ps -o lstart=` prints five fields, "Wed Nov 25 10:12:34 2026"); on macOS
+// comm is the executable's full path. Start is set in Unix milliseconds, as
+// the Linux and Windows scanners do, so a reused PID is a new process to the
+// server.
 func ParsePs(b []byte) map[int]agent.Process {
 	out := map[int]agent.Process{}
 	sc := bufio.NewScanner(bytes.NewReader(b))
@@ -207,10 +214,20 @@ func ParsePs(b []byte) map[int]agent.Process {
 		}
 		ppid, _ := strconv.Atoi(f[1])
 		uid, _ := strconv.Atoi(f[2])
-		path := strings.Join(f[3:], " ")
-		p := agent.Process{PID: pid, PPID: ppid, UID: uid, Cmdline: path}
-		if strings.HasPrefix(path, "/") {
-			p.Path = path
+		path := f[3:]
+		var start int64
+		// lstart is five whitespace-separated fields; leave at least the
+		// command after them. Without it (a ps that doesn't know lstart, or
+		// old output in a test), the rest is the command as before.
+		if len(path) > 5 && isWeekday(path[0]) {
+			if t, ok := parseLstart(path[:5]); ok {
+				start, path = t, path[5:]
+			}
+		}
+		cmdline := strings.Join(path, " ")
+		p := agent.Process{PID: pid, PPID: ppid, UID: uid, Cmdline: cmdline, Start: start}
+		if strings.HasPrefix(cmdline, "/") {
+			p.Path = cmdline
 		}
 		out[pid] = p
 		if len(out) >= 100000 {
@@ -218,6 +235,34 @@ func ParsePs(b []byte) map[int]agent.Process {
 		}
 	}
 	return out
+}
+
+// parseLstart parses ps's lstart fields, which are in the agent's local time
+// zone, into Unix milliseconds. The day may be space-padded by ps.
+func parseLstart(f []string) (int64, bool) {
+	if len(f) != 5 {
+		return 0, false
+	}
+	day := f[2]
+	if len(day) == 1 {
+		day = " " + day
+	}
+	t, err := time.ParseInLocation("Mon Jan _2 15:04:05 2006",
+		f[0]+" "+f[1]+" "+day+" "+f[3]+" "+f[4], time.Local)
+	// A process cannot have started before Unix time or in the far future;
+	// a line claiming either is not a start time.
+	if err != nil || t.Year() < 1970 || t.Year() > 2100 {
+		return 0, false
+	}
+	return t.UnixMilli(), true
+}
+
+func isWeekday(s string) bool {
+	switch s {
+	case "Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun":
+		return true
+	}
+	return false
 }
 
 // parseArgs reads "pid args..." lines.

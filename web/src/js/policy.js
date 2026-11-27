@@ -13,10 +13,16 @@ export const emptyPolicy = () => ({
 
 const KEY = "netgraph.policy.draft";
 
+// asDraft is the builder's one idea of a policy: what loadDraft accepts, and
+// what the What-if dialog may hand over. Missing top-level parts get defaults.
+export function asDraft(p) {
+  if (p && Array.isArray(p.rules) && Array.isArray(p.zones) && p.defaults) return { ...emptyPolicy(), ...p };
+  return null;
+}
+
 export function loadDraft(store) {
   try {
-    const p = JSON.parse(store.get(KEY) || "null");
-    if (p && Array.isArray(p.rules) && Array.isArray(p.zones) && p.defaults) return { ...emptyPolicy(), ...p };
+    return asDraft(JSON.parse(store.get(KEY) || "null")) || emptyPolicy();
   } catch { /* an unreadable draft is no draft */ }
   return emptyPolicy();
 }

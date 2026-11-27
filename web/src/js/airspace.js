@@ -1,8 +1,7 @@
 // The air: which channels have networks on them. Network names are chosen by whoever runs
 // the network, including a neighbour or an attacker, so all of it goes through esc().
-import { esc, ago } from "./util.js";
+import { esc, ago, plural } from "./util.js";
 
-const plural = (n, one) => `${n} ${one}${n === 1 ? "" : "s"}`;
 const nonOverlapping = [1, 6, 11];
 
 // The least crowded of the three 2.4 GHz channels that don't overlap, counting what shares its air.

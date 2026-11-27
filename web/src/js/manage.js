@@ -1,9 +1,8 @@
 // The management view for saved policies, blocklists, profiles, decisions and
 // audits. Everything here is server configuration; traffic history stays in
 // the other views.
-import { esc } from "./util.js";
+import { esc, badge } from "./util.js";
 
-const badge = (text, cls = "") => `<span class="badge ${esc(cls)}">${esc(text)}</span>`;
 const when = (ms) => (ms ? new Date(ms).toLocaleString() : "never");
 
 export function manageHTML(d) {

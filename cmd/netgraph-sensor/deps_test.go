@@ -14,7 +14,14 @@ func TestSensorDependencies(t *testing.T) {
 	if err != nil {
 		t.Fatalf("go list -deps: %v", err)
 	}
-	forbidden := []string{"modernc.org/sqlite", "oss.terrastruct.com/d2", "github.com/charmbracelet/"}
+	// gopacket/layers and pcapgo are what internal/capture deliberately
+	// avoids (the hand-rolled pcap reader exists for this): layers alone
+	// more than doubles the binary. afpacket is the one gopacket package the
+	// sensor may use.
+	forbidden := []string{
+		"modernc.org/sqlite", "oss.terrastruct.com/d2", "github.com/charmbracelet/",
+		"github.com/gopacket/gopacket/layers", "github.com/gopacket/gopacket/pcapgo",
+	}
 	for _, dep := range strings.Fields(string(out)) {
 		for _, f := range forbidden {
 			if strings.HasPrefix(dep, f) {

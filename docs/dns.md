@@ -89,6 +89,11 @@ everyone's, then the blocklists. Within one, allowing beats blocking. A name
 that hides behind another (`tracker.example CNAME ads.cdn.example`) is refused
 when the name it points to is.
 
+A list is fetched again once its update interval has passed (a day by
+default), by the server itself: `netgraph serve` checks a minute and fetches
+what is due. A feed that never updates would go stale silently, so this needs
+no timer of your own; `netgraph blocklist update` still forces one now.
+
 Client addresses are matched to devices from what the sensors learned (ARP,
 DHCP, NDP), refreshed every 30 seconds. An address no sensor has tied to a
 device gets only the rules for everyone and the blocklists.

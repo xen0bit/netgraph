@@ -215,7 +215,7 @@ func (s *Server) serveUDP(ctx context.Context, pc net.PacketConn) error {
 		}
 		go func() {
 			defer func() { <-s.inflight }()
-			if out := s.Handle(ctx, req, client, here, "udp"); out != nil {
+			if out := s.handle(ctx, req, client, here, "udp"); out != nil {
 				_, _ = pc.WriteTo(out, from)
 			}
 		}()
@@ -268,8 +268,14 @@ func (s *Server) serveConn(ctx context.Context, c net.Conn) {
 		if _, err := io.ReadFull(c, req); err != nil {
 			return
 		}
-		s.inflight <- struct{}{}
-		out := s.Handle(ctx, req, client, local, "tcp")
+		select {
+		case s.inflight <- struct{}{}:
+		case <-ctx.Done():
+			return
+		case <-time.After(5 * time.Second):
+			return // too busy to answer this one in time; the client retries
+		}
+		out := s.handle(ctx, req, client, local, "tcp")
 		<-s.inflight
 		if out == nil {
 			return
@@ -325,6 +331,19 @@ func (s *Server) allowed(a netip.Addr) bool {
 	return false
 }
 
+// handle calls Handle and turns a decoder bug on hostile input into one
+// unanswered query rather than an ended process: requests are bytes off the
+// network, and this is the server's only entry point for them.
+func (s *Server) handle(ctx context.Context, req []byte, client, local netip.Addr, proto string) (out []byte) {
+	defer func() {
+		if r := recover(); r != nil {
+			s.failed.Add(1)
+			s.log.Error("panic handling a DNS query", "err", r)
+		}
+	}()
+	return s.Handle(ctx, req, client, local, proto)
+}
+
 // Handle answers one query from client, received on local over proto (udp
 // or tcp). It returns nil when there is nothing to send: not a query, or a
 // refusal over the rate limit.
@@ -345,18 +364,18 @@ func (s *Server) Handle(ctx context.Context, req []byte, client, local netip.Add
 		if !s.limiter.allow(time.Now()) {
 			return nil
 		}
-		return reply(id0, id1, rd, dnsmessage.RCodeRefused, nil)
+		return reply(id0, id1, rd, dnsmessage.RCodeRefused, nil, false)
 	}
 	m, err := decode.ParseDNS(req)
 	if err != nil {
 		// A header we can read is owed an answer: the question was bad.
-		return reply(id0, id1, rd, dnsmessage.RCodeFormatError, nil)
+		return reply(id0, id1, rd, dnsmessage.RCodeFormatError, nil, false)
 	}
 	if m.Opcode != 0 {
-		return reply(id0, id1, rd, dnsmessage.RCodeNotImplemented, nil)
+		return reply(id0, id1, rd, dnsmessage.RCodeNotImplemented, nil, false)
 	}
 	if len(m.Questions) != 1 {
-		return reply(id0, id1, rd, dnsmessage.RCodeFormatError, nil)
+		return reply(id0, id1, rd, dnsmessage.RCodeFormatError, nil, false)
 	}
 	q := m.Questions[0]
 	s.queries.Add(1)
@@ -399,7 +418,7 @@ func (s *Server) Handle(ctx context.Context, req []byte, client, local netip.Add
 			s.failed.Add(1)
 			ev.RCode = "SERVFAIL"
 			s.record(ev, start)
-			return reply(id0, id1, rd, dnsmessage.RCodeServerFailure, &q)
+			return reply(id0, id1, rd, dnsmessage.RCodeServerFailure, &q, edns)
 		}
 		out = a
 		out[0], out[1] = id0, id1
@@ -409,7 +428,7 @@ func (s *Server) Handle(ctx context.Context, req []byte, client, local netip.Add
 		s.failed.Add(1)
 		ev.RCode = "SERVFAIL"
 		s.record(ev, start)
-		return reply(id0, id1, rd, dnsmessage.RCodeServerFailure, &q)
+		return reply(id0, id1, rd, dnsmessage.RCodeServerFailure, &q, edns)
 	}
 	// A name can hide behind another: tracker.example CNAME cdn.ads.example.
 	for _, rr := range am.Answers {
@@ -433,7 +452,7 @@ func (s *Server) Handle(ctx context.Context, req []byte, client, local netip.Add
 	}
 	s.record(ev, start)
 	if len(out) > limit {
-		return truncated(id0, id1, rd, q)
+		return truncated(id0, id1, rd, q, edns)
 	}
 	return out
 }
@@ -445,6 +464,22 @@ func boolKey(b bool) string {
 	return ""
 }
 
+// ednsSize is the UDP payload size advertised in a locally built reply's OPT
+// record: large enough for a normal answer, small enough not to invite
+// fragmentation.
+const ednsSize = 1232
+
+// addOPT echoes an OPT record into a locally built reply when the client sent
+// one (RFC 6891 says a responder SHOULD). It carries no options.
+func addOPT(b *dnsmessage.Builder) {
+	if err := b.StartAdditionals(); err != nil {
+		return
+	}
+	_ = b.OPTResource(dnsmessage.ResourceHeader{
+		Name: dnsmessage.MustNewName("."), Class: dnsmessage.Class(ednsSize),
+	}, dnsmessage.OPTResource{})
+}
+
 // refuse answers a blocked name as the block mode says, and records it.
 func (s *Server) refuse(ctx context.Context, ev *wire.DNS, start time.Time, id0, id1 byte, rd bool, q decode.Question, edns bool, by string) []byte {
 	s.blocked.Add(1)
@@ -452,14 +487,14 @@ func (s *Server) refuse(ctx context.Context, ev *wire.DNS, start time.Time, id0,
 	s.record(ev, start)
 	switch s.cfg.BlockMode {
 	case BlockNXDomain:
-		return reply(id0, id1, rd, dnsmessage.RCodeNameError, &q)
+		return reply(id0, id1, rd, dnsmessage.RCodeNameError, &q, edns)
 	case BlockRefused:
-		return reply(id0, id1, rd, dnsmessage.RCodeRefused, &q)
+		return reply(id0, id1, rd, dnsmessage.RCodeRefused, &q, edns)
 	}
 	b := builder(id0, id1, rd, dnsmessage.RCodeSuccess)
 	name, err := dnsmessage.NewName(fqdn(q.Name))
 	if err != nil {
-		return reply(id0, id1, rd, dnsmessage.RCodeNameError, &q)
+		return reply(id0, id1, rd, dnsmessage.RCodeNameError, &q, edns)
 	}
 	_ = b.StartQuestions()
 	_ = b.Question(dnsmessage.Question{Name: name, Type: dnsmessage.Type(q.Type), Class: dnsmessage.ClassINET})
@@ -471,9 +506,12 @@ func (s *Server) refuse(ctx context.Context, ev *wire.DNS, start time.Time, id0,
 	case 28:
 		_ = b.AAAAResource(h, dnsmessage.AAAAResource{})
 	}
+	if edns {
+		addOPT(b)
+	}
 	out, err := b.Finish()
 	if err != nil {
-		return reply(id0, id1, rd, dnsmessage.RCodeNameError, &q)
+		return reply(id0, id1, rd, dnsmessage.RCodeNameError, &q, edns)
 	}
 	return out
 }
@@ -493,14 +531,18 @@ func builder(id0, id1 byte, rd bool, rc dnsmessage.RCode) *dnsmessage.Builder {
 	return &b
 }
 
-// reply is an answer with no records: an error, or a refusal.
-func reply(id0, id1 byte, rd bool, rc dnsmessage.RCode, q *decode.Question) []byte {
+// reply is an answer with no records: an error, or a refusal. edns says the
+// client sent an OPT record, which the reply echoes.
+func reply(id0, id1 byte, rd bool, rc dnsmessage.RCode, q *decode.Question, edns bool) []byte {
 	b := builder(id0, id1, rd, rc)
 	if q != nil {
 		if name, err := dnsmessage.NewName(fqdn(q.Name)); err == nil {
 			_ = b.StartQuestions()
 			_ = b.Question(dnsmessage.Question{Name: name, Type: dnsmessage.Type(q.Type), Class: dnsmessage.Class(q.Class & 0x7fff)})
 		}
+	}
+	if edns {
+		addOPT(b)
 	}
 	out, err := b.Finish()
 	if err != nil {
@@ -510,8 +552,8 @@ func reply(id0, id1 byte, rd bool, rc dnsmessage.RCode, q *decode.Question) []by
 }
 
 // truncated says an answer was too big for UDP: ask again over TCP.
-func truncated(id0, id1 byte, rd bool, q decode.Question) []byte {
-	out := reply(id0, id1, rd, dnsmessage.RCodeSuccess, &q)
+func truncated(id0, id1 byte, rd bool, q decode.Question, edns bool) []byte {
+	out := reply(id0, id1, rd, dnsmessage.RCodeSuccess, &q, edns)
 	if len(out) > 2 {
 		out[2] |= 0x02 // TC
 	}
@@ -576,9 +618,13 @@ func (s *Server) recorder(ctx context.Context) {
 
 // Status says how it's doing.
 func (s *Server) Status() *model.DNSServerStatus {
+	queries, hits := s.queries.Load(), s.hits.Load()
 	st := &model.DNSServerStatus{Enabled: true, Listen: s.Addrs(), BlockMode: s.cfg.BlockMode,
-		Queries: s.queries.Load(), Blocked: s.blocked.Load(), CacheHits: s.hits.Load(), Refused: s.refused.Load(),
+		Queries: queries, Blocked: s.blocked.Load(), CacheHits: hits, Refused: s.refused.Load(),
 		Failed: s.failed.Load(), Cached: s.cache.len(), RulesAt: s.rulesAt.Load()}
+	if queries > 0 {
+		st.CacheHitRatio = float64(hits) / float64(queries)
+	}
 	if r := s.rules.Load(); r != nil {
 		st.Rules, st.ListEntries = r.Count, r.Entries
 	}

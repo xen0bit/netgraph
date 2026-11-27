@@ -1,10 +1,8 @@
 // The landing page: is everything reporting, what is new since the last visit,
 // who is here, who is busy. Drawn from GET /api/v1/home; every value that came
 // off the network goes through esc().
-import { esc, bytes, stamp, clock, ago, units } from "./util.js";
+import { esc, bytes, stamp, clock, ago, units, plural } from "./util.js";
 import { typeName } from "./devices.js";
-
-const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
 
 // status is the sentence at the top: never a colour alone.
 function status(h) {

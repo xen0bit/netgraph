@@ -1,8 +1,12 @@
 package sources
 
 import (
+	"bufio"
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/binary"
+	"fmt"
 	"net"
 	"net/netip"
 	"os"
@@ -394,10 +398,179 @@ func TestAdGuardLine(t *testing.T) {
 	if !ok || e.DNS.RCode != "NOERROR" {
 		t.Errorf("%+v", e)
 	}
+	// The file writes Reason as a number; that must not make the whole line unreadable.
+	e, ok = AdGuardLine(`{"T":"2026-10-25T12:00:00Z","QH":"ok.example","QT":"A","IP":"192.168.1.5","Result":{"IsFiltered":false,"Reason":0,"Rules":[]},"Elapsed":1000}`)
+	if !ok || e.DNS.RCode != "NOERROR" || e.DNS.LatencyMS != 0.001 {
+		t.Errorf("%+v", e)
+	}
 	for _, bad := range []string{"", "{", `{"QH":"x"}`, `{"T":"2026-10-25T12:00:00Z","QH":"x","IP":"nope"}`, `{"T":"2026-10-25T12:00:00Z","QH":"a b","IP":"1.1.1.1"}`} {
 		if _, ok := AdGuardLine(bad); ok {
 			t.Errorf("%q was accepted", bad)
 		}
+	}
+}
+
+func dnsNameBytes(name string) []byte {
+	var b []byte
+	for _, label := range strings.Split(strings.TrimSuffix(name, "."), ".") {
+		if label == "" || len(label) > 63 {
+			continue
+		}
+		b = append(b, byte(len(label)))
+		b = append(b, label...)
+	}
+	return append(b, 0)
+}
+
+func dnsRR(name []byte, typ uint16, ttl uint32, data []byte) []byte {
+	b := append([]byte{}, name...)
+	b = be16(b, typ)
+	b = be16(b, 1) // IN
+	b = be32(b, ttl)
+	b = be16(b, uint16(len(data)))
+	return append(b, data...)
+}
+
+func dnsAnswerPacket(rcode byte, qname string, answers ...[]byte) []byte {
+	b := be16(nil, 0x1234)
+	b = be16(b, 0x8180|uint16(rcode))
+	b = be16(b, 1)
+	b = be16(b, uint16(len(answers)))
+	b = be16(b, 0)
+	b = be16(b, 0)
+	b = append(b, dnsNameBytes(qname)...)
+	b = be16(b, 1) // A
+	b = be16(b, 1) // IN
+	for _, a := range answers {
+		b = append(b, a...)
+	}
+	return b
+}
+
+// AdGuard's Answer is a base64 DNS message. Its records, including a CNAME chain,
+// must come through as the same Answers a dnsmasq log gives.
+func TestAdGuardLineAnswers(t *testing.T) {
+	chain := [][]byte{
+		dnsRR([]byte{0xc0, 0x0c}, 5, 300, dnsNameBytes("cdn.example.net")),
+		dnsRR(dnsNameBytes("cdn.example.net"), 5, 200, dnsNameBytes("edge.example.org")),
+		dnsRR(dnsNameBytes("edge.example.org"), 1, 60, netip.MustParseAddr("93.184.216.34").AsSlice()),
+	}
+	raw := dnsAnswerPacket(0, "www.example.com", chain...)
+	line := fmt.Sprintf(`{"T":"2026-10-25T12:00:00Z","QH":"www.example.com","QT":"A","QC":"IN","CP":"","Answer":%q,"Upstream":"tls://1.1.1.1","Elapsed":2500000,"Result":{"IsFiltered":false},"IP":"192.168.1.5"}`, base64.StdEncoding.EncodeToString(raw))
+	e, ok := AdGuardLine(line)
+	if !ok || e.DNS == nil {
+		t.Fatalf("%+v, %v", e, ok)
+	}
+	if e.DNS.QName != "www.example.com" || e.DNS.Client.String() != "192.168.1.5" || e.DNS.RCode != "NOERROR" || e.DNS.LatencyMS != 2.5 {
+		t.Errorf("%+v", e.DNS)
+	}
+	want := []wire.Answer{
+		{Name: "www.example.com", Type: "CNAME", TTL: 300, Data: "cdn.example.net"},
+		{Name: "cdn.example.net", Type: "CNAME", TTL: 200, Data: "edge.example.org"},
+		{Name: "edge.example.org", Type: "A", TTL: 60, Data: "93.184.216.34"},
+	}
+	if !slices.Equal(e.DNS.Answers, want) {
+		t.Errorf("answers %+v, want %+v", e.DNS.Answers, want)
+	}
+
+	// A blocked lookup's answer is the filter's 0.0.0.0, which says nothing
+	// about the name.
+	sink := dnsAnswerPacket(0, "tracker.example", dnsRR([]byte{0xc0, 0x0c}, 1, 10, []byte{0, 0, 0, 0}))
+	line = fmt.Sprintf(`{"T":"2026-10-25T12:00:00Z","QH":"tracker.example","QT":"A","Answer":%q,"Result":{"IsFiltered":true,"Reason":3},"IP":"192.168.1.5"}`, base64.StdEncoding.EncodeToString(sink))
+	if e, ok := AdGuardLine(line); !ok || e.DNS.RCode != RCodeBlocked || len(e.DNS.Answers) != 0 {
+		t.Errorf("blocked: %+v, %v", e.DNS, ok)
+	}
+}
+
+// Live, a line timed far from the clock is placed now, as dnsmasq's are;
+// history keeps it. AdGuard writes late by design, so its time stands.
+func TestLogParserClampsLiveTimes(t *testing.T) {
+	old := "[1621847131] unbound[1:0] info: 192.168.1.5 a.example. A IN NOERROR 0.001 0 74"
+	if evs := newLogParser("unbound", false).Line(old); len(evs) != 1 || time.Since(evs[0].TS) > time.Minute {
+		t.Errorf("live unbound: %+v", evs)
+	}
+	if evs := newLogParser("unbound", true).Line(old); len(evs) != 1 || evs[0].TS.Unix() != 1621847131 {
+		t.Errorf("history unbound: %+v", evs)
+	}
+	ag := `{"T":"2021-05-24T09:05:31Z","QH":"a.example","QT":"A","IP":"192.168.1.5"}`
+	if evs := newLogParser("adguard", false).Line(ag); len(evs) != 1 || evs[0].TS.Year() != 2021 {
+		t.Errorf("live adguard: %+v", evs)
+	}
+}
+
+// The API's JSON shape names fields in lower case and gives elapsedMs as a string.
+func TestAdGuardLineAPIShape(t *testing.T) {
+	line := `{"time":"2026-10-25T12:00:00Z","question":{"name":"www.example.com","type":"A"},"answer":[{"type":"CNAME","value":"cdn.example.net.","ttl":300},{"type":"A","value":"93.184.216.34","ttl":60}],"elapsedMs":"2.5","upstream":"tls://1.1.1.1","client":"192.168.1.5"}`
+	e, ok := AdGuardLine(line)
+	if !ok || e.DNS == nil {
+		t.Fatalf("%+v, %v", e, ok)
+	}
+	if e.DNS.QName != "www.example.com" || e.DNS.QType != "A" || !e.TS.Equal(rx) || e.DNS.LatencyMS != 2.5 {
+		t.Errorf("%+v", e.DNS)
+	}
+	want := []wire.Answer{
+		{Name: "www.example.com", Type: "CNAME", TTL: 300, Data: "cdn.example.net"},
+		{Name: "www.example.com", Type: "A", TTL: 60, Data: "93.184.216.34"},
+	}
+	if !slices.Equal(e.DNS.Answers, want) {
+		t.Errorf("answers %+v, want %+v", e.DNS.Answers, want)
+	}
+}
+
+func TestUnboundLine(t *testing.T) {
+	e, ok := UnboundLine("Oct 25 12:00:00 host unbound[1:0]: info: 192.168.1.5 Example.COM. A IN NOERROR 0.012 0 74")
+	if !ok || e.DNS == nil {
+		t.Fatalf("%+v, %v", e, ok)
+	}
+	if e.DNS.Client.String() != "192.168.1.5" || e.DNS.QName != "example.com" || e.DNS.QType != "A" || e.DNS.RCode != "NOERROR" || e.DNS.LatencyMS != 12 {
+		t.Errorf("%+v", e.DNS)
+	}
+	e, ok = UnboundLine("info: 192.168.1.6 nx.example AAAA IN NXDOMAIN")
+	if !ok || e.DNS.RCode != "NXDOMAIN" || e.DNS.Client.String() != "192.168.1.6" {
+		t.Errorf("%+v, %v", e, ok)
+	}
+	e, ok = UnboundLine("[1793232000] unbound[1:0] info: 192.168.1.7 old.example A IN NOERROR 0.002")
+	if !ok || !e.TS.Equal(time.Unix(1793232000, 0)) {
+		t.Errorf("%+v, %v", e, ok)
+	}
+	for _, bad := range []string{"", "info:", "info: not-an-address example.com A IN NOERROR 0.1", "nothing here"} {
+		if _, ok := UnboundLine(bad); ok {
+			t.Errorf("%q was accepted", bad)
+		}
+	}
+}
+
+func TestBindLine(t *testing.T) {
+	e, ok := BindLine("Oct 25 12:00:00 host named[1]: client @0x7f 192.168.1.5#1234 (Example.COM): query: Example.COM IN A + (192.168.1.1)")
+	if !ok || e.DNS == nil {
+		t.Fatalf("%+v, %v", e, ok)
+	}
+	if e.DNS.Client.String() != "192.168.1.5" || e.DNS.QName != "example.com" || e.DNS.QType != "A" || e.DNS.RCode != RCodeUnknown {
+		t.Errorf("%+v", e.DNS)
+	}
+	e, ok = BindLine("client 192.168.1.6#5353: query: a.example IN AAAA - (192.168.1.1)")
+	if !ok || e.DNS.Client.String() != "192.168.1.6" || e.DNS.QType != "AAAA" {
+		t.Errorf("%+v, %v", e, ok)
+	}
+	e, ok = BindLine("25-Oct-2026 12:00:00.000 queries: info: client 192.168.1.7#5353 (a.example): query: a.example IN A + (192.168.1.1)")
+	if !ok || !e.TS.Equal(time.Date(2026, 10, 25, 12, 0, 0, 0, time.Local)) || e.DNS.Client.String() != "192.168.1.7" {
+		t.Errorf("%+v, %v", e, ok)
+	}
+	for _, bad := range []string{"", "client", "client not-an-address#1: query: a.example IN A", "client 192.168.1.5#1: something: a.example IN A"} {
+		if _, ok := BindLine(bad); ok {
+			t.Errorf("%q was accepted", bad)
+		}
+	}
+}
+
+func TestValidDNSLogFormats(t *testing.T) {
+	for _, f := range []string{"", "dnsmasq", "pihole", "adguard", "unbound", "bind"} {
+		if !ValidDNSLogFormat(f) {
+			t.Errorf("%q is not accepted", f)
+		}
+	}
+	if ValidDNSLogFormat("other") {
+		t.Error("an unknown format was accepted")
 	}
 }
 
@@ -406,6 +579,10 @@ func FuzzDNSLogs(f *testing.F) {
 	f.Add("Oct 25 12:00:00 dnsmasq[1]: reply a.example is 1.2.3.4")
 	f.Add("Oct 25 12:00:00 dnsmasq[1]: gravity blocked a.example is 0.0.0.0")
 	f.Add(`{"T":"2026-10-25T12:00:00Z","QH":"a","IP":"1.1.1.1"}`)
+	f.Add(`{"T":"2026-10-25T12:00:00Z","QH":"a","IP":"1.1.1.1","Answer":"AAAAAAABAAEAAAAAB2V4YW1wbGUDb3JnAAABAAEHZXhhbXBsZQNvcmcAAAEAAQAAAAAABAECAwQ="}`)
+	f.Add("Oct 25 12:00:00 host unbound[1:0]: info: 1.1.1.1 a.example A IN NOERROR 0.001 0 74")
+	f.Add("Oct 25 12:00:00 host named[1]: client @0x7f 1.1.1.1#1 (a.example): query: a.example IN A + (1.1.1.1)")
+	f.Add("<165>1 2026-10-25T12:00:00Z host app 1 id - a message")
 	f.Fuzz(func(t *testing.T, line string) {
 		l := newLog()
 		for range 3 {
@@ -413,7 +590,22 @@ func FuzzDNSLogs(f *testing.F) {
 		}
 		l.Close()
 		AdGuardLine(line)
+		UnboundLine(line)
+		BindLine(line)
+		stripLogHeader(line, rx)
 		ParseDNSMasqLeases(line)
+	})
+}
+
+func FuzzSyslogHeader(f *testing.F) {
+	f.Add("Oct 25 12:00:00 host dnsmasq[1]: query[A] a.example from 1.1.1.1")
+	f.Add("<165>1 2026-10-25T12:00:00Z host app 1 id - a message")
+	f.Add("<34>1 2026-10-25T12:00:00Z host app 1 id [x a=\"b\"] message")
+	f.Fuzz(func(t *testing.T, line string) {
+		_, msg := stripLogHeader(line, rx)
+		if len(msg) > len(line) {
+			t.Fatalf("message grew to %d from %d", len(msg), len(line))
+		}
 	})
 }
 
@@ -431,6 +623,32 @@ func TestLeases(t *testing.T) {
 	evs := LeaseEvents(got[0], rx)
 	if len(evs) != 2 || evs[0].DHCP.MsgType != "ACK" || evs[0].DHCP.YourIP != got[0].IP || evs[0].DHCP.LeaseSecs == 0 || evs[1].Binding.IP != got[0].IP {
 		t.Errorf("%+v", evs)
+	}
+}
+
+// dnsmasq's IPv6 lease lines have no MAC: the second field is an IAID or DUID.
+func TestDNSMasqLeases6(t *testing.T) {
+	text := "duid 00:01:00:01:aa:bb:cc:dd\n" +
+		"1793232000 3c:22:fb:01:02:03 192.168.1.5 v4 *\n" +
+		"1793232000 1234 2001:db8::5 nas *\n" +
+		"1793232000 00:01:00:01:aa:bb:cc:dd 2001:db8::6 tv 00:01\n" +
+		"1793232000 T42 2001:db8::7 phone *\n" +
+		"1793232000 duid 00:01:00:01:aa:bb:cc:dd 2001:db8::8 marked *\n" +
+		"1793232000 not-a-duid 2001:db8::9 bad *\n"
+	got := ParseDNSMasqLeases(text)
+	if len(got) != 5 {
+		t.Fatalf("%+v", got)
+	}
+	if got[0].MAC != "3c:22:fb:01:02:03" || got[0].IP.String() != "192.168.1.5" || got[0].Hostname != "v4" {
+		t.Errorf("v4 changed: %+v", got[0])
+	}
+	for i, want := range []struct{ ip, host string }{
+		{"2001:db8::5", "nas"}, {"2001:db8::6", "tv"}, {"2001:db8::7", "phone"}, {"2001:db8::8", "marked"},
+	} {
+		l := got[i+1]
+		if l.MAC != "" || l.IP.String() != want.ip || l.Hostname != want.host || l.Expires.IsZero() {
+			t.Errorf("v6 %d: %+v", i, l)
+		}
 	}
 }
 
@@ -514,6 +732,153 @@ func TestNetFlowRefusesStrangers(t *testing.T) {
 	if err := (&NetFlow{Listen: "127.0.0.1:0", Sink: c.sink}).Run(ctx); err == nil {
 		t.Error("it ran with nobody allowed")
 	}
+}
+
+func TestSyslogListener(t *testing.T) {
+	c := &collected{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ready := make(chan string, 1)
+	cfg := SyslogConfig{
+		Addr:   "127.0.0.1:0",
+		Allow:  []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")},
+		Format: "dnsmasq",
+		Ready:  func(a string) { ready <- a },
+	}
+	go func() { _ = RunSyslog(ctx, cfg, c.sink) }()
+	conn, err := net.Dial("udp", <-ready)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	// Stale timestamps make the lookup old enough for the parser to complete it
+	// on the reply line, without waiting for the patience timer.
+	q := time.Now().Add(-10 * time.Second).Format("Jan _2 15:04:05")
+	r := time.Now().Add(-4 * time.Second).Format("Jan _2 15:04:05")
+	if _, err := conn.Write([]byte(q + " host dnsmasq[1]: query[A] sys.example from 192.168.1.5\n" +
+		r + " host dnsmasq[1]: reply sys.example is 1.2.3.4\n")); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the lookup", func() bool { return c.count(wire.TypeDNS) >= 1 })
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, e := range c.evs {
+		if e.DNS != nil {
+			if e.DNS.QName != "sys.example" || e.DNS.Client.String() != "192.168.1.5" || len(e.DNS.Answers) != 1 || e.DNS.Answers[0].Data != "1.2.3.4" {
+				t.Errorf("%+v", e.DNS)
+			}
+			return
+		}
+	}
+	t.Fatal("no lookup event")
+}
+
+func TestSyslogRefusesStrangers(t *testing.T) {
+	c := &collected{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ready := make(chan string, 1)
+	cfg := SyslogConfig{
+		Addr:   "127.0.0.1:0",
+		Allow:  []netip.Prefix{netip.MustParsePrefix("10.9.9.0/24")},
+		Format: "dnsmasq",
+		Ready:  func(a string) { ready <- a },
+	}
+	go func() { _ = RunSyslog(ctx, cfg, c.sink) }()
+	conn, err := net.Dial("udp", <-ready)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	stamp := time.Now().Format("Jan _2 15:04:05")
+	_, _ = conn.Write([]byte(stamp + " host dnsmasq[1]: query[A] nope.example from 192.168.1.5\n"))
+	time.Sleep(250 * time.Millisecond)
+	if n := c.count(wire.TypeDNS); n != 0 {
+		t.Errorf("%d lookups from a stranger", n)
+	}
+	if err := RunSyslog(ctx, SyslogConfig{Addr: "127.0.0.1:0", Format: "dnsmasq"}, c.sink); err == nil {
+		t.Error("it ran with nobody allowed")
+	}
+}
+
+func TestSyslogOversizedDatagram(t *testing.T) {
+	c := &collected{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ready := make(chan string, 1)
+	cfg := SyslogConfig{
+		Addr:   "127.0.0.1:0",
+		Allow:  []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")},
+		Format: "dnsmasq",
+		Ready:  func(a string) { ready <- a },
+	}
+	go func() { _ = RunSyslog(ctx, cfg, c.sink) }()
+	conn, err := net.Dial("udp", <-ready)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	stamp := time.Now().Format("Jan _2 15:04:05")
+	line := stamp + " host dnsmasq[1]: reply big.example is 1.2.3.4"
+	_, _ = conn.Write([]byte(line + strings.Repeat("x", maxSyslogDatagram)))
+	time.Sleep(250 * time.Millisecond)
+	if n := c.count(wire.TypeDNS); n != 0 {
+		t.Errorf("%d lookups from an oversized datagram", n)
+	}
+}
+
+func TestIPFIXTCP(t *testing.T) {
+	first := ipfixMsg(append(templateSet(2, 300, flowFields()), dataSet(300)...))
+	second := ipfixMsg(dataSet(300))
+	// RFC 7011 §10.4: messages back to back, each framed by its own header.
+	stream := append(append([]byte(nil), first...), second...)
+	c := &collected{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ready := make(chan string, 1)
+	s := &IPFIXTCP{Listen: "127.0.0.1:0", Allow: []netip.Prefix{netip.MustParsePrefix("127.0.0.0/8")}, Sink: c.sink, Ready: func(a string) { ready <- a }}
+	go func() { _ = s.Run(ctx) }()
+	conn, err := net.Dial("tcp", <-ready)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write(stream); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the flows", func() bool { return c.count(wire.TypeFlow) == 2 })
+}
+
+func TestReadIPFIXMessageRejectsBadLengths(t *testing.T) {
+	for name, b := range map[string][]byte{
+		"zero":         be16(nil, 0),
+		"not ipfix":    be16(be16(nil, 9), 60),
+		"short header": be16(nil, 10),
+		"too short":    be16(be16(nil, 10), 15),
+	} {
+		if _, err := readIPFIXMessage(bufio.NewReader(bytes.NewReader(b))); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
+	}
+}
+
+func FuzzReadIPFIXMessage(f *testing.F) {
+	first := ipfixMsg(append(templateSet(2, 300, flowFields()), dataSet(300)...))
+	f.Add(first)
+	f.Add(append(append([]byte(nil), first...), first...))
+	f.Add(be16(nil, 0))
+	f.Fuzz(func(t *testing.T, b []byte) {
+		r := bufio.NewReader(bytes.NewReader(b))
+		for range 4 {
+			msg, err := readIPFIXMessage(r)
+			if err != nil {
+				return
+			}
+			if len(msg) > maxIPFIXMessage {
+				t.Fatalf("%d bytes", len(msg))
+			}
+		}
+	})
 }
 
 // The file: only what's new, across rotation and truncation, and through it being away.
@@ -711,10 +1076,12 @@ func FuzzLeases(f *testing.F) {
 	f.Add(iscFile)
 	f.Add(keaFile)
 	f.Add("1793232000 aa:bb:cc:dd:ee:ff 10.0.0.1 host *\n")
+	f.Add("duid 00:01:00:01:aa:bb:cc:dd\n1793232000 1234 2001:db8::5 nas *\n1793232000 duid 00:01:00:01:aa:bb:cc:dd 2001:db8::6 tv *\n")
 	f.Fuzz(func(t *testing.T, s string) {
 		for _, format := range []string{"dnsmasq", "isc", "kea"} {
 			for _, l := range ParseLeases(format, s) {
-				if !l.IP.IsValid() || l.MAC == "" || len(l.Hostname) > 253 {
+				// A DHCPv6 lease from dnsmasq has no MAC.
+				if !l.IP.IsValid() || (l.MAC == "" && !l.IP.Is6()) || len(l.Hostname) > 253 {
 					t.Fatalf("%s: %+v", format, l)
 				}
 				LeaseEvents(l, rx)

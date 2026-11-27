@@ -5,12 +5,12 @@ package main
 import (
 	"context"
 	"fmt"
-	"net/netip"
 	"os"
 	"time"
 
 	"github.com/xen0bit/netgraph/internal/agent"
 	"github.com/xen0bit/netgraph/internal/agent/darwin"
+	"github.com/xen0bit/netgraph/internal/agent/enforce"
 )
 
 // defaultInterval is how often the agent scans: each scan runs lsof and ps.
@@ -26,7 +26,7 @@ func newScanner(cmdlines bool, events string, _ func(string, ...any)) (agent.Sca
 // macOS reports and predicts only: enforcing would need pf or a Network
 // Extension, and netgraph changes no firewall it doesn't own.
 // A variable, so main's error check isn't "always true" to staticcheck here.
-var newEnforcer = func(mode, _ string, _ bool, _ []netip.Addr) (agent.Enforcer, error) {
+var newEnforcer = func(mode, _ string, _ bool, _ *enforce.Protect) (agent.Enforcer, error) {
 	return nil, fmt.Errorf("-enforce %q: macOS agents observe only; use -enforce=off", mode)
 }
 

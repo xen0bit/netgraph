@@ -420,6 +420,16 @@ func TestMetrics(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("/metrics: %d", code)
 	}
+	// Prometheus sends a bearer token (authorization.credentials_file); a
+	// token in the URL would end up in proxy and access logs.
+	resp, err := http.Get(srv.URL + "/metrics?token=rd-tok")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Errorf("/metrics?token=: %s, want 401", resp.Status)
+	}
 	sample := regexp.MustCompile(`^[a-zA-Z_:][a-zA-Z0-9_:]*(\{([a-zA-Z_][a-zA-Z0-9_]*="([^"\\]|\\.)*",?)*\})? -?[0-9.eE+-]+$`)
 	types := map[string]bool{}
 	for _, line := range strings.Split(strings.TrimSpace(body), "\n") {

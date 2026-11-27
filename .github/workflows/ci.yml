@@ -6,6 +6,9 @@ on:
   # Every pull request, including stacked ones based on another branch.
   pull_request:
   workflow_dispatch:
+  # Weekly fuzz run; too slow for every pull request.
+  schedule:
+    - cron: '0 4 * * 0'
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -80,6 +83,49 @@ jobs:
           go install golang.org/x/vuln/cmd/govulncheck@latest
           "$(go env GOPATH)/bin/govulncheck" ./...
 
+  # The agent's BPF objects are checked in so building it needs no clang.
+  # This compiles src/conn.c and checks that the source the objects were built
+  # from hasn't changed without `make bpf` (a recorded source hash), plus the C
+  # and Go struct layouts. Objects aren't compared byte for byte: a compiler or
+  # header update would fail that for no reason.
+  bpf:
+    name: bpf objects
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Compile src/conn.c for both endiannesses
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang libbpf-dev linux-libc-dev
+          # Debian and Ubuntu keep asm/types.h under the multiarch triplet,
+          # which the BPF target does not search itself.
+          inc="-I/usr/include/$(gcc -dumpmachine)"
+          cd internal/agent/linux/bpf/src
+          for e in el eb; do
+            clang $inc -O2 -g -Wall -Werror -target bpf$e -c conn.c -o /tmp/conn_bpf$e.o
+          done
+      - name: Object layout and source pin
+        # eventSize matches struct event (with a C _Static_assert of the same
+        # size), and conn.c's hash matches the one make bpf recorded. Objects
+        # are not compared byte for byte: that depends on the clang and header
+        # versions, and a rebuilt Docker image would fail it for no reason.
+        run: go test ./internal/agent/linux/bpf/
+
+  # Seed corpora live in each package's testdata/fuzz and run in the normal
+  # test job; here every target is fuzzed for a bounded time. Scheduled and
+  # dispatch only: sixty seconds times dozens of targets is too slow for a PR.
+  fuzz:
+    name: fuzz (scheduled)
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with:
+          go-version: "1.27"
+          cache: true
+      - run: make fuzz FUZZTIME=60s
+
   # The host agent on the platforms nobody builds the rest for: each
   # scanner's live test opens a connection and expects to see it, with its
   # own process, from the real lsof/ps (macOS) or TCP table (Windows).
@@ -130,6 +176,7 @@ jobs:
           go-version: "1.27"
           cache: true
       - run: make cross
+      - run: make test32
       - name: Build the web UI and ASN table, and the server that embeds them
         run: |
           make web.build asn.fetch

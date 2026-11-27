@@ -4,6 +4,7 @@
 // cannot inject anything here; the DOM parts use textContent.
 import { layout } from "./layout.js";
 import { icon, iconFor } from "./icons.js";
+import { bytes } from "../util.js";
 
 const FADE_MS = 450;
 const MOVE_MS = 500;
@@ -37,14 +38,6 @@ const PALETTES = {
 const ease = (t) => 1 - (1 - t) ** 3;
 const clamp = (v, a, b) => Math.min(Math.max(v, a), b);
 const edgeKey = (e) => `${e.from}\u0000${e.to}\u0000${e.rel}`;
-export const humanBytes = (n) => {
-  n = Number(n || 0);
-  if (n < 1000) return `${n}B`;
-  const u = ["kB", "MB", "GB", "TB", "PB"];
-  let i = -1;
-  do { n /= 1000; i++; } while (n >= 1000 && i < u.length - 1);
-  return `${n >= 100 ? n.toFixed(0) : n.toFixed(1)}${u[i]}`;
-};
 
 const trunc = (s, n) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
@@ -680,7 +673,7 @@ export class LivingMap {
     this.tipLines([
       ["tip-title", n.label],
       ["tip-sub", n.sub],
-      ["", n.bytes_out || n.bytes_in ? `sent ${humanBytes(n.bytes_out)} · received ${humanBytes(n.bytes_in)}` : ""],
+      ["", n.bytes_out || n.bytes_in ? `sent ${bytes(n.bytes_out)} · received ${bytes(n.bytes_in)}` : ""],
       ["tip-sub", a.serves ? `serves ${a.serves}` : ""],
       ["tip-alert", a.anomalies],
     ]);
@@ -690,7 +683,7 @@ export class LivingMap {
   showEdgeTip(e, px, py) {
     const lines = [["tip-title", edgeTitle(e)]];
     if (e.ports?.length) lines.push(["", e.ports.join(", ")]);
-    if (e.bytes_out || e.bytes_in) lines.push(["", `up ${humanBytes(e.bytes_out)} · down ${humanBytes(e.bytes_in)}`]);
+    if (e.bytes_out || e.bytes_in) lines.push(["", `up ${bytes(e.bytes_out)} · down ${bytes(e.bytes_in)}`]);
     if (e.count) lines.push(["tip-sub", `${e.count} ${e.rel === "connects" ? "connections" : "times"}${e.peak ? `, peak ${e.peak} open` : ""}`]);
     if (e.opened || e.closed || e.carried) lines.push(["tip-sub", [e.carried && `${e.carried} carried`, e.opened && `${e.opened} opened`, e.closed && `${e.closed} closed`].filter(Boolean).join(" · ")]);
     if (e.attrs?.anomalies) lines.push(["tip-alert", e.attrs.anomalies]);
@@ -827,7 +820,7 @@ export class LivingMap {
       // A label only when there is room to read it.
       if ((s > 1.15 || d === hoverEdge) && d.data && !d.dashed && d.data.ports?.length) {
         const mx = 0.25 * c.ax + 0.5 * c.cx + 0.25 * c.bx, my = 0.25 * c.ay + 0.5 * c.cy + 0.25 * c.by;
-        const text = `${d.data.ports.slice(0, 2).join(", ")}  ↑${humanBytes(d.data.bytes_out)} ↓${humanBytes(d.data.bytes_in)}`;
+        const text = `${d.data.ports.slice(0, 2).join(", ")}  ↑${bytes(d.data.bytes_out)} ↓${bytes(d.data.bytes_in)}`;
         g.globalAlpha = dim ? 0.2 : 1;
         g.font = FONT_SMALL;
         const tw = g.measureText(text).width;

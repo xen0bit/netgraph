@@ -1,6 +1,7 @@
 // Package sources turns what other systems already know into netgraph's events:
-// NetFlow, IPFIX and sFlow from a router, DNS logs from dnsmasq, Pi-hole and AdGuard Home, and
-// a DHCP server's leases. They run on the server, so the sensor stays small.
+// NetFlow, IPFIX (over UDP or TCP) and sFlow from a router, DNS logs from dnsmasq,
+// Pi-hole, AdGuard Home, Unbound and BIND (from a file or syslog), and a DHCP
+// server's leases. They run on the server, so the sensor stays small.
 //
 // All of it is input from outside. Decoders are pure functions that bound every length
 // and never loop on what a packet claims, as the sensor's do.
