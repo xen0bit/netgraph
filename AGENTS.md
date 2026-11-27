@@ -77,13 +77,17 @@ that are easy to break.
   blocklist or a person's DNS rule matched (no default blocking), and never touches a firewall.
   Requests are bytes off the network: bound them and keep `FuzzHandle` passing. Upstream URLs
   are read from a file or the environment and shown by scheme and host only.
-- **netgraph never touches a firewall** — with one opt-in exception. `internal/policy` only reads and writes text.
+- **netgraph never touches a firewall** — with two opt-in exceptions. `internal/policy` only reads and writes text.
   The optional host agent (`netgraph-agent -enforce=nftables -apply`) may change its own host's
   firewall, and only in one table it owns and replaces whole: it drops only what an explicit,
   host-wide deny rule matched (never a default, never a rule for one program, never the server's
   address), dry-runs unless `-apply`, and removes its table on exit. An export
   is built from what's parsed or reduced to a safe alphabet, so a hostname can't add a rule, and
   anything it can't express is commented out and warned about: a dropped deny is a hole.
+  The second is `netgraph-edge`, whose listeners with `"setup_nat"` address their TUN, enable
+  forwarding and NAT the tunnel subnet out of the named WAN, with iptables rules tagged with the
+  listener's name and removed when it stops (`vpn/internal/hostnet`, through the supervisor). It
+  installs nothing else, and nothing the server sends can change that.
 - **The archive follows erasure.** `internal/archive` holds what retention would delete, and
   `db forget` and `db purge` rewrite it, finding it from the database (`archive_location`). Retention
   only deletes what's safely in a file. Its rows carry no database ids, as those rows will be gone.
@@ -115,22 +119,32 @@ that are easy to break.
   the sender. DNS names prefer the lookup the connection's own SNI/Host
   names. Keep it that way: the lab caught each of these going wrong.
 
-## vpn/ and the edge (proposed)
+## vpn/ and the edge
 
-`vpn/` is veepin, merged with its history, on the way to a `netgraph-edge`
-appliance role. `vpn/AGENTS.md` holds the protocol rules (both roles, interop
-against a real peer, parsers return subslices, a peer's address moves only on an
-authenticated packet) and applies inside `vpn/`. Until an edge exists, nothing
-outside `vpn/` imports it, and it imports only the standard library and
-`golang.org/x/{crypto,net,sys}` (`vpn/deps_test.go`).
+`vpn/` is veepin, merged with its history: sixteen VPN protocols, client and
+server. `vpn/AGENTS.md` holds the protocol rules (both roles, interop against a
+real peer, parsers return subslices, a peer's address moves only on an
+authenticated packet) and applies inside `vpn/`. It imports only the standard
+library and `golang.org/x/{crypto,net,sys}` (`vpn/deps_test.go`). Outside
+`vpn/`, only `internal/edge` and `cmd/netgraph-edge` import it, and the edge
+never links `vpn/toy` (`cmd/netgraph-edge/deps_test.go`).
+
+**`netgraph-edge` attributes by evidence, as the store does.** A server
+reports a session (`client.SessionReporter`) only once its handshake has proved
+an identity, under that identity, with the inner prefixes it holds. The store
+attributes a flow to a session only on the edge that reported it, by address and
+time (`[start, end)`, at the flow interval's start). It never guesses from a
+name, and never attributes across sensors. A protocol that doesn't report sessions is
+captured but not attributed, and the edge says so once.
 
 Planned, not yet in force: an edge is a separate binary from the sensor. Only
 the edge and the opt-in host agent may touch a firewall, each in tables it
 owns. An edge applies only config signed by its enrolled controller,
 commit-confirmed so a bad push rolls itself back. Nothing past TLS and a
 protocol's own handshake is reachable before authentication. AI stays read-only
-over all of it. These rules replace the matching invariants above when the edge
-lands, and not before.
+over all of it. These rules replace the matching invariants above when that
+config arrives, and not before; today an edge's listeners are files on its own
+disk.
 
 ## Checks before a commit
 
@@ -143,6 +157,7 @@ make cross        # when touching dependencies or the sensor
 make browser      # when touching the web UI
 make lab          # when touching capture, decoding, ingest, queries or the web UI
 make vpn.interop VPN_RUN='<cells>'  # when touching vpn/ protocols (Docker)
+make edge.lab     # when touching the edge, vpn/ sessions or their ingest (Docker)
 ```
 
 `make test` also runs `go test ./vpn/...` a second time without `-race`, for

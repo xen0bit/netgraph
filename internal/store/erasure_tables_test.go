@@ -50,6 +50,7 @@ var tableErasure = map[string]string{
 	"agent_processes":   "retention (raw), purge; a host's processes, which no MAC names, so forget can't find them",
 	"agent_connections": "retention (raw), purge; a host's sockets, which no MAC names, so forget can't find them",
 	"dns_rules":         "configuration a person wrote: purge leaves it; forget deletes the rules for that device's MAC",
+	"vpn_sessions":      "retention (raw), purge; a VPN user's sessions, which no MAC names, so forget can't find them",
 }
 
 func TestEveryTableHasAnErasureDecision(t *testing.T) {

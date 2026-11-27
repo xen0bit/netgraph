@@ -454,6 +454,8 @@ func estimateEventSize(ev Event) int {
 		n += len(ev.DHCP.Hostname) + len(ev.DHCP.FQDN) + len(ev.DHCP.VendorClass) + len(ev.DHCP.ClientID)
 	case ev.LLDP != nil:
 		n += len(ev.LLDP.SystemName) + len(ev.LLDP.SystemDesc) + len(ev.LLDP.PortDesc)
+	case ev.VPNSession != nil:
+		n += len(ev.VPNSession.Listener) + len(ev.VPNSession.User) + len(ev.VPNSession.Name) + 48*len(ev.VPNSession.Addrs)
 	}
 	return n
 }

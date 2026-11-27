@@ -110,6 +110,11 @@ type Manager struct {
 	// the server half.
 	run hostnet.Commander
 
+	// onStart and onStop, set by SetHooks, let an embedder follow listeners
+	// as they come and go: netgraph-edge hooks each server's sessions and
+	// captures its TUN. Nil means nobody is watching.
+	onStart, onStop func(ListenerConfig, client.Server)
+
 	mu        sync.Mutex // guards listeners map and closed
 	listeners map[string]*running
 	// closed is latched by Close. Apply and Rebuild refuse afterwards, so a
@@ -197,6 +202,20 @@ func NewManager(dir string, logger *vlog.Logger, ctor Constructor) *Manager {
 // "Before Apply" is the real contract, and it is one a caller can keep.
 func (m *Manager) SetCommander(run hostnet.Commander) {
 	m.run = run
+}
+
+// SetHooks installs functions called as each listener's server starts and
+// stops. onStart runs after the server is constructed and its host
+// networking installed, and before ListenAndServe, so it may set a
+// client.SessionReporter's hook or open a capture on the TUN, which has its
+// address by then. onStop runs once Close has returned (or the listener was
+// abandoned), before its host networking is taken down.
+//
+// Either may run with the manager's lock held, so neither may call back into
+// the Manager, and neither should block. Call it before Apply, and only then,
+// for the reason SetCommander gives.
+func (m *Manager) SetHooks(onStart, onStop func(ListenerConfig, client.Server)) {
+	m.onStart, m.onStop = onStart, onStop
 }
 
 // applyHostnet installs a listener's host networking through whichever commander
@@ -747,6 +766,9 @@ func (m *Manager) start(r *running, cfg ListenerConfig) error {
 	r.cfg, r.srv, r.state, r.since, r.serveErr, r.done =
 		cfg, srv, "running", time.Now(), nil, done
 	r.mu.Unlock()
+	if m.onStart != nil {
+		m.onStart(cfg, srv)
+	}
 	// srv and done are passed by value rather than re-read from r: by the time
 	// the goroutine runs, a Stop may already have cleared both, and this
 	// generation of the goroutine owns this generation's server.
@@ -895,6 +917,9 @@ func (m *Manager) stopListenerLocked(r *running) {
 			m.log.Printf("supervisor: %s: serve goroutine still running after %s; carrying on",
 				cfg.Name, stopGrace)
 		}
+	}
+	if srv != nil && m.onStop != nil {
+		m.onStop(cfg, srv)
 	}
 	// Host-state teardown for the listener's own rules; layer-2 / no-WAN
 	// configs are a no-op in hostnet.Teardown, so it is safe to call

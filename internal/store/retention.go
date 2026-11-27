@@ -77,6 +77,9 @@ func (s *Store) Retain(ctx context.Context) (RetentionResult, error) {
 		// this the table grows for as long as the agent runs.
 		{&r.Flows, `DELETE FROM agent_connections WHERE rowid IN (SELECT rowid FROM agent_connections WHERE last_seen < ? LIMIT ` + retainChunkSQL + `)`, raw, false},
 		{&r.Observations, `DELETE FROM agent_processes WHERE rowid IN (SELECT rowid FROM agent_processes WHERE last_seen < ? LIMIT 5000)`, raw, true},
+		// A session names a user and the addresses it held: it follows the raw
+		// flows attributed to it. One still open is kept however old.
+		{&r.Flows, `DELETE FROM vpn_sessions WHERE rowid IN (SELECT rowid FROM vpn_sessions WHERE t_end < ? LIMIT 5000)`, raw, true},
 	}
 	// Each chunk takes the ingest lock for itself, so ingest runs between
 	// them. Deleting a fact ingest still has open is harmless: a fact past
