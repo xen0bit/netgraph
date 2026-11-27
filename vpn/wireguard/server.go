@@ -272,13 +272,15 @@ func ServerConfigFromFile(cfg *Config) (ServerConfig, error) {
 // do that itself. The engine is internal/wireguard's; this is its public name.
 type Server struct{ *iwg.Server }
 
-// Server implements client.AbandonableServer and client.DualStackServer, both
-// discovered by type assertion at their one call site, so a method lost in the
-// embedding would compile fine and silently stop being found. Asserted here on
+// Server implements client.AbandonableServer, client.DualStackServer and
+// client.SessionReporter, all discovered by type assertion at their one call
+// site, so a method lost in the embedding would compile fine and silently stop
+// being found. Asserted here on
 // the type the registry hands out, which is the one that matters.
 var (
 	_ client.AbandonableServer = (*Server)(nil)
 	_ client.DualStackServer   = (*Server)(nil)
+	_ client.SessionReporter   = (*Server)(nil)
 )
 
 // NewServer builds a server from cfg: it decodes keys, parses the address and

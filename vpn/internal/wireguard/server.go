@@ -73,6 +73,13 @@ type serverPeer struct {
 
 	lastTS [wire.TimestampLen]byte // newest handshake timestamp, for replay rejection
 	tunnel *wgTunnel               // current session, nil until the first handshake
+
+	// session is the client.SessionHub ID of the peer's open session, or zero.
+	// A WireGuard peer's addresses are fixed by its AllowedIPs, so a session
+	// here is a stretch of time the peer held live keys: it opens on a
+	// handshake while none is open, and closes once the keys pass
+	// rejectAfterTime with no rekey (sweepSessions).
+	session uint64
 }
 
 // Server is a running WireGuard responder: a UDP socket, a TUN device, the
@@ -108,6 +115,9 @@ type Server struct {
 
 	conn *dataplane.PacketConn
 	pump *dataplane.Pump
+
+	// SessionHub makes the server a client.SessionReporter.
+	client.SessionHub
 
 	closeOnce sync.Once
 	closeErr  error
@@ -248,6 +258,7 @@ func (s *Server) ListenAndServe() error {
 	// client learns the tunnel MTU instead of black-holing.
 	s.pump.SetInnerMTU(s.mtu)
 	go s.pump.Run()
+	go s.sweepSessions(sessionSweepEvery)
 
 	s.logger.Printf("wireguard: serving on %s, gateway %s, %d peer(s)",
 		conn.LocalAddr(), s.gateway, len(s.peers))
@@ -404,6 +415,16 @@ func (s *Server) handleInitiation(pkt []byte, from *net.UDPAddr) {
 		evicted = peer.tunnel.install(sess)
 	}
 	tunnel := peer.tunnel
+	if peer.session == 0 {
+		// The handshake has proved the peer holds this static key, so the key
+		// is the identity. Opened under s.mu so a sweep cannot close a session
+		// between this check and its ID being stored.
+		peer.session = s.OpenSession(client.SessionEvent{
+			User:  base64.StdEncoding.EncodeToString(peerStatic[:]),
+			Addrs: peer.allowedIPs,
+			Outer: from.AddrPort(),
+		})
+	}
 	s.mu.Unlock()
 
 	// Register the new session's receiver index with the pump and retire the one
@@ -468,8 +489,54 @@ func (s *Server) Close() error {
 		}
 		s.tun.Close()
 		close(s.closed)
+		s.CloseAllSessions("shutdown")
 	})
 	return s.closeErr
+}
+
+// sessionSweepEvery is how often expired sessions are looked for. A close is
+// timed at the session's last authenticated packet, not at the sweep, so this
+// bounds only how late the edge hears of it.
+const sessionSweepEvery = 10 * time.Second
+
+// sweepSessions closes the session of every peer whose keys have passed
+// rejectAfterTime: the client stopped rekeying, so it has gone. It runs until
+// the server closes.
+func (s *Server) sweepSessions(every time.Duration) {
+	t := time.NewTicker(every)
+	defer t.Stop()
+	for {
+		select {
+		case <-s.closed:
+			return
+		case <-t.C:
+			s.closeExpiredSessions(time.Now())
+		}
+	}
+}
+
+func (s *Server) closeExpiredSessions(now time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, p := range s.peers {
+		if p.session == 0 || p.tunnel == nil {
+			continue
+		}
+		p.tunnel.mu.RLock()
+		est := p.tunnel.established
+		p.tunnel.mu.RUnlock()
+		if now.Sub(est) < rejectAfterTime {
+			continue
+		}
+		// The last authenticated packet is when the peer was last there; the
+		// key's expiry is only when we stopped believing it would come back.
+		at := est
+		if st, ok := s.pump.TunnelStats(p.tunnel); ok && st.LastSeen.After(at) {
+			at = st.LastSeen
+		}
+		s.CloseSession(p.session, "expired", at)
+		p.session = 0
+	}
 }
 
 // Abandon implements client.AbandonableServer. It closes the TUN directly, so
