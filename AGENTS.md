@@ -7,13 +7,14 @@ that are easy to break.
 ## Invariants
 
 - **The sensor stays small and portable.** `cmd/netgraph-sensor` must not
-  import SQLite, d2, the TUI libraries or `gopacket/layers`;
-  `cmd/netgraph-sensor/deps_test.go` checks the first three. It must build
+  import SQLite, d2, the TUI libraries, `gopacket/layers` or anything under
+  `vpn/`; `cmd/netgraph-sensor/deps_test.go` checks all of them. It must build
   for every target in `SENSOR_TARGETS` (MIPS softfloat, ARMv5 included):
   run `make cross`.
 - **Everything is `CGO_ENABLED=0`.** The target lists live in the
   Makefile, `.goreleaser.yaml` and the CI `cross` job. Change all three
-  together.
+  together. The one exception is the NetworkManager editor plugin in `vpn/nm`
+  (its own Go module, with a GTK `.so` in C); its D-Bus service is still CGO-free.
 - **Windows are half-open `[from, to)`.** A connection belongs to a
   window if a record overlaps it. Bytes straddling an edge are prorated;
   states are `carried` (opened before `from`), `opened`, plus `closed`.
@@ -114,6 +115,23 @@ that are easy to break.
   the sender. DNS names prefer the lookup the connection's own SNI/Host
   names. Keep it that way: the lab caught each of these going wrong.
 
+## vpn/ and the edge (proposed)
+
+`vpn/` is veepin, merged with its history, on the way to a `netgraph-edge`
+appliance role. `vpn/AGENTS.md` holds the protocol rules (both roles, interop
+against a real peer, parsers return subslices, a peer's address moves only on an
+authenticated packet) and applies inside `vpn/`. Until an edge exists, nothing
+outside `vpn/` imports it, and it imports only the standard library and
+`golang.org/x/{crypto,net,sys}` (`vpn/deps_test.go`).
+
+Planned, not yet in force: an edge is a separate binary from the sensor. Only
+the edge and the opt-in host agent may touch a firewall, each in tables it
+owns. An edge applies only config signed by its enrolled controller,
+commit-confirmed so a bad push rolls itself back. Nothing past TLS and a
+protocol's own handshake is reachable before authentication. AI stays read-only
+over all of it. These rules replace the matching invariants above when the edge
+lands, and not before.
+
 ## Checks before a commit
 
 ```sh
@@ -124,4 +142,9 @@ make fuzz         # when touching a decoder (slow: FUZZTIME, 20s by default)
 make cross        # when touching dependencies or the sensor
 make browser      # when touching the web UI
 make lab          # when touching capture, decoding, ingest, queries or the web UI
+make vpn.interop VPN_RUN='<cells>'  # when touching vpn/ protocols (Docker)
 ```
+
+`make test` also runs `go test ./vpn/...` a second time without `-race`, for
+vpn/'s allocation guards. `make fuzz` covers vpn/'s ~75 targets too: use
+`FUZZPKGS=./internal/...` or `./vpn/...` to fuzz only what you touched.

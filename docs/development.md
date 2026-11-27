@@ -4,7 +4,7 @@
 
 | Path | |
 |---|---|
-| `cmd/netgraph-sensor` | the router agent. Must never import SQLite, d2 or the TUI libraries: `deps_test.go` enforces it (modernc SQLite does not build for MIPS, d2 adds ~20 MB) |
+| `cmd/netgraph-sensor` | the router agent. Must never import SQLite, d2, the TUI libraries or `vpn/`: `deps_test.go` enforces it (modernc SQLite does not build for MIPS, d2 adds ~20 MB) |
 | `cmd/netgraph` | server, CLI, TUI |
 | `cmd/netgraph-agent` | the optional host agent (Linux, macOS, Windows): one file of setup per platform |
 | `internal/agent` | the agent protocol, runner and shared socket handling; `linux`, `darwin` and `windows` scanners (their parsers build and are tested on every platform), `enforce` (nftables) |
@@ -28,6 +28,7 @@
 | `internal/testutil` | scripted pcap scenarios built with real implementations |
 | `web/` | the browser UI (`src/`; `make web.build` assembles `dist/`) |
 | `test/lab` | the Docker lab |
+| `vpn/` | veepin: sixteen VPN protocols, client and server, in pure Go, the future `netgraph-edge` data plane. Its own `AGENTS.md`, `README.md` and `doc/`; Docker interop cells in `vpn/tests/interop` (`make vpn.interop`); `vpn/nm` is a separate module (the NetworkManager plugin) |
 | `deploy/`, `packaging/` | Dockerfiles, compose files, systemd units, OpenWrt init |
 
 ## Building
