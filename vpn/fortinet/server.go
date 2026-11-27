@@ -297,12 +297,14 @@ func (s *Server) Close() error {
 	httpSrv := s.httpSrv
 	s.mu.Unlock()
 
+	// Sessions end as "shutdown" first: closing the engine drops each
+	// client's connection, and that path would otherwise close them as
+	// "disconnected", which is not what happened.
+	s.CloseAllSessions("shutdown")
 	if httpSrv != nil {
 		_ = httpSrv.Close()
 	}
-	err := s.engine.Close()
-	s.CloseAllSessions("shutdown")
-	return err
+	return s.engine.Close()
 }
 
 // Abandon implements client.AbandonableServer. It closes the TUN directly, so

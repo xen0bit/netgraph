@@ -39,6 +39,60 @@ cat > /etc/netgraph-edge/listeners/remote.json <<JSON
   }
 }
 JSON
+cat > /etc/netgraph-edge/listeners/ssl.json <<JSON
+{
+  "name": "ssl",
+  "protocol": "anyconnect",
+  "setup_nat": true,
+  "wan": "${wan}",
+  "options": {
+    "cert": "/pki/server.crt",
+    "key": "/pki/server.key",
+    "user": "carol",
+    "password": "letmein",
+    "port": "8443",
+    "pool": "10.12.12.0/24",
+    "tun": "ac-ssl"
+  }
+}
+JSON
+cat > /etc/netgraph-edge/listeners/gp.json <<JSON
+{
+  "name": "gp",
+  "protocol": "gp",
+  "setup_nat": true,
+  "wan": "${wan}",
+  "options": {
+    "cert": "/pki/server.crt",
+    "key": "/pki/server.key",
+    "user": "dave",
+    "pass": "opensesame",
+    "port": "443",
+    "esp-port": "4501",
+    "public": "198.18.1.10",
+    "pool": "10.13.13.0/24",
+    "tun": "gp-gp"
+  }
+}
+JSON
+cat > /etc/netgraph-edge/listeners/forti.json <<JSON
+{
+  "name": "forti",
+  "protocol": "fortinet",
+  "setup_nat": true,
+  "wan": "${wan}",
+  "options": {
+    "cert": "/pki/server.crt",
+    "key": "/pki/server.key",
+    "user": "erin",
+    "pass": "swordfish",
+    "port": "10443",
+    "no-dtls": "true",
+    "pool": "10.14.14.0/24",
+    "tun": "ft-forti"
+  }
+}
+JSON
 echo "edge: WAN is ${wan}"
 exec netgraph-edge run -server http://10.78.0.20:8443 -name edge-lab \
   -active-timeout 5s -flush 1s -log-level debug

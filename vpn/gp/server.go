@@ -282,9 +282,11 @@ func (s *Server) Close() error {
 	s.closed = true
 	s.mu.Unlock()
 
-	err := s.engine.Close()
+	// Sessions end as "shutdown" first: closing the engine drops each
+	// client's connection, and that path would otherwise close them as
+	// "disconnected", which is not what happened.
 	s.CloseAllSessions("shutdown")
-	return err
+	return s.engine.Close()
 }
 
 // Abandon implements client.AbandonableServer. It closes the TUN directly, so

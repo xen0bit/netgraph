@@ -231,10 +231,13 @@ func (s *Server) ListenAndServe() error {
 // Close stops the server and releases the TUN and listener.
 func (s *Server) Close() error {
 	s.closeOnce.Do(func() {
+		// Sessions end as "shutdown" first: closing the engine drops each
+		// client's connection, and that path would otherwise close them as
+		// "disconnected", which is not what happened.
+		s.CloseAllSessions("shutdown")
 		s.listener.Close()
 		_ = s.eng.Close()
 		s.tun.Close()
-		s.CloseAllSessions("shutdown")
 	})
 	return nil
 }
