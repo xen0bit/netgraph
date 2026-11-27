@@ -1,0 +1,22 @@
+# Arguments for a veepin@<instance>.service systemd unit.
+#
+# Copy to /etc/veepin/<instance>.conf; the unit runs:
+#   /usr/bin/veepin serve $VEEPIN_ARGS
+# then: systemctl enable --now veepin@<instance>
+#
+# One instance per protocol/config. Examples:
+#
+# Keep this file, and any key files it names, root:root mode 0600.
+#
+# IKEv2 with a pre-shared key. The key lives in its own file, not here: these
+# arguments become the daemon's command line, which is readable in /proc. Every
+# secret flag has a -<flag>-file form for exactly this.
+#   install -m 0600 /dev/null /etc/veepin/ikev2.psk && $EDITOR /etc/veepin/ikev2.psk
+#VEEPIN_ARGS=ikev2 -id vpn.example.com -psk-file /etc/veepin/ikev2.psk -pool 10.10.10.0/24 -setup-nat
+#
+# WireGuard from a wg-quick style config:
+#VEEPIN_ARGS=wireguard -config /etc/veepin/wg-server.conf
+#
+# Run `veepin serve -h` and see /usr/share/doc/veepin/README.md for every
+# protocol and flag.
+VEEPIN_ARGS=

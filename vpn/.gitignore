@@ -1,0 +1,34 @@
+# GoReleaser output
+/dist/
+
+# Local build output (see Makefile)
+/bin/
+/coverage/
+nm/bin/
+
+# Compiled test/binaries and coverage profiles
+*.test
+*.out
+*.prof
+
+# Binary built at the repo root (e.g. `go build ./cmd/veepin`). Anchored to the
+# root so it never shadows the ikev2/ package directory, as the old `/ikev2`
+# binary rule did.
+/veepin
+
+# The e2e panel harness, if built without -o (`go build ./tests/e2e/harness`).
+/harness
+
+# Editor / OS cruft
+*.swp
+.DS_Store
+
+# Python bytecode from the TOY interop peer
+__pycache__/
+*.pyc
+
+# Playwright browser tests (see tests/e2e)
+tests/e2e/node_modules/
+tests/e2e/test-results/
+tests/e2e/playwright-report/
+

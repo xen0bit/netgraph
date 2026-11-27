@@ -1,0 +1,339 @@
+package wireguard
+
+import (
+	"bufio"
+	"fmt"
+	"io"
+	"log/slog"
+	"net/netip"
+	"os"
+	"strconv"
+	"strings"
+)
+
+// A note on scope: this parses the subset of the wg-quick INI format that a
+// userspace client or server needs. The interface's own routing directives
+// (Table, PreUp, PostUp, …) are wg-quick's business, not the tunnel's, and are
+// ignored here — veepin applies routing through dataplane. A client uses a
+// single peer (its server); a server uses one [Peer] per client.
+
+// Config is a parsed WireGuard tunnel definition: our identity and address from
+// the [Interface] section, and the peers from the [Peer] sections. Fields are
+// the wg-quick spellings, decoded no further than strings until resolve
+// validates them, so a bad key surfaces as a config error rather than a
+// handshake failure.
+type Config struct {
+	// [Interface]
+	PrivateKey string   // our static private key, base64 (required)
+	Address    []string // our tunnel addresses in CIDR form
+	DNS        []string // DNS servers to advertise (client only, optional)
+	MTU        int      // inner MTU (optional; 0 means the default)
+	ListenPort int      // UDP port to bind: the server's listener, or a client's fixed source port (0 lets the kernel pick)
+
+	// RekeySeconds is how often a client re-runs the handshake to refresh its
+	// keys, in seconds. It has no wg-quick equivalent — WireGuard's own timing is
+	// fixed at 120s — and exists so tests can shrink the interval. 0 means the
+	// protocol default (two minutes).
+	RekeySeconds int
+
+	// Peers holds one [Peer] section each. A client has exactly one (its
+	// server); a server has one per client it accepts.
+	Peers []Peer
+
+	// TUNName is the desired interface name; empty lets the kernel pick. It has
+	// no wg-quick equivalent (there the file name is the interface) and is set
+	// from a flag.
+	TUNName string
+
+	// Shape enables shaping of this peer's outbound traffic: how much padded
+	// output each inner flow is given before shaping stops for that flow, so it
+	// bounds what shaping costs. 0 disables it. It has no wg-quick equivalent
+	// (see dataplane/shape.go).
+	Shape int
+
+	// Obfuscation, if non-zero enables DPI-resistant wire-format transforms
+	// (AmneziaWG-style): the message-type byte is replaced, reserved bytes may
+	// carry data, and random padding is prepended to each message. Zero values
+	// reproduce stock WireGuard on the wire.
+	Obfuscation ObfuscationConfig
+
+	// Logger receives progress logs; nil discards them. It has no wg-quick
+	// equivalent and is set by a Go caller.
+	Logger *slog.Logger
+}
+
+// Peer is one [Peer] section: a remote static key and the inner destinations
+// reached through it.
+type Peer struct {
+	PublicKey    string   // the peer's static public key, base64 (required)
+	PresharedKey string   // optional symmetric key, base64
+	Endpoint     string   // host:port to dial (required for a client's peer)
+	AllowedIPs   []string // inner destinations routed to this peer (required)
+	Keepalive    int      // persistent-keepalive seconds (optional; 0 is off)
+}
+
+// ParseConfigFile reads a wg-quick style configuration file.
+func ParseConfigFile(path string) (*Config, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	cfg, err := ParseConfig(f)
+	if err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	return cfg, nil
+}
+
+// section names the part of the file a line belongs to, so a key like PublicKey
+// (valid in both sections under full wg-quick) is attributed correctly.
+type section int
+
+const (
+	sectionNone section = iota
+	sectionInterface
+	sectionPeer
+)
+
+// ParseConfig reads a wg-quick style configuration from r. Keys are matched
+// case-insensitively, as wg does; values are taken verbatim, with comma or
+// whitespace separating list values. Each [Peer] section starts a new peer.
+func ParseConfig(r io.Reader) (*Config, error) {
+	cfg := &Config{}
+	sec := sectionNone
+
+	sc := bufio.NewScanner(r)
+	for line := 1; sc.Scan(); line++ {
+		text := stripComment(sc.Text())
+		if text == "" {
+			continue
+		}
+		if strings.HasPrefix(text, "[") {
+			switch strings.ToLower(strings.Trim(text, "[]")) {
+			case "interface":
+				sec = sectionInterface
+			case "peer":
+				sec = sectionPeer
+				cfg.Peers = append(cfg.Peers, Peer{})
+			default:
+				// The line itself is not quoted back: a path that named the
+				// wrong file would otherwise copy that file's contents into
+				// the error, and from there into a log.
+				return nil, fmt.Errorf("line %d: unknown section", line)
+			}
+			continue
+		}
+
+		key, val, ok := splitKV(text)
+		if !ok {
+			return nil, fmt.Errorf("line %d: not a key = value", line)
+		}
+		if err := cfg.set(sec, key, val); err != nil {
+			return nil, fmt.Errorf("line %d: %w", line, err)
+		}
+	}
+	if err := sc.Err(); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// set applies one key/value to the config under the current section.
+func (c *Config) set(sec section, key, val string) error {
+	switch sec {
+	case sectionInterface:
+		return c.setInterface(key, val)
+	case sectionPeer:
+		return c.setPeer(&c.Peers[len(c.Peers)-1], key, val)
+	default:
+		return fmt.Errorf("key %q before any section", key)
+	}
+}
+
+func (c *Config) setInterface(key, val string) error {
+	switch strings.ToLower(key) {
+	case "privatekey":
+		c.PrivateKey = val
+	case "address":
+		c.Address = append(c.Address, SplitList(val)...)
+	case "dns":
+		c.DNS = append(c.DNS, SplitList(val)...)
+	case "mtu":
+		n, err := strconv.Atoi(val)
+		if err != nil {
+			return fmt.Errorf("MTU %q: %w", val, err)
+		}
+		c.MTU = n
+	case "listenport":
+		n, err := strconv.Atoi(val)
+		if err != nil {
+			return fmt.Errorf("ListenPort %q: %w", val, err)
+		}
+		c.ListenPort = n
+	case "rekeyseconds":
+		n, err := strconv.Atoi(val)
+		if err != nil {
+			return fmt.Errorf("RekeySeconds %q: %w", val, err)
+		}
+		c.RekeySeconds = n
+	case "table", "preup", "postup", "predown", "postdown", "saveconfig", "fwmark":
+		// Accepted and ignored: these configure a kernel interface or wg-quick's
+		// own scripting, neither of which applies to a userspace tunnel.
+	default:
+		return fmt.Errorf("unknown [Interface] key %q", key)
+	}
+	return nil
+}
+
+func (c *Config) setPeer(p *Peer, key, val string) error {
+	switch strings.ToLower(key) {
+	case "publickey":
+		p.PublicKey = val
+	case "presharedkey":
+		p.PresharedKey = val
+	case "endpoint":
+		p.Endpoint = val
+	case "allowedips":
+		p.AllowedIPs = append(p.AllowedIPs, SplitList(val)...)
+	case "persistentkeepalive":
+		n, err := strconv.Atoi(val)
+		if err != nil {
+			return fmt.Errorf("PersistentKeepalive %q: %w", val, err)
+		}
+		p.Keepalive = n
+	default:
+		return fmt.Errorf("unknown [Peer] key %q", key)
+	}
+	return nil
+}
+
+// stripComment removes a trailing comment and surrounding whitespace. wg-quick
+// treats '#' as a comment leader.
+func stripComment(line string) string {
+	if i := strings.IndexByte(line, '#'); i >= 0 {
+		line = line[:i]
+	}
+	return strings.TrimSpace(line)
+}
+
+// splitKV splits "key = value" on the first '='.
+func splitKV(line string) (key, val string, ok bool) {
+	k, v, found := strings.Cut(line, "=")
+	if !found {
+		return "", "", false
+	}
+	key = strings.TrimSpace(k)
+	val = strings.TrimSpace(v)
+	if key == "" {
+		return "", "", false
+	}
+	return key, val, true
+}
+
+// SplitList splits a value on commas and whitespace, dropping empties, so
+// "AllowedIPs = 10.0.0.0/24, 192.168.1.0/24" and repeated keys both work.
+//
+// Exported because the management plane has to agree with it exactly: it reads
+// a listener's allowed-ips to work out which tunnel addresses are already
+// claimed before allocating one for a new peer, and a splitter that disagreed
+// with this one would hand out an address the server already routes elsewhere.
+func SplitList(val string) []string {
+	return strings.FieldsFunc(val, func(r rune) bool {
+		return r == ',' || r == ' ' || r == '\t'
+	})
+}
+
+// firstPeer returns a pointer to the config's single peer, creating it if the
+// config has none. It is how the client's flat flag overrides (-public-key,
+// -endpoint, …) find something to write to.
+func (c *Config) firstPeer() *Peer {
+	if len(c.Peers) == 0 {
+		c.Peers = append(c.Peers, Peer{})
+	}
+	return &c.Peers[0]
+}
+
+// applyOverrides layers non-empty option-map values over a parsed config, so the
+// CLI's flags win over a -config file. Peer fields target the first (client)
+// peer. Keys match the Opt* constants.
+func (c *Config) applyOverrides(opts map[string]string) error {
+	if v := opts[OptPrivateKey]; v != "" {
+		c.PrivateKey = v
+	}
+	if v := opts[OptAddress]; v != "" {
+		c.Address = SplitList(v)
+	}
+	if v := opts[OptDNS]; v != "" {
+		c.DNS = SplitList(v)
+	}
+	if v := opts[OptMTU]; v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("%s %q: %w", OptMTU, v, err)
+		}
+		c.MTU = n
+	}
+	if v := opts[OptShape]; v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil || n < 0 {
+			return fmt.Errorf("%s %q: not a byte count", OptShape, v)
+		}
+		c.Shape = n
+	}
+	if v := opts[OptListenPort]; v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("%s %q: %w", OptListenPort, v, err)
+		}
+		c.ListenPort = n
+	}
+	if v := opts[OptRekeySeconds]; v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("%s %q: %w", OptRekeySeconds, v, err)
+		}
+		c.RekeySeconds = n
+	}
+	if v := opts[OptPublicKey]; v != "" {
+		c.firstPeer().PublicKey = v
+	}
+	if v := opts[OptPresharedKey]; v != "" {
+		c.firstPeer().PresharedKey = v
+	}
+	if v := opts[OptEndpoint]; v != "" {
+		c.firstPeer().Endpoint = v
+	}
+	if v := opts[OptAllowedIPs]; v != "" {
+		c.firstPeer().AllowedIPs = SplitList(v)
+	}
+	if v := opts[OptKeepalive]; v != "" {
+		n, err := strconv.Atoi(v)
+		if err != nil {
+			return fmt.Errorf("%s %q: %w", OptKeepalive, v, err)
+		}
+		c.firstPeer().Keepalive = n
+	}
+	if v := opts[OptTUNName]; v != "" {
+		c.TUNName = v
+	}
+	return nil
+}
+
+// prefixes parses a list of CIDRs (Address or AllowedIPs) into netip.Prefix.
+func prefixes(cidrs []string) ([]netip.Prefix, error) {
+	out := make([]netip.Prefix, 0, len(cidrs))
+	for _, s := range cidrs {
+		p, err := netip.ParsePrefix(s)
+		if err != nil {
+			// wg-quick accepts a bare address as a host route; mirror that.
+			if a, aerr := netip.ParseAddr(s); aerr == nil {
+				out = append(out, netip.PrefixFrom(a, a.BitLen()))
+				continue
+			}
+			return nil, fmt.Errorf("bad CIDR %q: %w", s, err)
+		}
+		out = append(out, p)
+	}
+	return out, nil
+}

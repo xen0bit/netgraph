@@ -1,0 +1,539 @@
+package ssh
+
+import (
+	"encoding/binary"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"os"
+	"strconv"
+	"strings"
+	"sync"
+
+	cryptossh "golang.org/x/crypto/ssh"
+
+	"github.com/xen0bit/veepin/client"
+	"github.com/xen0bit/veepin/dataplane"
+	"github.com/xen0bit/veepin/internal/pqpolicy"
+	"github.com/xen0bit/veepin/internal/sshtun"
+	"github.com/xen0bit/veepin/internal/userdb"
+	"github.com/xen0bit/veepin/internal/vlog"
+)
+
+// ServerConfig configures an SSH VPN responder — an SSH server that accepts
+// tun@openssh.com forwarding channels, the equivalent of a stock sshd with
+// PermitTunnel yes but scoped to just the tunnel.
+type ServerConfig struct {
+	// HostKey is the server's private host key, PEM (required).
+	HostKey []byte
+
+	// ListenIP is the local address to bind on; empty binds all interfaces.
+	ListenIP string
+	// ListenPort is the TCP port to accept clients on (default 22).
+	ListenPort int
+
+	// Pool is the tunnel subnet in CIDR form (default 10.200.0.0/24); its first
+	// host is the server's tunnel address, and clients use addresses within it.
+	Pool string
+	// DNS is informational (SSH assigns none in-band); reported on Network setup.
+	DNS []net.IP
+
+	// Users maps a username to a password for password authentication.
+	Users map[string]string
+	// AuthorizedKeys holds authorized public keys (authorized_keys lines) for
+	// public-key authentication.
+	AuthorizedKeys []string
+
+	// TUNName is the desired TUN interface name; empty lets the kernel pick.
+	TUNName string
+	// Shape is the per-flow downstream shaping budget in bytes; zero disables
+	// shaping, which is the behaviour from before it existed.
+	Shape int
+	// Logger receives progress logs; nil discards them.
+	Logger *slog.Logger
+
+	// PostQuantumOnly pins the key exchange to mlkem768x25519-sha256 and
+	// refuses a peer that cannot do it. It is what the pq-ssh registry name
+	// sets.
+	//
+	// Key exchange ONLY, and that is a limit of SSH rather than of veepin: SSH
+	// has no post-quantum signature algorithm in any specification or
+	// implementation, so host keys and user keys stay classical. OpenSSH says as
+	// much itself at https://www.openssh.org/pq.html. internal/pqpolicy records
+	// the exemption by name, and TestSSHIsTheOnlyPQAuthException holds that list
+	// at one entry.
+	PostQuantumOnly bool
+}
+
+func (c *ServerConfig) validate() error {
+	if len(c.HostKey) == 0 {
+		return errors.New("ssh: server host key is required")
+	}
+	if len(c.Users) == 0 && len(c.AuthorizedKeys) == 0 {
+		return errors.New("ssh: at least one user or authorized key is required")
+	}
+	return nil
+}
+
+// Server is a running SSH VPN responder. Like SSTP it is connection-oriented: one
+// TCP/SSH connection per client, all sharing one TUN, which is routed to each
+// client by the inner address the server learns from that client's traffic. It
+// owns the TUN but does not configure host networking.
+type Server struct {
+	sshCfg  *cryptossh.ServerConfig
+	pool    *dataplane.AddrPool
+	gateway net.IP
+	network *net.IPNet
+	logger  *vlog.Logger
+
+	listenAddr *net.TCPAddr
+	tun        *dataplane.TUN
+	listener   net.Listener
+
+	// shaper pads outbound frames so the inner traffic's size pattern does not
+	// survive the tunnel. Owned by the TUN reader, the only caller of write.
+	shaper     *dataplane.Shaper
+	shapedOnce sync.Once
+
+	mu      sync.Mutex
+	clients map[uint32]*sshClient // keyed by the client's learned inner address
+
+	closeOnce sync.Once
+	closed    chan struct{}
+}
+
+// NewServer builds a server from cfg: it parses the host key, authorized keys and
+// pool, and opens the TUN. It does not bind until ListenAndServe. Opening a TUN
+// requires CAP_NET_ADMIN.
+func NewServer(cfg ServerConfig) (*Server, error) {
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
+	sshCfg, err := serverSSHConfig(&cfg)
+	if err != nil {
+		return nil, err
+	}
+
+	poolCIDR := cfg.Pool
+	if poolCIDR == "" {
+		poolCIDR = "10.200.0.0/24"
+	}
+	pool, gateway, err := dataplane.NewAddrPool(poolCIDR)
+	if err != nil {
+		return nil, fmt.Errorf("ssh: pool: %w", err)
+	}
+
+	port := cfg.ListenPort
+	if port == 0 {
+		port = 22
+	}
+	listenIP := net.ParseIP(cfg.ListenIP)
+	if cfg.ListenIP == "" {
+		listenIP = net.IPv4zero
+	}
+	if listenIP == nil {
+		return nil, fmt.Errorf("ssh: invalid listen IP %q", cfg.ListenIP)
+	}
+
+	logger := vlog.From(cfg.Logger)
+
+	tun, err := dataplane.OpenTUN(cfg.TUNName)
+	if err != nil {
+		return nil, fmt.Errorf("ssh: open TUN: %w", err)
+	}
+
+	var shaper *dataplane.Shaper
+	if cfg.Shape > 0 {
+		shaper = dataplane.NewShaper(dataplane.ShapeConfig{Bytes: cfg.Shape})
+	}
+	return &Server{
+		sshCfg:     sshCfg,
+		shaper:     shaper,
+		pool:       pool,
+		gateway:    gateway,
+		network:    pool.Network(),
+		logger:     logger,
+		listenAddr: &net.TCPAddr{IP: listenIP, Port: port},
+		tun:        tun,
+		clients:    make(map[uint32]*sshClient),
+		closed:     make(chan struct{}),
+	}, nil
+}
+
+// TUNName is the interface the data path is bound to.
+func (s *Server) TUNName() string { return s.tun.Name() }
+
+// Gateway is the server's own tunnel-side address (the pool's first host).
+func (s *Server) Gateway() net.IP { return s.gateway }
+
+// Network is the tunnel subnet, for routing and NAT rules.
+func (s *Server) Network() *net.IPNet { return s.network }
+
+// ListenAndServe binds the TCP listener, starts the TUN read loop, and serves
+// clients until Close. It blocks.
+func (s *Server) ListenAndServe() error {
+	ln, err := net.ListenTCP("tcp", s.listenAddr)
+	if err != nil {
+		return fmt.Errorf("ssh: listen: %w", err)
+	}
+	s.listener = ln
+	s.logger.Printf("ssh: listening on %s, gateway %s", s.listenAddr, s.gateway)
+
+	go s.tunLoop()
+
+	for {
+		conn, err := ln.Accept()
+		if err != nil {
+			select {
+			case <-s.closed:
+				return nil
+			default:
+				return fmt.Errorf("ssh: accept: %w", err)
+			}
+		}
+		go s.handleConn(conn)
+	}
+}
+
+// tunLoop reads packets off the TUN and routes each to the client that owns its
+// destination address.
+func (s *Server) tunLoop() {
+	buf := make([]byte, 65535)
+	for {
+		n, err := s.tun.Read(buf)
+		if err != nil {
+			return
+		}
+		dst, ok := ipv4Dst(buf[:n])
+		if !ok {
+			continue
+		}
+		s.mu.Lock()
+		cl := s.clients[dst]
+		s.mu.Unlock()
+		if cl != nil {
+			cl.write(buf[:n])
+		}
+	}
+}
+
+// handleConn runs the SSH handshake for one connection and serves its tunnel
+// channel.
+func (s *Server) handleConn(nc net.Conn) {
+	defer nc.Close()
+	sshConn, chans, reqs, err := cryptossh.NewServerConn(nc, s.sshCfg)
+	if err != nil {
+		s.logger.Printf("ssh: handshake from %s: %v", nc.RemoteAddr(), err)
+		return
+	}
+	defer sshConn.Close()
+	go cryptossh.DiscardRequests(reqs)
+
+	for newCh := range chans {
+		if newCh.ChannelType() != sshtun.ChannelType {
+			_ = newCh.Reject(cryptossh.UnknownChannelType, "only tunnel forwarding is served")
+			continue
+		}
+		if _, _, ok := sshtun.ParseOpenData(newCh.ExtraData()); !ok {
+			_ = newCh.Reject(cryptossh.ConnectionFailed, "bad tunnel request")
+			continue
+		}
+		ch, chReqs, err := newCh.Accept()
+		if err != nil {
+			return
+		}
+		go cryptossh.DiscardRequests(chReqs)
+		s.serveTunnel(ch, sshConn.RemoteAddr())
+	}
+}
+
+// serveTunnel forwards packets for one tunnel channel: it writes inbound packets
+// to the TUN and registers the client by the source address it uses so the TUN
+// loop can route replies back. It blocks until the channel closes.
+func (s *Server) serveTunnel(ch cryptossh.Channel, remote net.Addr) {
+	cl := &sshClient{ch: ch, srv: s}
+	defer cl.close()
+
+	for {
+		pkt, err := sshtun.ReadPacket(ch)
+		if err != nil {
+			return
+		}
+		src, ok := ipv4Src(pkt)
+		if !ok {
+			continue
+		}
+		// The tunnel protocol assigns no address, so the client's is learned
+		// from its first packet: an in-pool address that is not the gateway
+		// and that no other live connection holds. From then on it is fixed.
+		// Rebinding on every new source let one user take another's address
+		// with a single packet and receive everything sent to it.
+		if cl.ip == 0 {
+			if !s.network.Contains(u32IP(src)) || src == binary.BigEndian.Uint32(s.gateway.To4()) {
+				continue
+			}
+			if !s.bind(cl, src, remote) {
+				continue
+			}
+		}
+		if src != cl.ip {
+			continue
+		}
+		if _, err := s.tun.Write(pkt); err != nil {
+			s.logger.Printf("ssh: TUN write: %v", err)
+		}
+	}
+}
+
+// bind gives cl the address src, unless another live connection already
+// holds it.
+func (s *Server) bind(cl *sshClient, src uint32, remote net.Addr) bool {
+	s.mu.Lock()
+	if other := s.clients[src]; other != nil && other != cl {
+		s.mu.Unlock()
+		if !cl.refusedLogged {
+			cl.refusedLogged = true
+			s.logger.Warnf("ssh: client %s sent as %s, which another connection holds; dropping", remote, u32IP(src))
+		}
+		return false
+	}
+	cl.ip = src
+	s.clients[src] = cl
+	s.mu.Unlock()
+	s.logger.Printf("ssh: client %s using %s", remote, u32IP(src))
+	return true
+}
+
+// Close stops the server: the listener, the TUN, and every client channel.
+func (s *Server) Close() error {
+	s.closeOnce.Do(func() {
+		close(s.closed)
+		if s.listener != nil {
+			s.listener.Close()
+		}
+		s.mu.Lock()
+		for _, cl := range s.clients {
+			cl.ch.Close()
+		}
+		s.mu.Unlock()
+		if s.tun != nil {
+			s.tun.Close()
+		}
+	})
+	return nil
+}
+
+// Abandon implements client.AbandonableServer. It closes the TUN directly, so
+// an abandoned listener's packet pump unparks and its descriptor is released
+// even though Close never returned. See client.AbandonableServer for why this
+// is not simply Close.
+//
+// The TUN is set in NewServer and never reassigned, so this reads it without
+// the lock Close takes -- deliberately, because a wedged Close may be holding
+// that lock, and waiting on it here would reproduce the very stall this is the
+// escape from.
+func (s *Server) Abandon() { s.tun.Close() }
+
+// Server implements client.AbandonableServer, so the supervisor can take its
+// descriptors back when Close overruns. Asserted here because the interface is
+// found by type assertion at the one call site: without this, a renamed or
+// re-signatured Abandon compiles fine and the assertion silently starts failing,
+// which reads as the leak coming back.
+var _ client.AbandonableServer = (*Server)(nil)
+
+// sshClient is one accepted client's tunnel channel and learned address.
+type sshClient struct {
+	ch      cryptossh.Channel
+	srv     *Server
+	writeMu sync.Mutex
+	ip      uint32
+	// refusedLogged keeps a client retrying a taken address from filling the
+	// log; serveTunnel is its only writer.
+	refusedLogged bool
+}
+
+// write frames an IP packet and sends it to the client, serialized against the
+// channel's other writer.
+func (c *sshClient) write(ipPacket []byte) {
+	frame := sshtun.Encode(ipPacket)
+	if frame == nil {
+		return
+	}
+	// Shaping appends zero filler, which ReadPacket skips a word at a time and a
+	// stock OpenSSH peer never sees: it writes the channel message to its tun in
+	// one call and the kernel delimits the real packet by Total Length.
+	if s := c.srv.shaper; s != nil {
+		if target := s.Target(ipPacket, client.DefaultTunnelMTU); target > len(ipPacket) {
+			// Said out loud once: a ping passes just as happily on a shaper
+			// that quietly did nothing, so the shaped cell requires this line.
+			c.srv.shapedOnce.Do(func() {
+				c.srv.logger.Printf("ssh: shaping outbound packets to %d octets (first: %d -> %d)",
+					client.DefaultTunnelMTU, len(ipPacket), target)
+			})
+			frame = sshtun.EncodePadded(ipPacket, target)
+		}
+	}
+	c.writeMu.Lock()
+	defer c.writeMu.Unlock()
+	_, _ = c.ch.Write(frame)
+}
+
+func (c *sshClient) close() {
+	c.ch.Close()
+	if c.ip != 0 {
+		c.srv.mu.Lock()
+		if c.srv.clients[c.ip] == c {
+			delete(c.srv.clients, c.ip)
+		}
+		c.srv.mu.Unlock()
+	}
+}
+
+// serverSSHConfig builds the x/crypto/ssh server config: the host key and the
+// password / public-key auth callbacks.
+func serverSSHConfig(cfg *ServerConfig) (*cryptossh.ServerConfig, error) {
+	signer, err := cryptossh.ParsePrivateKey(cfg.HostKey)
+	if err != nil {
+		return nil, fmt.Errorf("ssh: host key: %w", err)
+	}
+
+	authorized := map[string]bool{}
+	for _, line := range cfg.AuthorizedKeys {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		pub, _, _, _, perr := cryptossh.ParseAuthorizedKey([]byte(line))
+		if perr != nil {
+			return nil, fmt.Errorf("ssh: authorized key: %w", perr)
+		}
+		authorized[string(pub.Marshal())] = true
+	}
+
+	sc := &cryptossh.ServerConfig{}
+	if cfg.PostQuantumOnly {
+		sc.KeyExchanges = pqpolicy.SSHKeyExchanges()
+	}
+	if len(cfg.Users) > 0 {
+		users := cfg.Users
+		sc.PasswordCallback = func(conn cryptossh.ConnMetadata, pass []byte) (*cryptossh.Permissions, error) {
+			// The stored secret may be a bcrypt verifier rather than the
+			// password: SSH password auth carries the password itself, so the
+			// server never needs to hold one (see internal/userdb).
+			if want, ok := users[conn.User()]; ok && userdb.Verify(want, string(pass)) {
+				return &cryptossh.Permissions{}, nil
+			}
+			return nil, fmt.Errorf("ssh: authentication failed")
+		}
+	}
+	if len(authorized) > 0 {
+		sc.PublicKeyCallback = func(_ cryptossh.ConnMetadata, key cryptossh.PublicKey) (*cryptossh.Permissions, error) {
+			if authorized[string(key.Marshal())] {
+				return &cryptossh.Permissions{}, nil
+			}
+			return nil, fmt.Errorf("ssh: unauthorized key")
+		}
+	}
+	sc.AddHostKey(signer)
+	return sc, nil
+}
+
+// ipv4Dst / ipv4Src return the destination / source address of an IPv4 packet.
+func ipv4Dst(pkt []byte) (uint32, bool) {
+	if len(pkt) < 20 || pkt[0]>>4 != 4 {
+		return 0, false
+	}
+	return binary.BigEndian.Uint32(pkt[16:20]), true
+}
+
+func ipv4Src(pkt []byte) (uint32, bool) {
+	if len(pkt) < 20 || pkt[0]>>4 != 4 {
+		return 0, false
+	}
+	return binary.BigEndian.Uint32(pkt[12:16]), true
+}
+
+func u32IP(v uint32) net.IP {
+	ip := make(net.IP, 4)
+	binary.BigEndian.PutUint32(ip, v)
+	return ip
+}
+
+// Server option keys for client.NewServer("ssh", opts).
+const (
+	OptServerHostKey        = "host-key"
+	OptServerListenIP       = "listen"
+	OptServerPort           = "port"
+	OptServerPool           = "pool"
+	OptServerDNS            = "dns"
+	OptServerUser           = "user"
+	OptServerPassword       = "password"
+	OptServerUsers          = "users-file"
+	OptServerAuthorizedKeys = "authorized-keys"
+	OptServerTUN            = "tun"
+	OptServerShape          = "shape"
+)
+
+func init() {
+	client.RegisterServer("ssh", parseServerOptions)
+	client.RegisterServerOpts("ssh", []client.OptSpec{
+		{Key: OptServerHostKey, Kind: client.OptFilePath, Required: true, Secret: true, Generate: "ed25519-key", Help: "path to the server SSH host private key"},
+		{Key: OptServerListenIP, Kind: client.OptStr, Default: "0.0.0.0", Help: "local IP to bind the TCP socket on (default 0.0.0.0)"},
+		{Key: OptServerPort, Kind: client.OptInt, Default: "22", Help: "TCP port to listen on (default 22)"},
+		{Key: OptServerPool, Kind: client.OptCIDR, Default: "10.200.0.0/24", Help: "tunnel subnet clients use (default 10.200.0.0/24)"},
+		{Key: OptServerDNS, Kind: client.OptCommaList, Help: "comma-separated DNS servers (informational)"},
+		{Key: OptServerUser, Kind: client.OptStr, Help: "username to accept (password auth)"},
+		{Key: OptServerPassword, Flag: "pass", Kind: client.OptStr, Secret: true, Help: "the user's password"},
+		{Key: OptServerUsers, Kind: client.OptFilePath, Secret: true, Help: "path to a file of username:secret lines, for more than one user; the secret may be a bcrypt verifier"},
+		{Key: OptServerAuthorizedKeys, Kind: client.OptFilePath, Help: "path to an authorized_keys file (public-key auth)"},
+		{Key: OptServerShape, Kind: client.OptInt, Default: "0", Help: "per-flow downstream shaping budget in bytes; appends filler the peer trims by the inner IP length (0 = off)"},
+		client.TUNOpt(OptServerTUN),
+	})
+}
+
+// parseServerOptions builds an SSH responder from string options.
+func parseServerOptions(opts map[string]string) (client.Server, error) {
+	cfg := ServerConfig{
+		ListenIP: opts[OptServerListenIP],
+		Pool:     opts[OptServerPool],
+		TUNName:  opts[OptServerTUN],
+		Users:    map[string]string{},
+		Logger:   slog.New(vlog.NewTextHandler(os.Stdout, slog.LevelInfo)),
+
+		PostQuantumOnly: pqpolicy.Requested(opts),
+	}
+	if v := opts[OptServerShape]; v != "" {
+		sh, cerr := strconv.Atoi(v)
+		if cerr != nil || sh < 0 {
+			return nil, fmt.Errorf("ssh: invalid shape %q", v)
+		}
+		cfg.Shape = sh
+	}
+	var err error
+	if cfg.HostKey, err = os.ReadFile(opts[OptServerHostKey]); err != nil {
+		return nil, fmt.Errorf("ssh: host-key: %w", err)
+	}
+	if cfg.Users, err = userdb.Resolve(userdb.Verifiable, opts[OptServerUsers], opts[OptServerUser], opts[OptServerPassword]); err != nil {
+		return nil, fmt.Errorf("ssh: %w", err)
+	}
+	if path := opts[OptServerAuthorizedKeys]; path != "" {
+		data, rerr := os.ReadFile(path)
+		if rerr != nil {
+			return nil, fmt.Errorf("ssh: authorized-keys: %w", rerr)
+		}
+		for line := range strings.SplitSeq(string(data), "\n") {
+			if strings.TrimSpace(line) != "" {
+				cfg.AuthorizedKeys = append(cfg.AuthorizedKeys, line)
+			}
+		}
+	}
+	if v := opts[OptServerPort]; v != "" {
+		p, perr := strconv.Atoi(v)
+		if perr != nil {
+			return nil, fmt.Errorf("ssh: invalid port %q", v)
+		}
+		cfg.ListenPort = p
+	}
+	cfg.DNS = parseIPList(opts[OptServerDNS])
+	return NewServer(cfg)
+}

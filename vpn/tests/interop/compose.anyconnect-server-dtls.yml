@@ -1,0 +1,43 @@
+# Reference AnyConnect client (openconnect) -> veepin server, over DTLS.
+#
+# The sibling of compose.anyconnect-server.yml with the UDP data channel left on.
+# openconnect brings the CSTP tunnel up, then attaches a DTLS 1.2 session keyed
+# by the RFC 5705 exporter over the TLS master secret, and prefers it.
+#
+# The two are separate cells because openconnect falls back to TLS silently when
+# DTLS does not come up. One cell covering both meant a ping that crossed on TLS
+# proved the DTLS claim just as well as one that crossed on DTLS -- which is to
+# say, not at all. The test for this file additionally requires openconnect to
+# report an established DTLS connection.
+name: veepin-interop-anyconnect-server-dtls
+
+services:
+  veepin-anyconnect-server:
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: veepin:interop
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      USER: "ocuser"
+      PASS: "ocpass"
+    volumes:
+      - ./anyconnect/pki:/pki:ro
+      - ./veepin/anyconnect-server-entrypoint.sh:/entrypoint.sh:ro
+    entrypoint: ["/bin/sh", "/entrypoint.sh"]
+
+  openconnect:
+    build:
+      context: openconnect
+    image: interop-openconnect
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    depends_on: [veepin-anyconnect-server]
+    environment:
+      SERVER: "veepin-anyconnect-server"
+      USER: "ocuser"
+      PASS: "ocpass"
+    volumes:
+      - ./anyconnect/pki:/pki:ro
+      - ./openconnect/entrypoint.sh:/entrypoint.sh:ro

@@ -1,0 +1,328 @@
+name: release
+
+# Run GoReleaser on every pushed semver tag (e.g. `git tag v1.2.3 && git push --tags`).
+#
+# Also dispatchable, because a tag push is a one-shot event: if Actions drops it
+# — which has happened — the tag exists, no run was ever queued, nothing reports
+# an error, and re-pushing the tag is not guaranteed to re-fire it. Dispatching
+# against the tag ref re-runs the release without inventing a new version.
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write # needed to create the GitHub Release and upload artifacts
+
+jobs:
+  goreleaser:
+    runs-on: ubuntu-latest
+    # id-token is what makes cosign's keyless signing possible: the signature is
+    # bound to this workflow's OIDC identity, so there is no private key to
+    # store, rotate or leak. contents: write is for the release itself.
+    permissions:
+      contents: write
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # full history + tags so the changelog and version resolve
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.27"
+          cache: true
+
+      - name: Run tests
+        run: go test -race ./...
+
+      # syft produces the SBOMs and cosign signs the checksum file. Both are
+      # pinned rather than floating, for the reason the golangci-lint pin in
+      # ci.yml spells out: a dependency that moves on its own schedule turns a
+      # green release red without a change on our side, and a release is the
+      # worst moment to discover that.
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+        with:
+          cosign-release: "v2.4.1"
+
+      - name: Install syft
+        uses: anchore/sbom-action/download-syft@v0
+        with:
+          syft-version: "v1.18.1"
+
+      - name: Run GoReleaser
+        uses: goreleaser/goreleaser-action@v6
+        with:
+          distribution: goreleaser
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # The NetworkManager plugin is a separate (nested, non-CGO-free) module whose
+  # editor .so and auth-dialog are C linked against libnm/GTK, so it isn't part
+  # of the GoReleaser pipeline. Build its .deb/.rpm here and attach them to the
+  # Release that GoReleaser just created. This job covers the architectures
+  # with native runners (amd64, arm64); nm-packages-cross below covers the
+  # rest.
+  nm-packages:
+    needs: goreleaser
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { runner: ubuntu-22.04, pkg_arch: amd64 }
+          - { runner: ubuntu-22.04-arm, pkg_arch: arm64 }
+    # Pin to the oldest supported LTS: the editor .so and auth-dialog link
+    # against the host's GLib/GTK, and GLib symbols are NOT version-scoped, so a
+    # binary built on a newer GLib can pull in symbols absent on older systems
+    # (e.g. g_once_init_enter_pointer, GLib >= 2.80, which crashes the loader on
+    # GLib 2.72 / Ubuntu 22.04 / Pop!_OS 22.04). Build on the baseline so the
+    # released package loads everywhere from that GLib up.
+    runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        working-directory: nm
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.27"
+          cache: true
+          cache-dependency-path: nm/go.sum
+
+      - name: Install editor/auth-dialog build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libnm-dev libnma-dev libgtk-3-dev libglib2.0-dev
+
+      - name: Build packages (.deb/.rpm)
+        run: |
+          # Pinned, not @latest. nfpm v2.47.0 raised its own go directive to
+          # 1.26.4, and setup-go's explicit go-version sets GOTOOLCHAIN=local,
+          # so `@latest` turned this job red with no change on our side --
+          # between one green run and the next. v2.46.3 is the last release that
+          # builds on the Go this workflow pins. Same reasoning as the
+          # golangci-lint pin in ci.yml: a dependency that moves on its own
+          # schedule gets a version, not a floating tag.
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.46.3
+          # Strip the leading "v" so the package version is bare semver.
+          make packages VERSION="${GITHUB_REF_NAME#v}" PKG_ARCH=${{ matrix.pkg_arch }} \
+            NFPM="$(go env GOPATH)/bin/nfpm"
+
+      - name: Attach packages to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "${GITHUB_REF_NAME}" bin/pkg/*.deb bin/pkg/*.rpm --clobber
+
+  # Cross-built veepin-nm for the Debian release architectures without native
+  # runners. The C parts (editor .so, auth-dialog) need the TARGET's libnm/GTK
+  # dev libraries, which no Ubuntu runner can provide for foreign arches —
+  # Debian's archive carries every release architecture in one repository, so a
+  # Debian container plus `dpkg --add-architecture` gives real cross toolchains
+  # AND target dev libs, no emulation. The Go service cross-compiles natively
+  # (CGO-free). Baseline: bookworm (GLib 2.74), so binaries load on Debian 12+
+  # / Ubuntu 24.04+; riscv64 builds on trixie only because riscv64 is not a
+  # bookworm release architecture (riscv64 users run trixie or newer anyway).
+  # Runs in parallel with goreleaser; the upload job below waits for both.
+  nm-packages-cross:
+    runs-on: ubuntu-latest
+    container: debian:${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: armhf, image: bookworm, pkg_arch: arm7, goarch: arm, goenv: "GOARM=7" }
+          - { arch: armel, image: bookworm, pkg_arch: arm5, goarch: arm, goenv: "GOARM=5" }
+          # GO386=softfloat: Debian's i386 baseline does not include SSE2,
+          # which Go's default GO386=sse2 would require.
+          - { arch: i386, image: bookworm, pkg_arch: "386", goarch: "386", goenv: "GO386=softfloat" }
+          - { arch: ppc64el, image: bookworm, pkg_arch: ppc64le, goarch: ppc64le, goenv: "" }
+          - { arch: s390x, image: bookworm, pkg_arch: s390x, goarch: s390x, goenv: "" }
+          - { arch: riscv64, image: trixie, pkg_arch: riscv64, goarch: riscv64, goenv: "" }
+    steps:
+      - name: Install cross toolchain and target dev libraries
+        run: |
+          arch=${{ matrix.arch }}
+          dpkg --add-architecture "$arch"
+          apt-get update
+
+          # Debian 12 has moved to LTS, and LTS carries fewer architectures
+          # than the release did: bookworm-security's Release file lists
+          # "amd64 arm64 armhf i386 ppc64el" and no longer armel or s390x,
+          # while bookworm main still carries all of them. The container's own
+          # amd64 does get security updates, so a Multi-Arch: same library ends
+          # up wanted at two versions at once -- libexpat1:amd64 at
+          # 2.5.0-1+deb12u3 from security, libexpat1:armel at 2.5.0-1+deb12u2
+          # from main -- and apt requires those to be equal. It reports the
+          # foreign one as "libexpat1:armel ... but it is not installable",
+          # installs nothing, and exits 100. Nothing about this repo changed;
+          # the archive did, on a date nobody was watching.
+          #
+          # So when the security suite has no index for the target
+          # architecture, demote it below main and let both architectures
+          # resolve out of one suite at one version. Demote rather than remove,
+          # so a package that only ever lived in security is still reachable.
+          # This costs nothing in the artifact: the .so links dynamically
+          # against the *target's* libnm/GTK, which come from main either way.
+          #
+          # Demoting security is not enough on its own once the image itself
+          # carries security updates. debian:bookworm 12.15 ships
+          # liblzma5:amd64 at 5.4.1-1+deb12u2 and libpcre2-8-0:amd64 at
+          # 10.42-1+deb12u2, both from security, and a pin below 1000 never
+          # moves an installed package, so the armel/s390x copies are still
+          # wanted at a version only amd64 has. Pinning the l=Debian suites
+          # (main and updates; security is l=Debian-Security) above 1000 lets
+          # apt downgrade those amd64 packages to the version the target can
+          # match -- the two above, at the time of writing, and nothing else.
+          # Every other arch skips this branch, so --allow-downgrades on the
+          # install below never has anything to do for them.
+          #
+          # The alternative -- moving these two to trixie, as riscv64 already
+          # does -- also resolves, but it would raise the runtime GLib/glibc
+          # floor for armel and s390x users from Debian 12 to Debian 13, which
+          # is exactly what the bookworm baseline exists to prevent.
+          release=$(ls /var/lib/apt/lists/*-security_InRelease 2>/dev/null | head -1)
+          if [ -n "$release" ] && ! sed -n 's/^Architectures: //p' "$release" | tr ' ' '\n' | grep -qx "$arch"; then
+            echo "::notice::security suite carries no $arch index; resolving out of main only"
+            printf 'Package: *\nPin: release l=Debian-Security\nPin-Priority: 100\n\nPackage: *\nPin: release l=Debian\nPin-Priority: 1001\n' \
+              > /etc/apt/preferences.d/no-partial-security
+          fi
+
+          apt-get install -y --allow-downgrades --no-install-recommends \
+            make dpkg-dev crossbuild-essential-"$arch" pkg-config \
+            ca-certificates git \
+            libnm-dev:"$arch" libnma-dev:"$arch" \
+            libgtk-3-dev:"$arch"
+
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.27"
+          cache: false # actions/cache needs zstd, absent in the container
+
+      - name: Build packages (.deb/.rpm)
+        working-directory: nm
+        run: |
+          # Pinned, not @latest. nfpm v2.47.0 raised its own go directive to
+          # 1.26.4, and setup-go's explicit go-version sets GOTOOLCHAIN=local,
+          # so `@latest` turned this job red with no change on our side --
+          # between one green run and the next. v2.46.3 is the last release that
+          # builds on the Go this workflow pins. Same reasoning as the
+          # golangci-lint pin in ci.yml: a dependency that moves on its own
+          # schedule gets a version, not a floating tag.
+          go install github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.46.3
+          # Derive the GNU triplet (cross gcc prefix) and multiarch directory
+          # (target pkg-config path) from the Debian architecture name.
+          triplet="$(dpkg-architecture -a${{ matrix.arch }} -qDEB_HOST_GNU_TYPE 2>/dev/null)"
+          multiarch="$(dpkg-architecture -a${{ matrix.arch }} -qDEB_HOST_MULTIARCH 2>/dev/null)"
+          export GOARCH=${{ matrix.goarch }} ${{ matrix.goenv }}
+          export PKG_CONFIG_LIBDIR="/usr/lib/$multiarch/pkgconfig:/usr/lib/pkgconfig:/usr/share/pkgconfig"
+          # -buildvcs=false: the checkout's owner differs from the container
+          # user, so git refuses to read the repo (exit 128) when go tries to
+          # stamp VCS info the service doesn't use anyway (VERSION goes to
+          # nfpm via ldflags-free packaging metadata).
+          make packages VERSION="${GITHUB_REF_NAME#v}" PKG_ARCH=${{ matrix.pkg_arch }} \
+            CC="$triplet-gcc" NFPM="$(go env GOPATH)/bin/nfpm" GOFLAGS=-buildvcs=false
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nm-${{ matrix.arch }}
+          path: |
+            nm/bin/pkg/*.deb
+            nm/bin/pkg/*.rpm
+
+  # Attach the cross-built packages to the release (the container jobs above
+  # have no gh CLI; a stock runner does).
+  nm-cross-upload:
+    needs: [goreleaser, nm-packages-cross]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download cross-built packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: nm-*
+          merge-multiple: true
+          path: pkgs
+
+      - name: Attach packages to the release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release upload "${GITHUB_REF_NAME}" pkgs/*.deb pkgs/*.rpm --clobber
+
+  # Signed APT repository on GitHub Pages, so Debian/Ubuntu users can
+  # `apt install veepin veepin-nm` and track releases with `apt upgrade`.
+  # Stateless: rebuilt from this release's .debs only (older versions stay on
+  # GitHub Releases). Needs the APT_SIGNING_KEY secret (armored GPG private
+  # key) and Pages enabled; configure-pages creates the site on first run.
+  apt-repo:
+    needs: [goreleaser, nm-packages, nm-cross-upload]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Download this release's debs
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release download "${GITHUB_REF_NAME}" -p '*.deb' -D debs
+
+      - name: Import the repository signing key
+        env:
+          APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
+        run: |
+          if [ -z "$APT_SIGNING_KEY" ]; then
+            echo "::error::APT_SIGNING_KEY secret is not set; refusing to publish an unsigned repo"
+            exit 1
+          fi
+          printf '%s' "$APT_SIGNING_KEY" | gpg --batch --import
+          # The secret and the in-repo public key are rotated by hand, in two
+          # different places, so they can drift apart. Nothing downstream would
+          # notice: the repo would be signed by the new key and the site would
+          # publish it, while every client that fetched the keyring earlier
+          # fails `apt update` with a bad signature. Compare fingerprints here,
+          # where the mismatch is still a red build rather than a broken repo.
+          pinned=$(gpg --show-keys --with-colons packaging/apt-signing-key.asc | awk -F: '/^fpr:/ {print $10; exit}')
+          imported=$(gpg --list-secret-keys --with-colons | awk -F: '/^fpr:/ {print $10; exit}')
+          if [ "$pinned" != "$imported" ]; then
+            echo "::error::APT_SIGNING_KEY holds $imported but packaging/apt-signing-key.asc pins $pinned; re-export the public key or fix the secret"
+            exit 1
+          fi
+          echo "signing key $imported matches packaging/apt-signing-key.asc"
+
+      - name: Build the signed repository
+        run: .github/scripts/build-apt-repo.sh debs site
+
+      - name: Configure Pages
+        uses: actions/configure-pages@v5
+        with:
+          enablement: true
+
+      - name: Upload site
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - name: Deploy to GitHub Pages
+        id: deploy
+        uses: actions/deploy-pages@v4

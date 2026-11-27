@@ -1,0 +1,313 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  # The fuzz job is manual-only (see its `if:`); this makes it dispatchable.
+  workflow_dispatch:
+
+# Cancel superseded runs on the same ref (e.g. rapid PR pushes).
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (go ${{ matrix.go }})
+    runs-on: ubuntu-latest
+    strategy:
+      # Stop both legs on the first failure. The two differ only by toolchain,
+      # so a failure in one is nearly always a failure in both, and reading the
+      # same output twice is not worth the runner minutes. The trade is that a
+      # genuine toolchain-specific break shows up as one leg failing and the
+      # other cancelled, which needs a re-run to attribute -- rare enough to be
+      # the better side of the deal.
+      fail-fast: true
+      matrix:
+        # Pinned + latest, so we catch upcoming-toolchain breakage. Note that
+        # the two legs resolve to the SAME release until 1.28 ships: go.mod's
+        # floor is 1.27 (crypto/mldsa), so the pin cannot sit a release behind
+        # the way it used to. That is temporary and self-correcting -- do not
+        # "fix" it by lowering the pin, which would only fail the vet step.
+        go: ["1.27", "1.x"]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: ${{ matrix.go }}
+          # check-latest is load-bearing for the "1.x" leg, not a nicety.
+          # setup-go resolves "1.x" against actions/go-versions, a manifest that
+          # lags go.dev by days -- the same lag the govulncheck job below has a
+          # paragraph about. With go.mod's floor at 1.27 and the manifest still
+          # topping out at 1.26.6, "1.x" resolved to a toolchain older than the
+          # module requires and the leg failed before running a single test.
+          # Fetching from go.dev when the version is not in the manifest is what
+          # keeps "latest" meaning latest.
+          check-latest: true
+          cache: true
+
+      - name: Verify go.mod is tidy
+        run: |
+          go mod tidy
+          git diff --exit-code -- go.mod go.sum
+
+      - name: Build
+        run: go build -v ./...
+
+      # The macOS client (dataplane/tun_darwin.go and friends) cannot be run
+      # here -- Docker on a Mac is a Linux VM, so every interop cell runs a
+      # Linux veepin whatever laptop starts it. Cross-compiling is the most this
+      # can prove: that the syscalls, constants and build tags hold together.
+      # doc/verifying-macos.md is the procedure for the person with the hardware.
+      - name: Cross-build (macOS, both architectures)
+        run: |
+          GOOS=darwin GOARCH=amd64 go build ./...
+          GOOS=darwin GOARCH=arm64 go build ./...
+          GOOS=darwin GOARCH=arm64 go vet ./...
+
+      - name: Test (race)
+        run: go test -race ./...
+
+      - name: Test (no race, for allocation assertions)
+        run: go test ./...
+
+  lint:
+    name: lint & vet
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.27"
+          cache: true
+
+      - name: gofmt
+        run: |
+          unformatted=$(gofmt -l .)
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v9
+        with:
+          # Pinned (v9 action → golangci-lint v2 line; v8+ requires >= v2.1.0).
+          # Pinning keeps a new release from turning green CI red without a code
+          # change; matches the v2 schema in .golangci.yml. The action version
+          # moved for the Node 24 runtime, not for the linter -- this pin is
+          # what keeps the lint behaviour identical across that bump.
+          #
+          # Moved 2.12.2 -> 2.13.1 with the go.mod floor. This is NOT optional
+          # and not a routine bump: golangci-lint refuses outright to lint a
+          # module whose language version exceeds the Go it was built with --
+          # "the Go language version (go1.26) used to build golangci-lint is
+          # lower than the targeted Go version (1.27.0)" -- so the 1.27 floor
+          # requires a linter built with 1.27. 2.13.1 is the first one.
+          #
+          # Moved 2.13.1 -> 2.14.0 when setup-go's "1.27" started resolving to
+          # 1.27.2, whose export data is version 5. The reader is the
+          # golang.org/x/tools vendored into the linter, not the Go it was
+          # built with -- 2.13.x and 2.14.0 are all built with go1.27.0 -- and
+          # only 2.14.0's x/tools 0.50.0 reads it. Before that every package
+          # fails typecheck with "export data version 5 is greater than
+          # maximum supported version 4".
+          version: v2.14.0
+
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          # govulncheck reports standard-library vulnerabilities against the
+          # toolchain it runs under, so this job is only as current as its Go.
+          #
+          # It is PINNED rather than "1.x", and the reason is worth writing down
+          # because "1.x" looks like the safer choice and is not. setup-go
+          # resolves "1.x" against actions/go-versions, a manifest that lags
+          # go.dev by days — so with go1.26.6 published and fixing seven stdlib
+          # advisories, "1.x" plus check-latest still resolved to go1.26.5 and
+          # this job reported all seven against call paths nobody had touched.
+          # A vulnerability scanner that fails without a code change is usually
+          # reporting on itself.
+          #
+          # The cost of pinning is that this needs bumping when the next stdlib
+          # advisory lands. That is a visible, one-line chore; the alternative is
+          # a job that goes red on somebody else's schedule and teaches everyone
+          # to ignore it.
+          #
+          # It also has to keep up with go.mod's floor, which is a second reason
+          # to bump it and one that fails loudly rather than quietly: GOTOOLCHAIN
+          # is local here, so a pin older than the floor cannot even load the
+          # packages -- "go.mod requires go >= 1.27.0 (running go 1.26.6)".
+          go-version: "1.27.2"
+          # Fetches from go.dev when the version is not in the manifest, which
+          # is exactly the case this pin exists for.
+          check-latest: true
+          cache: true
+
+      - name: Run govulncheck
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          govulncheck ./...
+
+  fuzz:
+    name: fuzz (smoke)
+    runs-on: ubuntu-latest
+    # Manual-only: the per-target budget makes this the slowest job, and a short
+    # smoke run rarely catches what the out-of-band long campaigns do not. Run it
+    # from the Actions tab ("Run workflow") before a release or after touching a
+    # parser. Regressions long campaigns find are pinned as testdata/fuzz seeds,
+    # which the ordinary `go test` (in the test job) replays on every push.
+    if: github.event_name == 'workflow_dispatch'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Set up Go
+        uses: actions/setup-go@v7
+        with:
+          go-version: "1.27"
+          cache: true
+
+      # Every protocol parser here reads attacker-controlled bytes before
+      # anything is authenticated, so a panic in one is a remote crash. This job
+      # runs a short budget per target when dispatched: enough to catch a
+      # regression that a seed or a recent change makes reachable immediately,
+      # not enough to find something deep. Long campaigns are run out of band
+      # with a larger -fuzztime, and any crash found there is committed to
+      # testdata/fuzz as a seed — those seeds are replayed by the ordinary
+      # `go test` in the test job, which is what runs on every push.
+      - name: Fuzz each target briefly
+        run: |
+          set -euo pipefail
+          fail=0
+          ran=0
+          # One target at a time: `go test -fuzz` accepts a single pattern, and
+          # naming them explicitly means a new target must be added here too --
+          # which is the point, since a target nothing runs is not a test. That
+          # principle is enforced by TestFuzzTargetsAreAllListed in the root
+          # package, which reads this list and the tree and fails if either has
+          # something the other does not; the count assertion below only ever
+          # caught the heredoc being truncated.
+          # The list is read on fd 3, not stdin. `go test` inherits the loop's
+          # stdin, and a subprocess that reads it consumes the rest of the
+          # heredoc -- which silently truncates the run after the first target
+          # while still reporting success. A green job testing 1 of 32 parsers
+          # is worse than no job, so the count is asserted at the end.
+          while read -r pkg target <&3; do
+            [ -z "$pkg" ] && continue
+            ran=$((ran + 1))
+            echo "::group::$pkg $target"
+            if ! go test "$pkg" -run XXX -fuzz "^${target}\$" -fuzztime 20s; then
+              echo "::error::fuzz target $target in $pkg failed"
+              fail=1
+            fi
+            echo "::endgroup::"
+          done 3<<'TARGETS'
+          ./internal/nebula FuzzUnmarshalCertificate
+          ./internal/nebula FuzzCertificateMarshalIsStable
+          ./internal/nebula FuzzParseHeader
+          ./internal/nebula FuzzParseHandshakePayload
+          ./internal/nebula FuzzParseMetaMessage
+          ./internal/nebula FuzzParseControl
+          ./internal/nebula FuzzProtoPrimitives
+          ./internal/dtls FuzzParseRecord
+          ./internal/dtls FuzzClientHelloSessionID
+          ./internal/dtls FuzzParseFragment
+          ./internal/dtls FuzzReassembler
+          ./internal/dtls FuzzParseHandshakeMessages
+          ./internal/ikev2/payload FuzzParseMessage
+          ./internal/ikev2/payload FuzzParseHeader
+          ./internal/ikev2/payload FuzzParseBodies
+          ./internal/ikev1 FuzzParseHeader
+          ./internal/ikev1 FuzzParsePayloads
+          ./internal/ikev1 FuzzParseAttrs
+          ./internal/ikev1 FuzzParseSA
+          ./internal/ikev1 FuzzParseCfg
+          ./internal/ikev1 FuzzParseDPDNotify
+          ./internal/pulse FuzzParseMessage
+          ./internal/pulse FuzzParseAVPs
+          ./internal/pulse FuzzParseEAP
+          ./internal/pulse FuzzParseConfig
+          ./internal/pulse FuzzParseESPPacket
+          ./internal/l2tp FuzzParseHeader
+          ./internal/l2tp FuzzParseAVPs
+          ./internal/l2tpv3 FuzzDecodeData
+          ./internal/l2tpv3 FuzzSessionIDDemux
+          ./internal/l2tpv3 FuzzParseControl
+          ./internal/ikev2/aggfrag FuzzReassemblerFeed
+          ./internal/ikev2/aggfrag FuzzParseHeader
+          ./internal/ikev2/ike FuzzTCPReader
+          ./internal/ppp FuzzParseCP
+          ./internal/ppp FuzzParseOptions
+          ./internal/ppp FuzzParseCHAP
+          ./internal/openvpn/wire FuzzParseControl
+          ./internal/wireguard/wire FuzzParseMessages
+          ./internal/wireguard/noise FuzzCookieReplies
+          ./internal/sstp/wire FuzzParseControl
+          ./internal/anyconnect FuzzParseHeader
+          ./internal/anyconnect FuzzParseDTLS
+          ./internal/anyconnect FuzzParseConfigAuth
+          ./internal/toy FuzzParseHeader
+          ./internal/toy FuzzParseBodies
+          ./internal/toy FuzzSessionOpen
+          ./internal/supervisor FuzzParseListenerFile
+          ./internal/masque/http3 FuzzConsumeVarint
+          ./internal/masque/http3 FuzzParseSettings
+          ./internal/masque/http3 FuzzDecodeFieldSection
+          ./internal/masque FuzzReadCapsule
+          ./internal/masque FuzzParseAddresses
+          ./internal/masque FuzzParseRoutes
+          ./internal/masque FuzzDecodeDatagramPayload
+          ./internal/masque FuzzParseConnectUDPTarget
+          ./internal/fortinet FuzzParseFrame
+          ./internal/fortinet FuzzParseConfigXML
+          ./internal/fortinet FuzzParseLoginResult
+          ./internal/fortinet FuzzParseLoginForm
+          ./internal/fortinet FuzzParseDTLSClientHello
+          ./internal/fortinet FuzzParseDTLSServerHello
+          ./internal/fortinet FuzzParseChallengeForm
+          ./internal/gp FuzzParseFrame
+          ./internal/gp FuzzEncodeParseFrame
+          ./internal/gp FuzzParseConfigXML
+          ./internal/gp FuzzParseLoginResponse
+          ./internal/gp FuzzParsePreloginResponse
+          ./internal/gp FuzzParseLoginForm
+          ./internal/gp FuzzActivationPing
+          ./internal/softether FuzzDecodePack
+          ./internal/capture FuzzParseCorpus
+          ./internal/capture FuzzReadPCAP
+          ./internal/wireguard FuzzDeobfuscate
+          ./internal/wireguard FuzzObfuscateRoundTrip
+          TARGETS
+
+          # Guard against the truncation described above, and against a target
+          # being added to the list without the loop reaching it.
+          expected=75
+          if [ "$ran" -ne "$expected" ]; then
+            echo "::error::ran $ran fuzz targets, expected $expected -- the target list was truncated"
+            exit 1
+          fi
+          echo "ran $ran fuzz targets"
+          exit "$fail"

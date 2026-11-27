@@ -1,0 +1,417 @@
+# Scaling the data path past one core per direction
+
+Status: **design note; Option 1 is complete.** The UDP batching primitive
+(`dataplane.BatchConn`) is implemented and measured,
+`dataplane.PacketConn.ReadBatch`/`WriteBatch` carry it into the shared socket
+wrapper, every single-socket UDP read loop — server and client, across IKEv2,
+WireGuard, OpenVPN, Nebula, and L2TP — reads through one of the two, and both
+TUN halves are in: `OpenTUNGSO` negotiates the virtio-net header path so the
+kernel hands the pump TCP super-frames, which segment in userspace
+(offload_linux.go) and egress as one batched send; and inbound bulk TCP
+coalesces back into super-frames written to the TUN once (GRO, gro_linux.go) —
+both wired in IKEv2, WireGuard, and OpenVPN, server and client. Not built:
+TSO6/USO and everything under Option 2. **"IPv4-only tree" was the reason given for TSO6 and it stopped being true** when IKEv2 started assigning an `INTERNAL_IP6_ADDRESS` by default — but the conclusion survives the premise, and the correction is worth having precisely because it looks like a regression and is not. `TUNSETOFFLOAD` negotiates `TUN_F_CSUM|TUN_F_TSO4`, so the kernel never produces a v6 super-frame: inner IPv6 arrives as ordinary packets and takes the path everything took before GSO existed. That is an **absent optimisation, not a slow path** — there is no cliff to measure and nothing is silently degraded.
+
+What would be unsafe is adding `TUN_F_TSO6` to the ioctl without writing the v6 segmenter, because the kernel would then send super-frames `segmentTSO4` cannot cut and the failure mode is corrupted traffic rather than an error. `TestPumpVnetDropsUnnegotiatedGSOTypes` asserts the drop so that change fails a test instead. Building TSO6 properly is still open, and still gated on a measurement of what GSO buys that nobody has taken for v6. Written while
+sharpening the
+[security boundary](security.md#throughput-is-bounded-by-one-core-per-direction)
+that states the current ceiling. It captures which protocols the ceiling actually
+binds, the two levers that lift it (in the order worth trying them), and the
+single-goroutine *assumptions* a naive parallelization would break — so the work
+is scoped honestly rather than half-built.
+
+## Which protocols this even affects
+
+Split the protocols by how they read inbound traffic, because that is where the
+ceiling lives:
+
+- **Single-socket UDP demux** — IKEv2, WireGuard, OpenVPN, Nebula, L2TP. Every
+  client's ingress funnels through one socket-reader goroutine, and egress
+  through the one `Pump.Run` TUN reader. **This is the only class with the
+  ceiling.**
+- **Connection-per-client** — SSTP, SSH, AnyConnect, Fortinet, MASQUE. Each
+  client is its own TCP/TLS/QUIC connection with its own goroutine, so these
+  already scale across clients on the Go runtime for free. They need nothing
+  here.
+
+So "let every protocol inherit parallelism" is the wrong target: half of them
+already have it. The work is for the single-socket class — and, usefully, most of
+that class (`ikev2`, `wireguard`, `openvpn`, `nebula`) already shares
+`dataplane.Pump` for egress, so shared machinery can carry the fix.
+
+## The current model
+
+A single-socket server runs exactly two data-path goroutines, one per direction,
+both shared across every client:
+
+- **Outbound** — `dataplane.Pump.Run` (dataplane/pump.go) reads the TUN in one
+  loop, and for each packet looks up the tunnel, encapsulates, and sends.
+- **Inbound** — the transport's socket reader (e.g. `internal/ikev2/ike`
+  `transport.serve`, the UDP/4500 goroutine) reads every ESP datagram for every
+  client and calls `Pump.HandleInbound`, which decapsulates and writes the TUN.
+
+Adding clients adds no parallelism. The crypto is not the bottleneck — `ESPCrypter`
+holds no shared mutable state and scales linearly (`BenchmarkESPDecapParallel`) —
+the plumbing above it simply never calls it from more than one goroutine.
+
+## Profile before choosing
+
+One core already does **~15 Gbit/s of AES-GCM** (ESP decap benches at ~2 GB/s at
+1400 B). At that rate the limit is almost never the cipher; it is the
+**per-packet syscall cost** of reading the TUN and the UDP socket one datagram at
+a time. So the first task is to confirm *where* the time goes — a CPU profile of a
+saturated single tunnel. If it is syscall-bound (it usually is), the lever below
+that removes syscalls beats the one that adds cores, and does so without any
+reordering risk.
+
+## Option 1 (try first): batch the syscalls
+
+Cut the number of read/write/send calls per packet instead of adding goroutines.
+This is the first lever to pull for a userspace VPN — it works *on a single
+core*, carries **no packet-reordering risk**, and needs no change to any
+protocol's per-SA state. It is also where the reference `wireguard-go` got its
+throughput, not from more goroutines.
+
+- **UDP:** `recvmmsg`/`sendmmsg`, wrapped by `golang.org/x/net/ipv4`'s
+  `PacketConn.ReadBatch`/`WriteBatch` (`x/sys/unix` has no mmsg wrappers), to
+  move a batch of datagrams per syscall on both the inbound socket and the
+  `Sender`. `dataplane.BatchConn` is this primitive, measured below.
+- **TUN:** the virtio-net header path (`IFF_VNET_HDR`) so the kernel hands up /
+  accepts back GSO super-frames — one read/write for many segments — with
+  segmentation offloaded. `dataplane.OpenTUNGSO` negotiates it
+  (`TUN_F_CSUM|TUN_F_TSO4`, falling back to a plain TUN on kernels that
+  refuse), and offload_linux.go is the userspace TSO: header replication,
+  per-segment length/ID/sequence fixups, and full checksum computation —
+  `TUN_F_CSUM` also hands us the NIC partial-checksum contract to finish,
+  GSO frame or not.
+
+The two halves are not symmetric, and the asymmetry decides what can be built
+when. **Inbound UDP batching stands alone**: `recvmmsg` drains whatever the
+socket has queued and blocks for one datagram when it has nothing, so it batches
+under load and adds no latency when idle. `dataplane.PacketConn.ReadBatch` is
+that, with each message carrying its own `IP_PKTINFO` control data so batched
+reads keep the wrapper's source-address pinning. Every single-socket read loop
+now reads this way: the IKEv2, WireGuard, OpenVPN, and L2TP servers, the Nebula
+host, and the IKEv2, WireGuard, OpenVPN, and L2TP client loops (connected client
+sockets use the bare `dataplane.BatchConn`; the toy example keeps its plain
+single-read loop on purpose — it is teaching code). Each adoption carried its
+own buffer-retention audit, and the audits split the loops in two:
+
+- **Data packets ride borrowed buffers.** For the flat protocols (IKEv2 ESP,
+  WireGuard transport data, OpenVPN data opcodes, Nebula messages) the handler
+  chain decrypts in place and writes the TUN before returning, so the loop hands
+  the batch buffer over directly — the per-packet copy the single-read loops
+  made is gone from these hot paths. Control-plane packets (handshakes, rekeys,
+  session control) are still copied out, because their handling outlives the
+  batch.
+- **L2TP copies everything, data included.** The engine behind its ESP handler
+  parses control AVPs whose handling may alias the packet beyond the loop, so
+  only its syscalls are batched, not the buffer ownership.
+
+**Outbound batching needed the TUN half first**: a plain TUN read yields one
+packet, so there was no accumulation point — holding a packet hoping a second
+arrives adds latency on exactly the interactive traffic that would notice. A
+GSO super-frame *is* the accumulation point: it segments into a burst that all
+belongs to one tunnel (one route lookup for the lot), and
+`Pump.SetBatchSender` flushes the encapsulated burst in one `sendmmsg` — via
+`PacketConn.WriteBatch` on the servers (source-pinned per message) and
+`BatchConn` on the connected client sockets. One TUN read becomes one UDP
+syscall, instead of N reads and N sends. The kernel produces super-frames only
+when the sending application outpaces the wire — exactly when batching pays —
+and idle or interactive traffic arrives as ordinary packets on the same loop,
+so nothing waits on a timer.
+
+The write side is the symmetric half, **GRO** (gro_linux.go): within one read
+batch — handed over whole via `Pump.HandleInboundBatch`, so nothing is ever
+held across batches and idle traffic gains no latency — consecutive same-flow
+TCP segments coalesce into a super-frame written to the TUN once, with real
+GSO metadata (`NEEDS_CSUM` plus the pseudo-header sum: the same
+CHECKSUM_PARTIAL form the kernel's own GRO produces, so the stack delivers
+locally or re-segments on forward without walking a bogus checksum). The merge
+rules follow kernel GRO conservatively — options-free IPv4, identical headers
+apart from seq/ID/checksums, exact sequence contiguity, sequential IP IDs
+under DF, never-growing payloads, and every segment's TCP checksum *verified*
+before it may merge, since a CHECKSUM_PARTIAL frame is checked by nobody
+afterwards. Anything failing a rule passes through unmodified in arrival
+order, its flow's held segments flushed ahead of it, so GRO can only reduce
+syscalls, never change what the stack sees.
+
+TSO6 and UDP GSO stay un-negotiated (the tree tunnels IPv4, and no data path
+here carries bulk UDP inner flows). Protocols with their own TUN loops (Nebula,
+L2TP, and the toy on purpose) keep plain TUNs — a GSO TUN may only be driven
+by the pump's vnet loop. There is no loopback micro-benchmark for the TUN
+half — a real TUN needs CAP_NET_ADMIN — so its win shows where it should: the
+living throughput table, measured over real tunnels in CI. Both directions are
+unit-tested against each other (segments cut by the TSO path coalesce back
+into the original super-frame, checksums verified the way a receiver would,
+allocation-free in steady state).
+
+### Measured: what the UDP half alone buys
+
+`dataplane/batchconn_test.go` benchmarks mmsg batching in isolation — 1400-byte
+datagrams over loopback, `strace`-confirmed one `sendmmsg`/`recvmmsg` per batch:
+
+| direction | one datagram per syscall | batched | gain |
+|-----------|--------------------------|---------|------|
+| send | ~4.8 µs/pkt (~290 MB/s) | ~3.8 µs/pkt (~365 MB/s), saturates at batch-8 | ~20–25% |
+| receive | ~0.9 µs/pkt (~1.6 GB/s) | ~0.67 µs/pkt (~2.1 GB/s), saturates near batch-64 | ~15–33% |
+
+How to read that honestly:
+
+- **The send gain is real but loopback under-sells it.** Batching removes a
+  fixed ~1 µs/packet of syscall entry; the residual ~3.8 µs is loopback's
+  *inline per-datagram delivery*, cost that on a real NIC lives in the TX ring
+  and softirq, not in the send call. Treat the measured number as the floor.
+- **Batched receive dequeues at ~2.1 GB/s — parity with the single-core AES-GCM
+  rate** ([benchmarks](benchmarks.md)). After batching, the inbound syscall and
+  the cipher cost about the same, which is as good as the UDP half gets:
+  "multiplies throughput" would be too strong for mmsg alone. The multiplier,
+  if there is one, is the TUN GSO half — unmeasured, because it needs a real
+  TUN device.
+- **One wiring caveat:** `x/net/ipv4.ReadBatch` allocates each datagram's
+  source address (2 allocs, ~52 B per packet), where the old single-read paths
+  used `ReadFromUDPAddrPort` and allocated nothing. `WriteBatch` is
+  allocation-free. The wiring accepts that cost: on the flat protocols it is
+  more than paid for by the dropped per-packet data copy, and hand-rolling
+  `recvmmsg` stays the escape hatch if a profile ever blames it.
+
+Egress lives entirely in `Pump`, so the GSO path is **inherited by every
+pump-using protocol** for the price of two lines in its facade: open the TUN
+with `OpenTUNGSO`, and hand `SetBatchSender` a batch-capable send (IKEv2,
+WireGuard, and OpenVPN did, server and client). (Inbound batching did not need
+the shared UDP source described below after all — `PacketConn.ReadBatch` wrote
+the mechanism once and each read loop adopted it in place.) The `Tunnel`
+interface is unchanged — `Encapsulate`/`Decapsulate` are still called once per
+inner packet, and `Encapsulate`'s one-seal-allocation contract is what lets the
+pump hold a whole burst's outputs before flushing; only the TUN and transport
+syscalls are amortised.
+
+Batching alone may lift the ceiling far enough that Option 2 is never needed.
+
+## Measured: the profile Option 2 was gated on *(taken)*
+
+"Profile before choosing" had not been done since Option 1 landed, and Option 2
+was gated on it. It has now been taken, and it moved the answer.
+
+Machine: i9-14900KF (8 P-cores + 16 E-cores, 32 threads), Go 1.27, AES-256-GCM,
+1400-byte inner packets. Reproduce with:
+
+```sh
+go test ./dataplane/ -run '^$' -bench 'BenchmarkPump' -benchtime 2s -cpu 1 \
+  -cpuprofile /tmp/pump.prof
+go tool pprof -top -nodecount=25 /tmp/pump.prof
+
+for c in 1 2 4 8 16 32; do
+  go test ./internal/ikev2/esp/ -run '^$' -bench ESPDecapParallel -cpu $c
+done
+```
+
+### One core is not the ceiling anyone is near
+
+| path | ns/packet | inner throughput |
+|---|---|---|
+| `BenchmarkPumpInbound/1400B` (demux + decap + TUN write) | 633 | 2.2 GB/s ≈ **17.7 Gbit/s** |
+| `BenchmarkPumpOutbound/1400B` (route + encap + send) | 762 | 1.8 GB/s ≈ **14.7 Gbit/s** |
+
+Both are with a discard TUN and a no-op sender, so they are the *plumbing plus
+crypto* cost with the syscalls removed — an upper bound on one core, not a
+deployment figure. Nothing veepin is asked to do comes near it.
+
+### The finding: adding cores does not multiply this workload — the allocator caps it
+
+`BenchmarkESPDecapParallel` runs an independent SA per goroutine, which is the
+multi-client concentrator Option 2 exists for, with no shared state at all.
+It should scale linearly. It does not:
+
+| threads | 1 | 2 | 4 | 8 | 16 | 32 |
+|---|---|---|---|---|---|---|
+| GC on (default) | 2.7 GB/s | 3.3 | 4.6 | 5.9 | **6.7** | 5.5 *(regresses)* |
+| `GOGC=off` | 2.7 GB/s | — | — | 11.5 | — | **24.1** |
+
+With the collector running, aggregate throughput plateaus at **2.4×** the
+single-core rate by sixteen threads and then goes *backwards*. With it off the
+same code reaches 8.8×. The workload is not contended and it is not
+lock-bound — it is **allocation-bound**: every `Decapsulate`/`Encapsulate`
+returns a fresh buffer (1536 B/op, the one allocation the data path's contract
+permits), and at these packet rates the collector is what runs out first.
+
+`GOGC=off` is a diagnostic, not a deployment. What it proves is where the
+ceiling is: not in the plumbing Option 2 would parallelise.
+
+**So Option 2 stays unstarted, and now for a measured reason.** Parallelising
+the plumbing before removing the per-packet allocation buys 2.4× at best, on the
+most correctness-sensitive code in the repository, and every hazard below becomes
+live in exchange. Reusing the output buffers first would raise the single-core
+number *and* make Option 2 worth what it costs — and it is a change to
+`Encapsulate`'s contract, which is a program of its own.
+
+### Cheaper things the same profile found
+
+Flat CPU shares from `BenchmarkPump*` at `-cpu 1`, all of them plumbing rather
+than cipher:
+
+- **`time.Now()` twice per inbound packet — 7.5%.** `decapInbound` stamps the
+  pump-wide liveness clock and `countRx` stamps the tunnel's `LastSeen`, both on
+  every packet. Both feed timers measured in *tens of seconds* (idle probes,
+  OpenVPN's 60s ping-restart), so nanosecond precision is bought and thrown away.
+- **`RWMutex` read lock/unlock — 5.3%,** uncontended, on `byKey` and `routes`.
+  That is hazard 3 below, and the number is what makes it worth doing on its own:
+  it is 5% today with one reader, and RWMutex read-side cost is exactly what
+  degrades as readers are added, so it is a prerequisite to Option 2 rather than
+  a bonus.
+- **`routeTable.lookup` + `addrBit` — 10%** of the outbound path, walking the
+  trie a bit at a time.
+
+Crypto is 31% flat (`gcmAesEnc` + `gcmAesDec`) with the syscalls absent. In a
+deployment it is a smaller share still, which is the same conclusion from the
+other side: the cipher is not what to fix.
+
+## Taken: the allocation, the lock, the clock and the walk
+
+All four of the things above are done, and the measurement Option 2 was gated
+on has moved again.
+
+- **The per-packet allocation is gone in both directions** for every ESP
+  tunnel (IKEv2, Cisco, GlobalProtect, Pulse, and the L2TP and probe paths that
+  share `esp.SA`) and for WireGuard. Inbound, `esp.SA.Decapsulate` opens in
+  place, as WireGuard's `transport.Session.Open` always did: every read loop
+  already owned its datagram until the pump returned, and said so. Outbound,
+  `dataplane.AppendTunnel` lets a tunnel build its datagram in a buffer the
+  pump keeps -- one for the packet-at-a-time path, one per slot of a GSO burst
+  -- so `Sender` is now documented not to keep `pkt` past the call, which every
+  sender in the tree already honoured. A tunnel without the capability is sent
+  exactly as before. The CBC suite came along: its block modes are kept and
+  re-IV'd, and its MAC scratch had been escaping to the heap twice per packet.
+- **The lock is gone.** The demux map and the route trie are one immutable
+  snapshot behind an atomic pointer (`pump.go`'s `view`); writers copy and
+  publish, and the trie is persistent so that a published one is never written.
+  That is hazard 3 below, closed.
+- **The clock is read once per batch,** and **the trie walk reads the address
+  once** rather than per bit.
+- **Each inbound packet is demuxed once.** The aggregating-tunnel check used to
+  demux and look up every packet before the ordinary path did both again.
+
+Same machine, same benchmarks:
+
+| `BenchmarkPump*`, `-cpu 1` | before | after | allocs |
+|---|---|---|---|
+| Inbound 64 B | 245 ns | 188 ns | 1 → 0 |
+| Inbound 1400 B | 628 ns | 408 ns | 1 → 0 |
+| Outbound 64 B | 326 ns | 235 ns | 1 → 0 |
+| Outbound 1400 B | 735 ns | 482 ns | 1 → 0 |
+
+The inbound figures now include a 1400-byte copy per packet, because the
+benchmark has to hand the pump a fresh ciphertext each time it opens one in
+place -- the stand-in for the kernel's copy into a read buffer.
+
+And the result that mattered, `BenchmarkESPDecapParallel` with GC on:
+
+| threads | 1 | 2 | 4 | 8 | 16 | 32 |
+|---|---|---|---|---|---|---|
+| before | 2.7 GB/s | — | — | 5.9 | 6.5 | 4.3 *(regresses)* |
+| after | 4.1 GB/s | 8.2 | 16.5 | 30.9 | 56.8 | **87.8** |
+
+Linear, and past what `GOGC=off` reached before (24.1 GB/s), since that only
+stopped the collector; this stops the garbage. **So Option 2 is now worth what
+it costs**, which it was not: the per-SA work it would parallelise scales with
+cores. It is still unstarted, and still not urgent -- one core per direction is
+now around 25 Gbit/s of AES-GCM plumbing with the syscalls removed -- but the
+measured reason it was gated on no longer holds.
+
+## Option 2 (if still CPU-bound): parallelize, with per-tunnel affinity
+
+If profiling shows the work is genuinely CPU-bound after batching — the busy
+multi-client concentrator case, where aggregate crypto across hundreds of
+road-warriors exceeds one core per direction — then add worker goroutines. The
+design that lets protocols **inherit parallelism *and* safety unchanged** is
+per-tunnel affinity:
+
+> Shard tunnels across N workers and pin each tunnel to exactly one worker. A
+> tunnel is never touched by two goroutines at once; only *cross-tunnel* work runs
+> in parallel.
+
+That is the whole trick. Every protocol's data path was written assuming one
+goroutine per SA (see the hazards below); affinity preserves that assumption
+verbatim, so no `Tunnel` implementation has to be re-audited. The mechanism:
+
+- **Inbound — shared `dataplane` UDP source + `SO_REUSEPORT`.** Move socket
+  ownership out of each protocol into a small shared source that opens N sockets
+  on the port, runs one reader goroutine each, and calls a handler + `Demux`. The
+  kernel hashes each datagram's 4-tuple to one socket, so a given peer lands on
+  one reader — per-peer affinity for free. The single-socket protocols opt in by
+  swapping their read loop for the source; the connection-per-client protocols
+  never touch it.
+- **Outbound — multi-queue TUN (`IFF_MULTI_QUEUE`), N `Pump.Run` loops.** This is
+  the side with the wrinkle: the kernel distributes TUN packets by *inner-flow*
+  hash, which does **not** align with our tunnel-ownership sharding, so a queue
+  reader can hold a packet for a tunnel another worker owns. Either make the
+  owning worker do the encap (hand the packet to it over a per-worker queue —
+  restores affinity, costs a hop) or make `Encapsulate` concurrency-safe for that
+  one SA (an atomic ESP sequence counter — see hazard 2). The hand-off keeps the
+  affinity contract clean and is the safer default.
+
+Both options are `x/sys/unix` socket/ioctl surface, not new dependencies —
+consistent with how the tree already does PMTU and source-address selection.
+
+## What breaks if you skip affinity and just add goroutines
+
+Several data paths were deliberately made allocation-free by keeping **per-SA
+scratch that is only safe because one goroutine touches it.** These are exactly
+what per-tunnel affinity protects; drop affinity and they become races, not
+slowdowns:
+
+1. **Inbound receive-nonce scratch is per-SA, single-goroutine.** OpenVPN reuses a
+   per-`Cipher` receive-nonce buffer and Nebula/DTLS a per-tunnel / per-`aeadState`
+   scratch, each documented "safe because open runs on the single inbound
+   goroutine." Two packets of the *same* SA opening concurrently races that
+   scratch. Affinity (or `SO_REUSEPORT` per-4-tuple, treated as an optimisation
+   not a guarantee, since a roaming peer can move) keeps a single SA on one worker.
+
+2. **Outbound ESP sequence numbers are a per-SA counter.** `Encapsulate` assigns
+   the next anti-replay sequence number. Two workers encapsulating for the same SA
+   assign duplicates and the peer's replay window drops one — this is the outbound
+   wrinkle above. Fixed by the hand-off, or an atomic counter. Note that ESP's
+   seal is *not* otherwise concurrency-safe, whatever an earlier version of this
+   note said: `espAEAD` builds each nonce in one reused buffer on the crypter, and
+   `espCBC` keeps its block mode and MAC scratch there too, all "single goroutine
+   per direction". (WireGuard's seal is the one that builds its nonce in the
+   output buffer's tail.) The pump's output buffers are the same shape: one per
+   TUN reader.
+
+3. **The pump's `byKey`/`routes` maps were `RWMutex`-guarded.** *(Done.)* They
+   are now an immutable snapshot swapped on `AddTunnel`/`RemoveTunnel`, so the
+   packet path takes no lock and N readers cost what one does. What remains for
+   Option 2 is per-*reader* scratch: `multiScratch`, the GRO table, the shaper and
+   the output buffers each belong to one goroutine, and N readers need N of each.
+
+4. **Reordering within a flow.** Flow/tunnel-sharded workers keep a single
+   5-tuple in order; anything that round-robins packets reintroduces reordering
+   that TCP reads as loss. Affinity is precisely what avoids it — any deviation
+   has to be justified against this.
+
+## Sequencing
+
+1. **Profile a saturated tunnel — done**, and it decided against Option 2 for
+   now. See [Measured](#measured-the-profile-option-2-was-gated-on-taken):
+   the work is neither CPU-bound in the cipher nor lock-bound, it is
+   allocation-bound, and parallelism plateaus at 2.4× until that changes.
+2. **Option 1 — batching: complete.** Ingress: `PacketConn.ReadBatch` /
+   `BatchConn` in every single-socket read loop, measured above. Egress:
+   `OpenTUNGSO` + userspace TSO + `SetBatchSender` flush in the pump
+   protocols. Inbound TUN writes: GRO coalescing via `HandleInboundBatch`.
+3. **Lock-free pump map** (hazard 3) — *done.*
+4. **Remove the per-packet output allocation** — *done* for ESP and WireGuard,
+   through in-place `Decapsulate` and `AppendTunnel`. Parallel decap went from a
+   2.4× plateau that regressed to 21× at 32 threads. OpenVPN, Nebula and the toy
+   protocol still allocate per packet: the same two changes apply to each.
+5. **Option 2 — per-tunnel-affinity workers**: shared `SO_REUSEPORT` source
+   inbound, multi-queue TUN with hand-off outbound. Guard with the interop matrix
+   plus a new multi-reader stress test.
+6. Validate with a multi-core benchmark **and** the full interop matrix. A
+   reordering regression shows up as a throughput cliff on the TCP-carried cells,
+   not a test failure, so watch the living throughput table across the change.
+
+None of this is urgent: one core per direction is already 15–18 Gbit/s measured,
+and no workload here is asking for more. The value of writing it down is that the
+single-goroutine assumptions are invisible until someone adds a goroutine — so
+this note exists to be read *before* that happens, not after.
