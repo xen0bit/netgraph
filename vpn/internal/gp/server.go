@@ -30,9 +30,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xen0bit/veepin/dataplane"
-	"github.com/xen0bit/veepin/internal/userdb"
-	"github.com/xen0bit/veepin/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
+	"github.com/xen0bit/netgraph/vpn/internal/userdb"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
 )
 
 // ServerConfig configures a GlobalProtect gateway.

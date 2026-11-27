@@ -8,7 +8,7 @@ import (
 	"io"
 	"testing"
 
-	"github.com/xen0bit/veepin/dataplane"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
 )
 
 // TestBlockFramingIsBigEndian pins the byte order of the data path. It is the

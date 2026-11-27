@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xen0bit/veepin/internal/ikev2/esp"
-	"github.com/xen0bit/veepin/internal/ikev2/payload"
-	"github.com/xen0bit/veepin/internal/ikev2/transform"
+	"github.com/xen0bit/netgraph/vpn/internal/ikev2/esp"
+	"github.com/xen0bit/netgraph/vpn/internal/ikev2/payload"
+	"github.com/xen0bit/netgraph/vpn/internal/ikev2/transform"
 )
 
 // fakeTUN is an in-memory TUN device: writes are captured, reads block on an

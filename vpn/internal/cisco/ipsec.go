@@ -16,8 +16,8 @@ import (
 	"net"
 	"net/netip"
 
-	"github.com/xen0bit/veepin/internal/ikev1"
-	"github.com/xen0bit/veepin/internal/ikev2/esp"
+	"github.com/xen0bit/netgraph/vpn/internal/ikev1"
+	"github.com/xen0bit/netgraph/vpn/internal/ikev2/esp"
 )
 
 const (

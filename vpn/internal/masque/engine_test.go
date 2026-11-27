@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xen0bit/veepin/dataplane"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
 	"golang.org/x/net/quic"
 )
 

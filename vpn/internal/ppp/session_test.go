@@ -5,7 +5,7 @@ import (
 	"net"
 	"testing"
 
-	"github.com/xen0bit/veepin/internal/mschap"
+	"github.com/xen0bit/netgraph/vpn/internal/mschap"
 )
 
 // captureTransport records the frames the session sends.

@@ -14,7 +14,7 @@ import (
 	"fmt"
 	"net/netip"
 
-	"github.com/xen0bit/veepin/internal/masque/http3"
+	"github.com/xen0bit/netgraph/vpn/internal/masque/http3"
 )
 
 // contextIDPackets is the HTTP-Datagram context ID reserved for full IP packets

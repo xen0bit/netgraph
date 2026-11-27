@@ -4,7 +4,7 @@ import (
 	"net/netip"
 	"testing"
 
-	"github.com/xen0bit/veepin/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
 )
 
 // TestOnlyALighthouseMayAnswerAHostQuery: a member that is not a lighthouse

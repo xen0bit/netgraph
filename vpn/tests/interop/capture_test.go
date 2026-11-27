@@ -27,8 +27,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xen0bit/veepin/internal/capture"
-	"github.com/xen0bit/veepin/internal/capture/goldens"
+	"github.com/xen0bit/netgraph/vpn/internal/capture"
+	"github.com/xen0bit/netgraph/vpn/internal/capture/goldens"
 )
 
 // captureSpec describes how to record one cell.

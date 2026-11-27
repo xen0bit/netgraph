@@ -34,8 +34,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xen0bit/veepin/internal/cryptoutil"
-	"github.com/xen0bit/veepin/internal/wireguard/wire"
+	"github.com/xen0bit/netgraph/vpn/internal/cryptoutil"
+	"github.com/xen0bit/netgraph/vpn/internal/wireguard/wire"
 )
 
 const labelCookie = "cookie--"

@@ -4,7 +4,7 @@ import (
 	"net"
 	"testing"
 
-	"github.com/xen0bit/veepin/dataplane"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
 )
 
 // Nebula spent its whole existence as the one UDP server in this tree replying

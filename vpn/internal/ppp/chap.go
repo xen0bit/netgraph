@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/xen0bit/veepin/internal/cryptoutil"
-	"github.com/xen0bit/veepin/internal/mschap"
+	"github.com/xen0bit/netgraph/vpn/internal/cryptoutil"
+	"github.com/xen0bit/netgraph/vpn/internal/mschap"
 )
 
 // CHAP codes (RFC 1994), reused by MS-CHAPv2.

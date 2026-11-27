@@ -12,7 +12,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/xen0bit/veepin/dataplane"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
 )
 
 // SoftEther VPN native protocol session: TLS connection, PACK-based control

@@ -36,7 +36,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/xen0bit/veepin/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
 )
 
 // OptKey is the option-map key a variant injects to put the base facade into

@@ -4,7 +4,7 @@ import (
 	"net"
 	"sync"
 
-	"github.com/xen0bit/veepin/dataplane"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
 )
 
 // nonESPMarker is the 4-octet zero prefix that distinguishes an IKE message

@@ -1,4 +1,4 @@
-name: e2e
+name: vpn-e2e
 
 # Playwright browser tests of the management panel. Kept in its own workflow —
 # like interop.yml and nm.yml — so the toolchain-light core jobs in ci.yml never
@@ -16,40 +16,45 @@ on:
   push:
     branches: [main]
     paths:
-      - "internal/mgmt/**"
-      - "internal/supervisor/**"
+      - "vpn/internal/mgmt/**"
+      - "vpn/internal/supervisor/**"
       # The three packages the plane is built out of. They are not obvious from
       # the panel's own directory and every one of them can break it: confstore
       # is the read/write path under both the listener and profile endpoints,
       # keygen is what a create dispatches to for key material, and profile is
       # the type the /api/profiles surface stores. A change confined to one of
       # them used to run no browser test at all.
-      - "internal/confstore/**"
-      - "internal/keygen/**"
-      - "internal/profile/**"
-      - "client/**"
-      - "cmd/veepin/**"
-      - "tests/e2e/**"
-      - ".github/workflows/e2e.yml"
+      - "vpn/internal/confstore/**"
+      - "vpn/internal/keygen/**"
+      - "vpn/internal/profile/**"
+      - "vpn/client/**"
+      - "vpn/cmd/veepin/**"
+      - "vpn/tests/e2e/**"
+      - ".github/workflows/vpn-e2e.yml"
   pull_request:
     branches: [main]
     paths:
-      - "internal/mgmt/**"
-      - "internal/supervisor/**"
-      - "internal/confstore/**"
-      - "internal/keygen/**"
-      - "internal/profile/**"
-      - "client/**"
-      - "cmd/veepin/**"
-      - "tests/e2e/**"
-      - ".github/workflows/e2e.yml"
+      - "vpn/internal/mgmt/**"
+      - "vpn/internal/supervisor/**"
+      - "vpn/internal/confstore/**"
+      - "vpn/internal/keygen/**"
+      - "vpn/internal/profile/**"
+      - "vpn/client/**"
+      - "vpn/cmd/veepin/**"
+      - "vpn/tests/e2e/**"
+      - ".github/workflows/vpn-e2e.yml"
 
 concurrency:
-  group: e2e-${{ github.ref }}
+  group: vpn-e2e-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
   contents: read
+
+# veepin lives under vpn/ in this repository; every run step starts there.
+defaults:
+  run:
+    working-directory: vpn
 
 jobs:
   web-panel:
@@ -75,24 +80,24 @@ jobs:
         with:
           node-version: "20"
           cache: npm
-          cache-dependency-path: tests/e2e/package-lock.json
+          cache-dependency-path: vpn/tests/e2e/package-lock.json
 
       - name: Install dependencies
-        working-directory: tests/e2e
+        working-directory: vpn/tests/e2e
         run: npm ci
 
       - name: Install the browser
-        working-directory: tests/e2e
+        working-directory: vpn/tests/e2e
         # --with-deps pulls in the system libraries Chromium needs; the runner's
         # passwordless sudo covers the apt install.
         run: npx playwright install --with-deps chromium
 
       - name: Typecheck the specs
-        working-directory: tests/e2e
+        working-directory: vpn/tests/e2e
         run: npx tsc --noEmit
 
       - name: Run the panel tests
-        working-directory: tests/e2e
+        working-directory: vpn/tests/e2e
         env:
           PANEL_HARNESS: /tmp/veepin-panel-harness
         run: npx playwright test
@@ -109,7 +114,7 @@ jobs:
           # land in test-results/. Downloading "playwright-report" and finding no
           # report in it is how that was noticed.
           path: |
-            tests/e2e/playwright-report/
-            tests/e2e/test-results/
+            vpn/tests/e2e/playwright-report/
+            vpn/tests/e2e/test-results/
           if-no-files-found: ignore
           retention-days: 7

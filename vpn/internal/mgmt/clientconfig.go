@@ -37,11 +37,11 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/xen0bit/veepin/client"
-	"github.com/xen0bit/veepin/internal/keygen"
-	"github.com/xen0bit/veepin/internal/profile"
-	"github.com/xen0bit/veepin/internal/supervisor"
-	"github.com/xen0bit/veepin/wireguard"
+	"github.com/xen0bit/netgraph/vpn/client"
+	"github.com/xen0bit/netgraph/vpn/internal/keygen"
+	"github.com/xen0bit/netgraph/vpn/internal/profile"
+	"github.com/xen0bit/netgraph/vpn/internal/supervisor"
+	"github.com/xen0bit/netgraph/vpn/wireguard"
 )
 
 // ClientConfigRequest is the operator input to POST /api/listeners/{name}/client-config.

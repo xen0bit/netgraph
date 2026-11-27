@@ -12,8 +12,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/xen0bit/veepin/client"
-	igp "github.com/xen0bit/veepin/internal/gp"
+	"github.com/xen0bit/netgraph/vpn/client"
+	igp "github.com/xen0bit/netgraph/vpn/internal/gp"
 )
 
 func validClientOptions() map[string]string {

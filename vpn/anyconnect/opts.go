@@ -2,7 +2,7 @@ package anyconnect
 
 // Client option metadata for the Dial surface.
 
-import "github.com/xen0bit/veepin/client"
+import "github.com/xen0bit/netgraph/vpn/client"
 
 func init() {
 	client.RegisterClientOpts("anyconnect", []client.OptSpec{

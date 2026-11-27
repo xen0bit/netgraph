@@ -1,5 +1,13 @@
 # veepin
 
+> **This is veepin's new home.** It was merged into
+> [netgraph](../README.md) under `vpn/`, with its history, to become the data
+> plane of a `netgraph-edge` VPN appliance. Import paths are now
+> `github.com/xen0bit/netgraph/vpn/...`. Releases, the APT repository and the
+> install instructions below still describe github.com/xen0bit/veepin (last
+> release v0.9.9), which no longer gets new releases. Build from here with
+> `make -C vpn build`, and see [`AGENTS.md`](AGENTS.md) for how work is checked.
+
 A **working userspace VPN in Go** — both server (responder) and client
 (initiator), written from scratch and depending only on the pure-Go
 `golang.org/x` modules (`x/crypto`, and `x/net` for QUIC), no cgo. It speaks

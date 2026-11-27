@@ -11,7 +11,7 @@
 // returns the negotiated Result for the caller to apply. Importing this package
 // registers "anyconnect" with the client registry:
 //
-//	import _ "github.com/xen0bit/veepin/anyconnect"
+//	import _ "github.com/xen0bit/netgraph/vpn/anyconnect"
 //	sess, res, err := client.Dial(ctx, "anyconnect", opts)
 package anyconnect
 
@@ -26,11 +26,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/xen0bit/veepin/client"
-	"github.com/xen0bit/veepin/dataplane"
-	engine "github.com/xen0bit/veepin/internal/anyconnect"
-	"github.com/xen0bit/veepin/internal/pqpolicy"
-	"github.com/xen0bit/veepin/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/client"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
+	engine "github.com/xen0bit/netgraph/vpn/internal/anyconnect"
+	"github.com/xen0bit/netgraph/vpn/internal/pqpolicy"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
 )
 
 func init() { client.Register("anyconnect", parseOptions) }

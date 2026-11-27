@@ -49,8 +49,7 @@ DATE    ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
 #
 # The linker symbol for a main package's variable is main.<name>, not
 # <importpath>.<name>; the latter matches nothing and, because -X on an unknown
-# symbol is ignored, fails silently. .goreleaser.yaml uses the same form, so
-# `make build` and released binaries stamp identically.
+# symbol is ignored, fails silently.
 define stamp
 -X 'main.version=$(VERSION)' \
 -X 'main.commit=$(COMMIT)' \
@@ -85,7 +84,7 @@ build: $(BINS)
 
 # Per-binary rule. Rebuilds when any Go source changes.
 GO_SOURCES := $(shell find . -type f -name '*.go' -not -name '*_test.go')
-$(BIN_DIR)/%: $(GO_SOURCES) go.mod
+$(BIN_DIR)/%: $(GO_SOURCES) ../go.mod
 	@mkdir -p $(BIN_DIR)
 	$(GO) build $(GOFLAGS) -ldflags "$(LDFLAGS) $(call stamp,$*)" -o $@ ./cmd/$*
 
@@ -238,30 +237,11 @@ vulncheck:
 		exit 1; \
 	fi
 
-## tidy: sync go.mod/go.sum
-.PHONY: tidy
-tidy:
-	$(GO) mod tidy
-
-## tidy-check: fail if `go mod tidy` would change anything (for CI)
-.PHONY: tidy-check
-tidy-check:
-	@cp go.mod go.mod.bak; [ -f go.sum ] && cp go.sum go.sum.bak || true; \
-	$(GO) mod tidy; \
-	rc=0; \
-	cmp -s go.mod go.mod.bak || rc=1; \
-	{ [ -f go.sum ] && [ -f go.sum.bak ] && ! cmp -s go.sum go.sum.bak && rc=1; } || true; \
-	mv go.mod.bak go.mod; [ -f go.sum.bak ] && mv go.sum.bak go.sum || true; \
-	if [ $$rc -ne 0 ]; then echo "go.mod/go.sum are not tidy; run 'make tidy'"; exit 1; fi; \
-	echo "go.mod/go.sum: tidy"
+# go.mod and go.sum are netgraph's, one directory up: `make tidy` there.
 
 ## check: fmt-check + vet + test (the standard pre-commit gate)
 .PHONY: check
 check: fmt-check vet test
-
-## ci: the full gate run in CI (tidy + format + vet + build + test)
-.PHONY: ci
-ci: tidy-check fmt-check vet build test
 
 # ---------------------------------------------------------------------------
 # Packaging

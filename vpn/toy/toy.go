@@ -49,10 +49,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/xen0bit/veepin/client"
-	"github.com/xen0bit/veepin/dataplane"
-	itoy "github.com/xen0bit/veepin/internal/toy"
-	"github.com/xen0bit/veepin/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/client"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
+	itoy "github.com/xen0bit/netgraph/vpn/internal/toy"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
 )
 
 func init() { client.Register("toy", parseOptions) }

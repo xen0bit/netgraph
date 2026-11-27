@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xen0bit/veepin/internal/ikev2/ike"
+	"github.com/xen0bit/netgraph/vpn/internal/ikev2/ike"
 )
 
 func TestDialValidation(t *testing.T) {

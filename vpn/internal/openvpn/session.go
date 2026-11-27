@@ -12,12 +12,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/xen0bit/veepin/client"
-	"github.com/xen0bit/veepin/dataplane"
-	"github.com/xen0bit/veepin/internal/openvpn/control"
-	"github.com/xen0bit/veepin/internal/openvpn/data"
-	"github.com/xen0bit/veepin/internal/openvpn/wire"
-	"github.com/xen0bit/veepin/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/client"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
+	"github.com/xen0bit/netgraph/vpn/internal/openvpn/control"
+	"github.com/xen0bit/netgraph/vpn/internal/openvpn/data"
+	"github.com/xen0bit/netgraph/vpn/internal/openvpn/wire"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
 )
 
 // muxer owns the single UDP socket and splits inbound datagrams by opcode:

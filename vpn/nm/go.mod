@@ -1,16 +1,16 @@
-module github.com/xen0bit/veepin/nm
+module github.com/xen0bit/netgraph/vpn/nm
 
 go 1.27.0
 
 require (
 	github.com/godbus/dbus/v5 v5.1.0
-	github.com/xen0bit/veepin v0.0.0
+	github.com/xen0bit/netgraph v0.0.0
 )
 
 require (
-	golang.org/x/crypto v0.57.0 // indirect
-	golang.org/x/net v0.60.0 // indirect
-	golang.org/x/sys v0.48.0 // indirect
+	golang.org/x/crypto v0.58.0 // indirect
+	golang.org/x/net v0.62.0 // indirect
+	golang.org/x/sys v0.49.0 // indirect
 )
 
-replace github.com/xen0bit/veepin => ../
+replace github.com/xen0bit/netgraph => ../../

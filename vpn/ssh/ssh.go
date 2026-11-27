@@ -9,7 +9,7 @@
 //
 // Importing this package registers "ssh" with the client registry:
 //
-//	import _ "github.com/xen0bit/veepin/ssh"
+//	import _ "github.com/xen0bit/netgraph/vpn/ssh"
 //	sess, res, err := client.Dial(ctx, "ssh", opts)
 //
 // It uses golang.org/x/crypto/ssh — already this module's only dependency — so it
@@ -31,11 +31,11 @@ import (
 
 	cryptossh "golang.org/x/crypto/ssh"
 
-	"github.com/xen0bit/veepin/client"
-	"github.com/xen0bit/veepin/dataplane"
-	"github.com/xen0bit/veepin/internal/pqpolicy"
-	"github.com/xen0bit/veepin/internal/sshtun"
-	"github.com/xen0bit/veepin/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/client"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
+	"github.com/xen0bit/netgraph/vpn/internal/pqpolicy"
+	"github.com/xen0bit/netgraph/vpn/internal/sshtun"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
 )
 
 func init() { client.Register("ssh", parseOptions) }

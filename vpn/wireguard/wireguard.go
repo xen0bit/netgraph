@@ -10,7 +10,7 @@
 // Importing this package registers "wireguard" with the client registry, so a
 // caller that dials by name only needs the blank import:
 //
-//	import _ "github.com/xen0bit/veepin/wireguard"
+//	import _ "github.com/xen0bit/netgraph/vpn/wireguard"
 //
 //	sess, res, err := client.Dial(ctx, "wireguard", opts)
 //
@@ -44,12 +44,12 @@ import (
 	"net/netip"
 	"time"
 
-	"github.com/xen0bit/veepin/client"
-	"github.com/xen0bit/veepin/dataplane"
-	"github.com/xen0bit/veepin/internal/vlog"
-	iwg "github.com/xen0bit/veepin/internal/wireguard"
-	"github.com/xen0bit/veepin/internal/wireguard/noise"
-	"github.com/xen0bit/veepin/internal/wireguard/wire"
+	"github.com/xen0bit/netgraph/vpn/client"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
+	iwg "github.com/xen0bit/netgraph/vpn/internal/wireguard"
+	"github.com/xen0bit/netgraph/vpn/internal/wireguard/noise"
+	"github.com/xen0bit/netgraph/vpn/internal/wireguard/wire"
 )
 
 func init() { client.Register("wireguard", parseOptions) }

@@ -6,9 +6,9 @@ import (
 	"net/netip"
 	"testing"
 
-	"github.com/xen0bit/veepin/dataplane"
-	"github.com/xen0bit/veepin/internal/ikev2/aggfrag"
-	"github.com/xen0bit/veepin/internal/ikev2/esp"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
+	"github.com/xen0bit/netgraph/vpn/internal/ikev2/aggfrag"
+	"github.com/xen0bit/netgraph/vpn/internal/ikev2/esp"
 )
 
 // aggfragPair builds two tunnels sharing key material, one the mirror of the

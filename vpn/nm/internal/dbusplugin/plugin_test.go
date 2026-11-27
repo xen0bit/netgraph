@@ -13,9 +13,9 @@ import (
 	"time"
 
 	"github.com/godbus/dbus/v5"
-	"github.com/xen0bit/veepin/client"
-	"github.com/xen0bit/veepin/internal/vlog"
-	"github.com/xen0bit/veepin/nm/internal/nmconfig"
+	"github.com/xen0bit/netgraph/vpn/client"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/nm/internal/nmconfig"
 )
 
 // newTestBus starts a private session bus and returns a server connection (for

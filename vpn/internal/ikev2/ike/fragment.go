@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/xen0bit/veepin/internal/ikev2/payload"
+	"github.com/xen0bit/netgraph/vpn/internal/ikev2/payload"
 )
 
 // RFC 7383 IKE fragmentation. A large protected IKE message — an IKE_AUTH

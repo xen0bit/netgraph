@@ -19,8 +19,8 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/xen0bit/veepin/internal/cryptoutil"
-	"github.com/xen0bit/veepin/internal/wireguard/wire"
+	"github.com/xen0bit/netgraph/vpn/internal/cryptoutil"
+	"github.com/xen0bit/netgraph/vpn/internal/wireguard/wire"
 )
 
 // Protocol constants (protocol paper §5.4). LABEL_COOKIE is in cookie.go.

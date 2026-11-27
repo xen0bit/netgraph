@@ -6,8 +6,8 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/xen0bit/veepin/internal/cryptoutil"
-	"github.com/xen0bit/veepin/internal/wireguard/wire"
+	"github.com/xen0bit/netgraph/vpn/internal/cryptoutil"
+	"github.com/xen0bit/netgraph/vpn/internal/wireguard/wire"
 )
 
 // ErrMAC1 reports an initiation whose mac1 does not authenticate to our static

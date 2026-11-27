@@ -1,4 +1,4 @@
-name: benchmark
+name: vpn-benchmark
 
 # Runs the full microbenchmark suite and refreshes the "Full benchmark table
 # (live)" region of the README from the result. Split from ci.yml so a benchmark
@@ -11,28 +11,33 @@ on:
   push:
     branches: [main]
     paths:
-      - "internal/**"
-      - "dataplane/**"
-      - "cmd/livingreadme/**"
-      - ".github/workflows/benchmark.yml"
-      - ".github/scripts/living-readme-commit.sh"
+      - "vpn/internal/**"
+      - "vpn/dataplane/**"
+      - "vpn/cmd/livingreadme/**"
+      - ".github/workflows/vpn-benchmark.yml"
+      - "vpn/scripts/ci/living-readme-commit.sh"
   pull_request:
     branches: [main]
     paths:
-      - "internal/**"
-      - "dataplane/**"
-      - "cmd/livingreadme/**"
-      - ".github/workflows/benchmark.yml"
-      - ".github/scripts/living-readme-preview.sh"
+      - "vpn/internal/**"
+      - "vpn/dataplane/**"
+      - "vpn/cmd/livingreadme/**"
+      - ".github/workflows/vpn-benchmark.yml"
+      - "vpn/scripts/ci/living-readme-preview.sh"
 
 concurrency:
-  group: benchmark-${{ github.ref }}
+  group: vpn-benchmark-${{ github.ref }}
   cancel-in-progress: true
 
 # contents:write so the push-to-main run can commit the refreshed benchmark table
 # back into the README. Pull-request runs only preview, so the scope is unused.
 permissions:
   contents: write
+
+# veepin lives under vpn/ in this repository; every run step starts there.
+defaults:
+  run:
+    working-directory: vpn
 
 jobs:
   benchmark:
@@ -78,11 +83,11 @@ jobs:
         env:
           SHA: ${{ github.sha }}
           REF: ${{ github.ref_name }}
-        run: .github/scripts/living-readme-commit.sh "benchmark table" doc/benchmarks.md benchmark bench.txt
+        run: scripts/ci/living-readme-commit.sh "benchmark table" doc/benchmarks.md benchmark bench.txt
 
       - name: Preview benchmark table diff (pull request)
         if: github.event_name == 'pull_request'
         env:
           SHA: ${{ github.sha }}
           REF: ${{ github.ref_name }}
-        run: .github/scripts/living-readme-preview.sh "benchmark table" doc/benchmarks.md benchmark bench.txt
+        run: scripts/ci/living-readme-preview.sh "benchmark table" doc/benchmarks.md benchmark bench.txt

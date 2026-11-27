@@ -29,8 +29,8 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/xen0bit/veepin/client"
-	"github.com/xen0bit/veepin/nm/internal/nmconfig"
+	"github.com/xen0bit/netgraph/vpn/client"
+	"github.com/xen0bit/netgraph/vpn/nm/internal/nmconfig"
 )
 
 // connectionOwner returns the user a private connection belongs to, or "" for

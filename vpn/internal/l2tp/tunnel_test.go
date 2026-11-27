@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xen0bit/veepin/internal/mschap"
-	"github.com/xen0bit/veepin/internal/ppp"
+	"github.com/xen0bit/netgraph/vpn/internal/mschap"
+	"github.com/xen0bit/netgraph/vpn/internal/ppp"
 )
 
 // endpoint wires one L2TP tunnel to a PPP link for the end-to-end test. It

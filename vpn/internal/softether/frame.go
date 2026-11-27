@@ -8,7 +8,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/xen0bit/veepin/dataplane"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
 )
 
 // The SE-VPN data path, once the control PACKs are done with.

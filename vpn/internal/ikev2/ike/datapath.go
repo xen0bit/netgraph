@@ -7,9 +7,9 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/xen0bit/veepin/dataplane"
-	"github.com/xen0bit/veepin/internal/ikev2/aggfrag"
-	"github.com/xen0bit/veepin/internal/ikev2/esp"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
+	"github.com/xen0bit/netgraph/vpn/internal/ikev2/aggfrag"
+	"github.com/xen0bit/netgraph/vpn/internal/ikev2/esp"
 )
 
 // Inbound drop sentinels. Like the esp package's, these are pre-built rather

@@ -9,8 +9,8 @@ import (
 	"net"
 	"time"
 
-	"github.com/xen0bit/veepin/dataplane"
-	"github.com/xen0bit/veepin/internal/ikev2/payload"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
+	"github.com/xen0bit/netgraph/vpn/internal/ikev2/payload"
 )
 
 // Peer is one live client's identity, assigned address and traffic.

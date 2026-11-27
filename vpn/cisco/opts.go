@@ -4,7 +4,7 @@ package cisco
 // pre-shared key authenticates phase 1; the per-user credentials follow in
 // XAuth, mirroring the NetworkManager plugin's requireKeys/secretMissing split.
 
-import "github.com/xen0bit/veepin/client"
+import "github.com/xen0bit/netgraph/vpn/client"
 
 func init() {
 	client.RegisterClientOpts("cisco", []client.OptSpec{

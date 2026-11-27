@@ -34,7 +34,7 @@ import (
 	"runtime"
 	"strings"
 
-	"github.com/xen0bit/veepin/client"
+	"github.com/xen0bit/netgraph/vpn/client"
 
 	// Registers the protocols with the client registry, and with it their
 	// OptSpec tables -- which, since the flag set is generated from those
@@ -44,39 +44,39 @@ import (
 	// docs_test.go reaches the registry through these same imports: forget one
 	// and the protocol-count check passes against a registry that has not heard
 	// of your protocol, so add the import first.
-	_ "github.com/xen0bit/veepin/amneziawg"
-	_ "github.com/xen0bit/veepin/anyconnect"
-	_ "github.com/xen0bit/veepin/cisco"
-	_ "github.com/xen0bit/veepin/fortinet"
-	_ "github.com/xen0bit/veepin/gp"
-	_ "github.com/xen0bit/veepin/ikev2"
-	_ "github.com/xen0bit/veepin/l2tp"
-	_ "github.com/xen0bit/veepin/l2tpv3"
-	_ "github.com/xen0bit/veepin/masque"
-	_ "github.com/xen0bit/veepin/nebula"
-	_ "github.com/xen0bit/veepin/openvpn"
-	_ "github.com/xen0bit/veepin/pulse"
-	_ "github.com/xen0bit/veepin/softether"
-	_ "github.com/xen0bit/veepin/ssh"
-	_ "github.com/xen0bit/veepin/sstp"
-	_ "github.com/xen0bit/veepin/toy"
-	_ "github.com/xen0bit/veepin/wireguard"
+	_ "github.com/xen0bit/netgraph/vpn/amneziawg"
+	_ "github.com/xen0bit/netgraph/vpn/anyconnect"
+	_ "github.com/xen0bit/netgraph/vpn/cisco"
+	_ "github.com/xen0bit/netgraph/vpn/fortinet"
+	_ "github.com/xen0bit/netgraph/vpn/gp"
+	_ "github.com/xen0bit/netgraph/vpn/ikev2"
+	_ "github.com/xen0bit/netgraph/vpn/l2tp"
+	_ "github.com/xen0bit/netgraph/vpn/l2tpv3"
+	_ "github.com/xen0bit/netgraph/vpn/masque"
+	_ "github.com/xen0bit/netgraph/vpn/nebula"
+	_ "github.com/xen0bit/netgraph/vpn/openvpn"
+	_ "github.com/xen0bit/netgraph/vpn/pulse"
+	_ "github.com/xen0bit/netgraph/vpn/softether"
+	_ "github.com/xen0bit/netgraph/vpn/ssh"
+	_ "github.com/xen0bit/netgraph/vpn/sstp"
+	_ "github.com/xen0bit/netgraph/vpn/toy"
+	_ "github.com/xen0bit/netgraph/vpn/wireguard"
 
 	// The pq- variants: a second registry name per protocol under which the
 	// post-quantum contract is mandatory. See doc/pq-variants-plan.md.
-	_ "github.com/xen0bit/veepin/anyconnect/pq"
-	_ "github.com/xen0bit/veepin/fortinet/pq"
-	_ "github.com/xen0bit/veepin/gp/pq"
-	_ "github.com/xen0bit/veepin/ikev2/pq"
-	_ "github.com/xen0bit/veepin/masque/pq"
-	_ "github.com/xen0bit/veepin/openvpn/pq"
-	_ "github.com/xen0bit/veepin/pulse/pq"
-	_ "github.com/xen0bit/veepin/softether/pq"
-	_ "github.com/xen0bit/veepin/ssh/pq"
-	_ "github.com/xen0bit/veepin/sstp/pq"
+	_ "github.com/xen0bit/netgraph/vpn/anyconnect/pq"
+	_ "github.com/xen0bit/netgraph/vpn/fortinet/pq"
+	_ "github.com/xen0bit/netgraph/vpn/gp/pq"
+	_ "github.com/xen0bit/netgraph/vpn/ikev2/pq"
+	_ "github.com/xen0bit/netgraph/vpn/masque/pq"
+	_ "github.com/xen0bit/netgraph/vpn/openvpn/pq"
+	_ "github.com/xen0bit/netgraph/vpn/pulse/pq"
+	_ "github.com/xen0bit/netgraph/vpn/softether/pq"
+	_ "github.com/xen0bit/netgraph/vpn/ssh/pq"
+	_ "github.com/xen0bit/netgraph/vpn/sstp/pq"
 )
 
-// Build metadata, stamped via -ldflags at release time (see .goreleaser.yaml).
+// Build metadata, stamped via -ldflags by vpn/Makefile.
 // Defaults apply to `go build`/`go run` and development binaries.
 var (
 	version = "dev"

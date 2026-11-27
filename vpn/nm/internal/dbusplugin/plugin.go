@@ -19,9 +19,9 @@ import (
 	"github.com/godbus/dbus/v5"
 	"github.com/godbus/dbus/v5/introspect"
 	"github.com/godbus/dbus/v5/prop"
-	"github.com/xen0bit/veepin/client"
-	"github.com/xen0bit/veepin/internal/vlog"
-	"github.com/xen0bit/veepin/nm/internal/nmconfig"
+	"github.com/xen0bit/netgraph/vpn/client"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/nm/internal/nmconfig"
 )
 
 // D-Bus identifiers for the plugin.

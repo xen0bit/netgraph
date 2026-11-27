@@ -9,7 +9,7 @@ import (
 	"strings"
 	"syscall"
 
-	"github.com/xen0bit/veepin/internal/userdb"
+	"github.com/xen0bit/netgraph/vpn/internal/userdb"
 )
 
 // errNotATerminal reports that stdin is a pipe or a file rather than a terminal.

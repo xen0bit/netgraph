@@ -8,8 +8,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/xen0bit/veepin/internal/capture"
-	"github.com/xen0bit/veepin/internal/ikev2/payload"
+	"github.com/xen0bit/netgraph/vpn/internal/capture"
+	"github.com/xen0bit/netgraph/vpn/internal/ikev2/payload"
 )
 
 // A corpus with no entry in Registry is a file nothing reads; an entry with no

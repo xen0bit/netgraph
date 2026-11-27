@@ -13,14 +13,14 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/xen0bit/veepin/dataplane"
-	"github.com/xen0bit/veepin/internal/cryptoutil"
-	"github.com/xen0bit/veepin/internal/ikev2/aggfrag"
-	"github.com/xen0bit/veepin/internal/ikev2/eap"
-	"github.com/xen0bit/veepin/internal/ikev2/esp"
-	"github.com/xen0bit/veepin/internal/ikev2/payload"
-	"github.com/xen0bit/veepin/internal/ikev2/transform"
-	"github.com/xen0bit/veepin/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
+	"github.com/xen0bit/netgraph/vpn/internal/cryptoutil"
+	"github.com/xen0bit/netgraph/vpn/internal/ikev2/aggfrag"
+	"github.com/xen0bit/netgraph/vpn/internal/ikev2/eap"
+	"github.com/xen0bit/netgraph/vpn/internal/ikev2/esp"
+	"github.com/xen0bit/netgraph/vpn/internal/ikev2/payload"
+	"github.com/xen0bit/netgraph/vpn/internal/ikev2/transform"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
 )
 
 // ErrAuthFailed indicates the peer's authentication could not be verified —

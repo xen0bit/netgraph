@@ -7,8 +7,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xen0bit/veepin/dataplane"
-	"github.com/xen0bit/veepin/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
 )
 
 // fakeTAP is a tapIO backed by two channels, standing in for a TAP device: what

@@ -7,10 +7,10 @@ import (
 	"testing"
 
 	"github.com/godbus/dbus/v5"
-	"github.com/xen0bit/veepin/nm/internal/nmconfig"
+	"github.com/xen0bit/netgraph/vpn/nm/internal/nmconfig"
 
 	// The file-path options come from the protocol's registered OptSpecs.
-	_ "github.com/xen0bit/veepin/wireguard"
+	_ "github.com/xen0bit/netgraph/vpn/wireguard"
 )
 
 // TestAPrivateConnectionCannotNameAFileItsOwnerCannotRead: the service opens

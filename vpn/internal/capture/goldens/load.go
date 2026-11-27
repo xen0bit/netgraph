@@ -8,7 +8,7 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/xen0bit/veepin/internal/capture"
+	"github.com/xen0bit/netgraph/vpn/internal/capture"
 )
 
 //go:embed corpora/*.corpus

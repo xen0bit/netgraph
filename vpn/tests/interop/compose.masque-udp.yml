@@ -10,8 +10,8 @@ name: veepin-interop-masque-udp
 services:
   udp-echo:
     build:
-      context: ../..
-      dockerfile: Dockerfile
+      context: ../../..
+      dockerfile: vpn/Dockerfile
     image: veepin:interop
     command: ["socat", "-T30", "UDP-LISTEN:9999,fork,reuseaddr", "EXEC:cat"]
 
@@ -30,8 +30,8 @@ services:
 
   veepin-masque-udp:
     build:
-      context: ../..
-      dockerfile: Dockerfile
+      context: ../../..
+      dockerfile: vpn/Dockerfile
     image: veepin:interop
     depends_on: [aioquic-masque-proxy]
     environment:

@@ -7,8 +7,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/xen0bit/veepin/client"
-	"github.com/xen0bit/veepin/internal/ikev2/probe"
+	"github.com/xen0bit/netgraph/vpn/client"
+	"github.com/xen0bit/netgraph/vpn/internal/ikev2/probe"
 )
 
 // runProbe answers one question — does the handshake work — without touching

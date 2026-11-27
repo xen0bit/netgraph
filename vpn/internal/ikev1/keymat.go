@@ -3,7 +3,7 @@ package ikev1
 import (
 	"hash"
 
-	"github.com/xen0bit/veepin/internal/cryptoutil"
+	"github.com/xen0bit/netgraph/vpn/internal/cryptoutil"
 )
 
 // phase1 holds the keying material derived from a completed Main Mode DH: the

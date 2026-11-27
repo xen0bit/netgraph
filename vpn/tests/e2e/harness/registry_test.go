@@ -29,7 +29,7 @@ import (
 	"testing"
 )
 
-const modulePath = "github.com/xen0bit/veepin/"
+const modulePath = "github.com/xen0bit/netgraph/vpn/"
 
 // moduleRoot is where this test's working directory sits relative to the repo.
 const moduleRoot = "../../.."

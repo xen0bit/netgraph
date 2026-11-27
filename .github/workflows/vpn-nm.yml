@@ -1,4 +1,4 @@
-name: nm-plugin
+name: vpn-nm-plugin
 
 # Builds and tests the nested NetworkManager plugin module. Kept separate from
 # the core ci.yml so the core jobs never install a C toolchain / D-Bus and the
@@ -6,17 +6,17 @@ name: nm-plugin
 on:
   push:
     branches: [main]
-    paths: ["nm/**", "client/**", ".github/workflows/nm.yml"]
+    paths: ["vpn/nm/**", "vpn/client/**", ".github/workflows/vpn-nm.yml"]
   pull_request:
     branches: [main]
-    paths: ["nm/**", "client/**", ".github/workflows/nm.yml"]
+    paths: ["vpn/nm/**", "vpn/client/**", ".github/workflows/vpn-nm.yml"]
   # Manual trigger, so this can be re-run against the current main even when a
   # change lands outside the path filter (e.g. a root-module fix the nm module
   # depends on through its `replace ../`).
   workflow_dispatch:
 
 concurrency:
-  group: nm-${{ github.ref }}
+  group: vpn-nm-${{ github.ref }}
   cancel-in-progress: true
 
 permissions:
@@ -32,7 +32,7 @@ jobs:
     runs-on: ubuntu-22.04
     defaults:
       run:
-        working-directory: nm
+        working-directory: vpn/nm
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -42,7 +42,7 @@ jobs:
         with:
           go-version: "1.27"
           cache: true
-          cache-dependency-path: nm/go.sum
+          cache-dependency-path: vpn/nm/go.sum
 
       - name: Install D-Bus + editor/auth-dialog build deps
         run: |
@@ -93,5 +93,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: veepin-nm-packages
-          path: nm/bin/pkg/*
+          path: vpn/nm/bin/pkg/*
           if-no-files-found: error

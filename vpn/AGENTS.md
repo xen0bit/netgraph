@@ -1,5 +1,12 @@
 # veepin — working notes for coding agents
 
+> **veepin lives in netgraph now.** It was merged from github.com/xen0bit/veepin
+> (last release there: v0.9.9) to become the data plane of `netgraph-edge`. It is
+> part of netgraph's Go module, so paths below are relative to `vpn/`, imports
+> are `github.com/xen0bit/netgraph/vpn/...`, and netgraph's root `AGENTS.md`
+> applies too. Where they disagree on process (checks, CI, releases), the root
+> file wins; on protocol work, this one does.
+
 A from-scratch userspace VPN in pure Go. Sixteen production protocols, **client
 and server for every one**, each verified in Docker against a real third-party
 implementation *and* against itself.
@@ -8,7 +15,8 @@ That sentence is the whole thesis, and it is what most decisions here follow
 from. Read it as three constraints:
 
 - **From scratch.** No third-party protocol libraries. Dependencies are
-  `golang.org/x/{crypto,net,sys}` and nothing else. `x/crypto` is there because
+  `golang.org/x/{crypto,net,sys}` and nothing else (`deps_test.go` holds the
+  line now that netgraph's go.mod names more). `x/crypto` is there because
   WireGuard mandates ChaCha20-Poly1305 and BLAKE2s; `x/net` for QUIC.
 - **Both roles.** A protocol is not "added" until `veepin connect <p>` and
   `veepin serve <p>` both work. Half a protocol is not a milestone.
@@ -82,7 +90,8 @@ round trip:
 |---|---|
 | `docs_test.go` — `TestPackageDocNamesEveryProtocol` | `doc.go`'s package comment names every registered package |
 | `docs_test.go` — `TestREADMECountsProtocolsCorrectly` | **every** occurrence of "*N* production protocols" and "*Nth* registered protocol" in the README agrees with the registry — spelled out ("sixteen", "seventeenth") |
-| `fuzztargets_test.go` — `TestFuzzTargetsAreAllListed` | every `Fuzz*` in the tree is in the `TARGETS` heredoc in `.github/workflows/ci.yml`, and `expected=N` matches the count |
+| `deps_test.go` — `TestVPNImportsOnlyTheStandardLibraryAndXModules` | nothing under `vpn/` imports beyond the standard library and `golang.org/x/{crypto,net,sys}` |
+| `cmd/netgraph-sensor/deps_test.go` (netgraph) | the sensor never imports anything under `vpn/` |
 | `cmd/veepin/main_test.go` | every registered protocol has a `connect` case |
 | `cmd/veepin/flags_test.go` — `TestTheFlagSetIsTheSpecTable` | every registered protocol declares `RegisterClientOpts`/`RegisterServerOpts` for each role it claims, and every spec in them produces a flag that reaches its own key. Two specs cannot claim one flag spelling |
 | `cmd/veepin/flags_test.go` | every bound flag reaches the option map (it perturbs each one and requires the map to change); every emitted key has a matching `Opt*` const |
@@ -143,11 +152,13 @@ Roughly the order that works. One commit per phase.
    a `doc/security.md` section if the protocol has a weakness worth naming.
 6. **`datapath_test.go`** — the `AllocsPerRun` guard and `Benchmark*` swept over
    `{64, 576, 1400}`.
-7. **`fuzz_test.go`** + the `ci.yml` `TARGETS` list + `expected=`.
+7. **`fuzz_test.go`**. netgraph's `make fuzz` finds every `Fuzz*` by listing
+   them, so there is no target list to keep in step any more.
 8. **Interop** — peer image dir, `compose.<proto>*.yml` per cell, entrypoints
    under `tests/interop/veepin/`, `TestInterop*` funcs, an `interopRow` in
-   `internal/livingreadme/interop.go`, and the facade dir added to **both**
-   path-filter lists in `.github/workflows/interop.yml`. Use `runInteropBench`
+   `internal/livingreadme/interop.go`, and the facade dir (as `vpn/<dir>/**`)
+   added to **both** path-filter lists in netgraph's
+   `.github/workflows/vpn-interop.yml`. Use `runInteropBench`
    for the first test of a cell so the throughput table fills.
 9. **NetworkManager** — `nm/internal/nmconfig/nmconfig.go` (`SupportedProtocols`,
    `requireKeys`, `secretMissing`), `nm/Makefile` (`VEEPIN_PROTOCOLS` +
@@ -159,21 +170,21 @@ Roughly the order that works. One commit per phase.
 
 ### The gate before pushing
 
+From netgraph's root:
+
 ```sh
 gofmt -l .                                   # must print nothing
-go build ./... && go vet ./...
-go test -race ./...                          # correctness
-go test ./...                                # again: the AllocsPerRun guards need no race detector
-golangci-lint run
+make lint test                               # vet (interop tag included), golangci-lint,
+                                             # go test -race ./..., then go test ./vpn/...
 go mod tidy && git diff --exit-code go.mod go.sum
-cd nm && go build ./... && go test -race ./... && cd ..
-make interop                                 # needs Docker
+(cd vpn/nm && go build ./... && go test -race ./...)
+make vpn.interop VPN_RUN='TestInterop<Name>' # needs Docker
+make fuzz FUZZPKGS=./vpn/...                 # when touching a parser
 ```
 
-Two of those are easy to skip and both bite. `gofmt` is checked by a dedicated
-CI step that `golangci-lint` does not cover. And the **second, race-free** `go
-test ./...` is not redundant: the race detector perturbs allocation counts, so
-the `AllocsPerRun` guards skip under `-race` and only run in that pass.
+The **second, race-free** `go test ./vpn/...` that `make test` runs is not
+redundant: the race detector perturbs allocation counts, so the `AllocsPerRun`
+guards skip under `-race` and only run in that pass.
 
 ## The interop matrix earns its keep
 
@@ -212,7 +223,7 @@ standing in for the supervisor, so no TUN, Docker, or root is needed. The harnes
 is `tests/e2e/harness` (a Go `main`; `go build ./...` compiles it) and the world
 it serves comes from `tests/e2e/fixtures/seed.json`. Run locally with `make e2e`
 (needs Node ≥ 20.6; the target installs the browser itself); CI runs it in the
-path-filtered `e2e` workflow. The Go tests pin the API's HTTP behavior; these pin
+path-filtered `vpn-e2e` workflow. The Go tests pin the API's HTTP behavior; these pin
 that the DOM renders it — redaction sentinels visible, destructive actions gated
 on `confirm()`, the client-config dialog provisioning a real peer, and every
 operator-supplied string reaching the page as text rather than markup.
@@ -302,10 +313,9 @@ The code reads like prose and the comments carry the reasoning. Match it.
 Re-run these; don't "fix" them.
 
 - `AllocsPerRun` assertions in the "Test (no race, for allocation assertions)" step.
-- `fuzz (smoke)` reporting "context deadline exceeded" — that is a timeout, not
+- A fuzz run reporting "context deadline exceeded": that's a timeout, not
   a crash.
 - `internal/ikev2/ike` — "ESP packet never reached the server TUN".
-- The release workflow's `nm-packages` job dying on an Ubuntu mirror sync.
 - `compose up: signal: killed` in an interop shard, with the last line of output
   a container *Starting* and never *Started*. That is the Docker daemon taking
   minutes over a start that normally takes milliseconds — seen on the
@@ -313,81 +323,25 @@ Re-run these; don't "fix" them.
   retries once on it now, so a red build means it happened twice; the retry is
   safe because `up --build -d` waits for nothing veepin does.
 
-## Cutting a release
+## Releases
 
-Tags drive it: `.github/workflows/release.yml` runs GoReleaser on any pushed
-`v*` tag, and the changelog is generated from `feat:`/`fix:` commits (the
-`docs`/`test`/`chore`/`ci` types, scoped forms included, are filtered out).
+veepin is no longer released on its own. Its release workflow, GoReleaser
+config and APT repository stayed behind in github.com/xen0bit/veepin, whose
+last tag is v0.9.9; netgraph's release process is the one that ships this code,
+as `netgraph-edge` once that exists. `cmd/veepin` remains as a development
+and test CLI, built by `make -C vpn build` and by the interop image
+(`vpn/Dockerfile`, whose build context is netgraph's root).
 
-Any commit on `main` is taggable now. It was not always: the living-README
-workflow used to commit its regenerated tables with `[skip ci]` in the message,
-and GitHub skips *every* workflow for a push whose head commit carries that
-marker — the tag push included. Tagging the tip of `main` therefore produced a
-tag, no run, no release, and no error anywhere. The marker is gone
-(`living-readme-commit.sh` says why the loop stays prevented without it), so do
-not reintroduce it, and do not add it to any commit that could end up as a tag's
-target.
-
-Two things that will still bite:
-
-- **A tag push is a one-shot event.** If Actions drops it, nothing reports an
-  error. Re-run with `gh workflow run release.yml --ref v<x.y.z>` rather than
-  deleting and re-pushing the tag; `replace_existing_artifacts` in
-  `.goreleaser.yaml` and `--clobber` on the `gh release upload` steps are there
-  so a second attempt against a half-published release converges instead of
-  dying on `422 already_exists`.
-- **The Debian archive moves under the cross-build job.** `nm-packages-cross`
-  installs target dev libraries out of a Debian container, and when bookworm
-  entered LTS its security suite dropped `armel` and `s390x` while `main` kept
-  them — which desynchronises the version of every `Multi-Arch: same` library
-  between the container's amd64 and the target arch, and apt then refuses to
-  install anything. The step detects the case from the security suite's own
-  `Architectures:` line; expect the next architecture to fall off the same way.
-
-### Rotating the APT signing key
-
-The `apt-repo` job signs the Pages repository with the armored private key in
-the `APT_SIGNING_KEY` Actions secret, and `packaging/apt-signing-key.asc` is the
-public half users pin with `signed-by=`. The two live in different places and
-are rotated by hand, so the job compares their fingerprints before signing
-anything — a drifted pair would otherwise produce a repository that verifies for
-nobody who fetched the keyring earlier, and no red build to say so.
-
-Same parameters every time: ed25519, sign-only, **no expiry** (an expired
-archive key breaks `apt update` for every existing installation on a date nobody
-is watching), UID on the GitHub noreply address so public Actions logs carry no
-personal email.
-
-```sh
-export GNUPGHOME=$(mktemp -d)   # a scratch keyring: one key in it, so the
-chmod 700 "$GNUPGHOME"          # bare exports below are unambiguous
-gpg --batch --passphrase '' --quick-generate-key \
-  'veepin APT repository (release signing) <21974988+xen0bit@users.noreply.github.com>' \
-  ed25519 sign never
-gpg --armor --export             > packaging/apt-signing-key.asc
-gpg --armor --export-secret-keys | gh secret set APT_SIGNING_KEY
-cp "$GNUPGHOME"/openpgp-revocs.d/*.rev ~/somewhere-safe/
-```
-
-No passphrase, deliberately: the job imports the secret unattended, and a
-passphrase in a second secret protects nothing that `secrets.APT_SIGNING_KEY`
-does not already hold.
-
-Then commit the public key with the new fingerprint in the message, and update
-the fingerprint in **both** places it is written out for humans: the README's
-install section and the landing page heredoc in
-`.github/scripts/build-apt-repo.sh`. Rotation is a breaking change for anyone
-already subscribed — the repository is re-signed at the next release and their
-keyring stops verifying it — so both of those say to re-fetch the keyring.
-
-Keep the private key and its revocation certificate somewhere outside the repo.
-There is no recovery if it is lost: the only remedy is another rotation, and
-every subscriber re-fetches.
+The living-README workflows (`vpn-interop`, `vpn-benchmark`) still commit their
+regenerated tables to `main` from CI. Never add `[skip ci]` to those commits:
+GitHub skips every workflow for a push whose head commit carries it, a tag push
+included.
 
 ## Sequencing several protocols
 
 They serialise, because they all touch `doc.go`, the README protocol table and
-the spelled-out counts. Branch off the previous one, and note that **this repo's
-workflows only trigger on pull requests whose base is `main`** — a PR stacked on
-another branch gets no checks at all. Merge in order and rebase each onto `main`
+the spelled-out counts. Branch off the previous one, and note that **the
+`vpn-*` workflows only trigger on pull requests whose base is `main`** (netgraph's
+own `ci` runs on every pull request), so a PR stacked on another branch gets no
+interop, e2e or benchmark run. Merge in order and rebase each onto `main`
 before expecting CI.

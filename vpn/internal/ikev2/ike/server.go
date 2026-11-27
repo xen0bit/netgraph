@@ -9,10 +9,10 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/xen0bit/veepin/dataplane"
-	"github.com/xen0bit/veepin/internal/ikev2/eap"
-	"github.com/xen0bit/veepin/internal/ikev2/payload"
-	"github.com/xen0bit/veepin/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
+	"github.com/xen0bit/netgraph/vpn/internal/ikev2/eap"
+	"github.com/xen0bit/netgraph/vpn/internal/ikev2/payload"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
 )
 
 // Config configures the IKEv2 server.

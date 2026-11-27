@@ -5,7 +5,7 @@ import (
 	"net"
 	"testing"
 
-	"github.com/xen0bit/veepin/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
 )
 
 // fakeChannel is enough of a cryptossh.Channel for sshClient.close to call.

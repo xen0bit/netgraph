@@ -7,9 +7,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xen0bit/veepin/internal/ikev2/payload"
-	"github.com/xen0bit/veepin/internal/ikev2/transform"
-	"github.com/xen0bit/veepin/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/internal/ikev2/payload"
+	"github.com/xen0bit/netgraph/vpn/internal/ikev2/transform"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
 )
 
 // TestIntermediateNotifyIsTheIANAValue pins INTERMEDIATE_EXCHANGE_SUPPORTED to

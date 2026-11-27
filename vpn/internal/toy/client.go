@@ -16,8 +16,8 @@ import (
 	"net/netip"
 	"time"
 
-	"github.com/xen0bit/veepin/dataplane"
-	"github.com/xen0bit/veepin/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
 )
 
 // Handshake retransmission. There is no reliability layer, so an unanswered

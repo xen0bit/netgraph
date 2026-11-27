@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xen0bit/veepin/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
 	"golang.org/x/sys/unix"
 )
 

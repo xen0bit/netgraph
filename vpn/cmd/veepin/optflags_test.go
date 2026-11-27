@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/xen0bit/veepin/client"
+	"github.com/xen0bit/netgraph/vpn/client"
 )
 
 // The property the whole generation rests on, and the one that would break

@@ -9,10 +9,10 @@ import (
 	"strconv"
 	"strings"
 
-	"github.com/xen0bit/veepin/client"
-	iovpn "github.com/xen0bit/veepin/internal/openvpn"
-	"github.com/xen0bit/veepin/internal/pqpolicy"
-	"github.com/xen0bit/veepin/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/client"
+	iovpn "github.com/xen0bit/netgraph/vpn/internal/openvpn"
+	"github.com/xen0bit/netgraph/vpn/internal/pqpolicy"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
 )
 
 // ServerConfig configures an OpenVPN responder: certificates, the address pool

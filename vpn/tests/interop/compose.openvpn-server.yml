@@ -9,8 +9,8 @@ name: veepin-interop-openvpn-server
 services:
   veepin-ovpn-server:
     build:
-      context: ../..
-      dockerfile: Dockerfile
+      context: ../../..
+      dockerfile: vpn/Dockerfile
     image: veepin:interop
     cap_add: [NET_ADMIN]
     devices: ["/dev/net/tun:/dev/net/tun"]

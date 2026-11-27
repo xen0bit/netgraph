@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/xen0bit/veepin/internal/ikev2/payload"
+	"github.com/xen0bit/netgraph/vpn/internal/ikev2/payload"
 )
 
 // buildTestSuite returns a resolved suite for the given ENCR id.

@@ -22,7 +22,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/xen0bit/veepin/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
 )
 
 //go:embed templates/*

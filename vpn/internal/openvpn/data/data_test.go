@@ -6,7 +6,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/xen0bit/veepin/internal/openvpn/keys"
+	"github.com/xen0bit/netgraph/vpn/internal/openvpn/keys"
 )
 
 // cipherPair builds a client and server Cipher with crossed keys, so packets one

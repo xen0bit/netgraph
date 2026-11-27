@@ -5,7 +5,7 @@ import (
 	"encoding/binary"
 	"testing"
 
-	"github.com/xen0bit/veepin/internal/wireguard/wire"
+	"github.com/xen0bit/netgraph/vpn/internal/wireguard/wire"
 )
 
 // pair builds the two Sessions of one WireGuard tunnel from a shared pair of

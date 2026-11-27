@@ -3,9 +3,9 @@ package ike
 import (
 	"fmt"
 
-	"github.com/xen0bit/veepin/internal/cryptoutil"
-	"github.com/xen0bit/veepin/internal/ikev2/payload"
-	"github.com/xen0bit/veepin/internal/ikev2/transform"
+	"github.com/xen0bit/netgraph/vpn/internal/cryptoutil"
+	"github.com/xen0bit/netgraph/vpn/internal/ikev2/payload"
+	"github.com/xen0bit/netgraph/vpn/internal/ikev2/transform"
 )
 
 // Suite is a fully-resolved IKE cipher suite ready for key derivation and SK

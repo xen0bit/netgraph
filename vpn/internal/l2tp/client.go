@@ -7,12 +7,12 @@ import (
 	"net"
 	"sync"
 
-	"github.com/xen0bit/veepin/dataplane"
-	"github.com/xen0bit/veepin/internal/ikev1"
-	"github.com/xen0bit/veepin/internal/ikev2/esp"
-	"github.com/xen0bit/veepin/internal/mschap"
-	"github.com/xen0bit/veepin/internal/ppp"
-	"github.com/xen0bit/veepin/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
+	"github.com/xen0bit/netgraph/vpn/internal/ikev1"
+	"github.com/xen0bit/netgraph/vpn/internal/ikev2/esp"
+	"github.com/xen0bit/netgraph/vpn/internal/mschap"
+	"github.com/xen0bit/netgraph/vpn/internal/ppp"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
 )
 
 // tunIO is the userspace TUN the data path reads IP from and writes IP to.

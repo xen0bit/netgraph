@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xen0bit/veepin/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
 )
 
 // pumpInbox mimics the data-path read loop: it reads IKE datagrams off the

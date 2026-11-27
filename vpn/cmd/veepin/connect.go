@@ -15,10 +15,10 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/xen0bit/veepin/client"
-	"github.com/xen0bit/veepin/dataplane"
-	"github.com/xen0bit/veepin/internal/profile"
-	"github.com/xen0bit/veepin/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/client"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
+	"github.com/xen0bit/netgraph/vpn/internal/profile"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
 )
 
 // runConnect brings up a tunnel and applies the negotiated configuration to the

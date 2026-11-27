@@ -9,12 +9,12 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/xen0bit/veepin/client"
-	"github.com/xen0bit/veepin/dataplane"
-	engine "github.com/xen0bit/veepin/internal/anyconnect"
-	"github.com/xen0bit/veepin/internal/pqpolicy"
-	"github.com/xen0bit/veepin/internal/userdb"
-	"github.com/xen0bit/veepin/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/client"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
+	engine "github.com/xen0bit/netgraph/vpn/internal/anyconnect"
+	"github.com/xen0bit/netgraph/vpn/internal/pqpolicy"
+	"github.com/xen0bit/netgraph/vpn/internal/userdb"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
 )
 
 func init() {

@@ -3,7 +3,7 @@ package main
 import (
 	"flag"
 
-	"github.com/xen0bit/veepin/internal/harden"
+	"github.com/xen0bit/netgraph/vpn/internal/harden"
 )
 
 // hardenFlags are the process-hardening switches, bound on `serve`.

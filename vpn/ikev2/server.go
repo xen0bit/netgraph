@@ -12,12 +12,12 @@ import (
 	"strings"
 	"time"
 
-	"github.com/xen0bit/veepin/client"
-	"github.com/xen0bit/veepin/dataplane"
-	"github.com/xen0bit/veepin/internal/ikev2/eap"
-	"github.com/xen0bit/veepin/internal/ikev2/ike"
-	"github.com/xen0bit/veepin/internal/pqpolicy"
-	"github.com/xen0bit/veepin/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/client"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
+	"github.com/xen0bit/netgraph/vpn/internal/ikev2/eap"
+	"github.com/xen0bit/netgraph/vpn/internal/ikev2/ike"
+	"github.com/xen0bit/netgraph/vpn/internal/pqpolicy"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
 )
 
 // ServerConfig configures an IKEv2 responder and its userspace data path.

@@ -31,8 +31,8 @@ services:
 
   veepin-pq-ovpn-client:
     build:
-      context: ../..
-      dockerfile: Dockerfile
+      context: ../../..
+      dockerfile: vpn/Dockerfile
     image: veepin:interop
     cap_add: [NET_ADMIN]
     devices: ["/dev/net/tun:/dev/net/tun"]

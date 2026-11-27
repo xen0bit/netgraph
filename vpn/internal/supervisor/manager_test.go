@@ -19,9 +19,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xen0bit/veepin/client"
-	"github.com/xen0bit/veepin/internal/hostnet"
-	"github.com/xen0bit/veepin/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/client"
+	"github.com/xen0bit/netgraph/vpn/internal/hostnet"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
 )
 
 // fakeServer is an injectable client.Server for manager tests. It blocks in

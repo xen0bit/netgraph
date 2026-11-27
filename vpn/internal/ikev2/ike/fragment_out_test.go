@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"testing"
 
-	"github.com/xen0bit/veepin/internal/ikev2/payload"
+	"github.com/xen0bit/netgraph/vpn/internal/ikev2/payload"
 )
 
 // outHdr is the header every test in this file fragments under.

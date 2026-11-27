@@ -7,7 +7,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/xen0bit/veepin/dataplane"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
 )
 
 // shapePacket is host_test.go's ipv4Packet with the addresses fixed, so the

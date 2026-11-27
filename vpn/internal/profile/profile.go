@@ -23,7 +23,7 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/xen0bit/veepin/internal/confstore"
+	"github.com/xen0bit/netgraph/vpn/internal/confstore"
 )
 
 // DefaultDir returns the profiles directory under the user's config home.

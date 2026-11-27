@@ -10,9 +10,9 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/xen0bit/veepin/client"
-	"github.com/xen0bit/veepin/internal/vlog"
-	iwg "github.com/xen0bit/veepin/internal/wireguard"
+	"github.com/xen0bit/netgraph/vpn/client"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
+	iwg "github.com/xen0bit/netgraph/vpn/internal/wireguard"
 )
 
 // ServerConfig configures a WireGuard responder and its userspace data path.

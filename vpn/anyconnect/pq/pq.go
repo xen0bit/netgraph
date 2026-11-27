@@ -17,10 +17,10 @@
 package pq
 
 import (
-	"github.com/xen0bit/veepin/client"
-	"github.com/xen0bit/veepin/internal/pqpolicy"
+	"github.com/xen0bit/netgraph/vpn/client"
+	"github.com/xen0bit/netgraph/vpn/internal/pqpolicy"
 
-	_ "github.com/xen0bit/veepin/anyconnect" // the base this varies
+	_ "github.com/xen0bit/netgraph/vpn/anyconnect" // the base this varies
 )
 
 const (

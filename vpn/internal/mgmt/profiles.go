@@ -20,9 +20,9 @@ import (
 	"os"
 	"slices"
 
-	"github.com/xen0bit/veepin/client"
-	"github.com/xen0bit/veepin/internal/confstore"
-	"github.com/xen0bit/veepin/internal/profile"
+	"github.com/xen0bit/netgraph/vpn/client"
+	"github.com/xen0bit/netgraph/vpn/internal/confstore"
+	"github.com/xen0bit/netgraph/vpn/internal/profile"
 )
 
 // profileStore is the on-disk profile directory the endpoints read and write.

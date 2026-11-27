@@ -6,8 +6,8 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/xen0bit/veepin/client"
-	"github.com/xen0bit/veepin/internal/userdb"
+	"github.com/xen0bit/netgraph/vpn/client"
+	"github.com/xen0bit/netgraph/vpn/internal/userdb"
 )
 
 // multiUserProtocols are the server protocols that authenticate a person by

@@ -15,7 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xen0bit/veepin/internal/wireguard/noise"
+	"github.com/xen0bit/netgraph/vpn/internal/wireguard/noise"
 )
 
 // cookieJar is the cookie a client was last given, and when. A cookie is good

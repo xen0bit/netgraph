@@ -21,11 +21,11 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/xen0bit/veepin/client"
-	"github.com/xen0bit/veepin/dataplane"
-	imasque "github.com/xen0bit/veepin/internal/masque"
-	"github.com/xen0bit/veepin/internal/pqpolicy"
-	"github.com/xen0bit/veepin/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/client"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
+	imasque "github.com/xen0bit/netgraph/vpn/internal/masque"
+	"github.com/xen0bit/netgraph/vpn/internal/pqpolicy"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
 	"golang.org/x/net/quic"
 )
 

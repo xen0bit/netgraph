@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xen0bit/veepin/dataplane"
-	"github.com/xen0bit/veepin/internal/ppp"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
+	"github.com/xen0bit/netgraph/vpn/internal/ppp"
 )
 
 // recordingHandler counts the data frames a Tunnel hands up.

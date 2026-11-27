@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xen0bit/veepin/dataplane"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
 )
 
 // fakeTUN is an in-memory TUN: the engine Reads packets pushed onto in and the

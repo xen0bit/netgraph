@@ -1,0 +1,14 @@
+# The veepin image is built with the netgraph repository root as its context
+# (see vpn/Dockerfile). BuildKit reads this file in place of the root
+# .dockerignore because it sits beside the Dockerfile. It is an allow-list:
+# the build needs the module files and vpn/, and nothing else.
+*
+!go.mod
+!go.sum
+!vpn
+vpn/nm/bin
+vpn/tests/interop/**/bin
+vpn/tests/e2e/node_modules
+**/*.deb
+**/*.rpm
+**/*.apk

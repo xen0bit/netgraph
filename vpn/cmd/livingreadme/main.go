@@ -23,7 +23,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/xen0bit/veepin/internal/livingreadme"
+	"github.com/xen0bit/netgraph/vpn/internal/livingreadme"
 )
 
 func main() {

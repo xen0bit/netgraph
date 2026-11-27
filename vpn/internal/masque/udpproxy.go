@@ -20,8 +20,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xen0bit/veepin/internal/masque/http3"
-	"github.com/xen0bit/veepin/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/internal/masque/http3"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
 	"golang.org/x/net/quic"
 )
 

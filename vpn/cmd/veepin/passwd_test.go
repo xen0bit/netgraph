@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/xen0bit/veepin/internal/userdb"
+	"github.com/xen0bit/netgraph/vpn/internal/userdb"
 )
 
 // runPasswdWith runs the command with stdin fed from in, returning what it

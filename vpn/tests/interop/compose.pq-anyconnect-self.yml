@@ -22,8 +22,8 @@ name: veepin-interop-pq-anyconnect-self
 services:
   veepin-pq-anyconnect-server:
     build:
-      context: ../..
-      dockerfile: Dockerfile
+      context: ../../..
+      dockerfile: vpn/Dockerfile
     image: veepin:interop
     cap_add: [NET_ADMIN]
     devices: ["/dev/net/tun:/dev/net/tun"]

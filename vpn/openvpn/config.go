@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"strings"
 
-	iovpn "github.com/xen0bit/veepin/internal/openvpn"
+	iovpn "github.com/xen0bit/netgraph/vpn/internal/openvpn"
 )
 
 // Config is a parsed OpenVPN client profile: where to connect, the TLS identity,

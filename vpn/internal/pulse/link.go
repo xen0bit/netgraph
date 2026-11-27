@@ -13,8 +13,8 @@ import (
 	"net/netip"
 	"sync"
 
-	"github.com/xen0bit/veepin/dataplane"
-	"github.com/xen0bit/veepin/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
 )
 
 // maxInnerPacket bounds one inner packet, and with it the read buffer. It is

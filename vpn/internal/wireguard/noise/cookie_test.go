@@ -12,7 +12,7 @@ import (
 	"golang.org/x/crypto/blake2s"
 	"golang.org/x/crypto/chacha20poly1305"
 
-	"github.com/xen0bit/veepin/internal/wireguard/wire"
+	"github.com/xen0bit/netgraph/vpn/internal/wireguard/wire"
 )
 
 // The cookie exchange is the textbook case of a mutually-consistent bug: both

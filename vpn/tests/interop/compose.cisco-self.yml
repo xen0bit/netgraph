@@ -10,8 +10,8 @@ name: veepin-interop-cisco-self
 services:
   veepin-cisco-server:
     build:
-      context: ../..
-      dockerfile: Dockerfile
+      context: ../../..
+      dockerfile: vpn/Dockerfile
     image: veepin:interop
     cap_add: [NET_ADMIN, NET_RAW]
     devices: ["/dev/net/tun:/dev/net/tun"]
@@ -29,8 +29,8 @@ services:
 
   veepin-cisco-client:
     build:
-      context: ../..
-      dockerfile: Dockerfile
+      context: ../../..
+      dockerfile: vpn/Dockerfile
     image: veepin:interop
     cap_add: [NET_ADMIN]
     devices: ["/dev/net/tun:/dev/net/tun"]

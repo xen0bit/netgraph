@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xen0bit/veepin/internal/wireguard/noise"
-	"github.com/xen0bit/veepin/internal/wireguard/wire"
+	"github.com/xen0bit/netgraph/vpn/internal/wireguard/noise"
+	"github.com/xen0bit/netgraph/vpn/internal/wireguard/wire"
 )
 
 // loadedServer is a responder that is permanently under load: an initiation

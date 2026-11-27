@@ -22,9 +22,9 @@ import (
 	"encoding/base64"
 	"fmt"
 
-	"github.com/xen0bit/veepin/internal/capture"
-	"github.com/xen0bit/veepin/internal/wireguard/noise"
-	"github.com/xen0bit/veepin/internal/wireguard/wire"
+	"github.com/xen0bit/netgraph/vpn/internal/capture"
+	"github.com/xen0bit/netgraph/vpn/internal/wireguard/noise"
+	"github.com/xen0bit/netgraph/vpn/internal/wireguard/wire"
 )
 
 const (

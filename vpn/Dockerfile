@@ -12,14 +12,15 @@
 # into the image.
 
 # --- build stage: static, CGO-free binaries ---
+# The build context is the netgraph repository root (vpn/ is a directory of the
+# netgraph module), and vpn/Dockerfile.dockerignore admits only go.mod, go.sum
+# and vpn/. No `go mod download`: the module file lists netgraph's server
+# dependencies too (SQLite, d2), and the build fetches only what veepin imports.
 FROM golang:1.27-bookworm AS build
 WORKDIR /src
-# Pre-download modules against go.mod/go.sum so the dependency layer caches
-# independently of the source, then build the command into /out.
 COPY go.mod go.sum ./
-RUN go mod download
-COPY . .
-RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/ ./cmd/veepin
+COPY vpn ./vpn
+RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o /out/ ./vpn/cmd/veepin
 
 # --- runtime stage ---
 FROM debian:bookworm-slim

@@ -1,4 +1,4 @@
-name: interop
+name: vpn-interop
 
 # Docker-based interoperability tests: every protocol against a real third-party
 # peer and against itself. Kept in its own workflow — like nm.yml — so the
@@ -13,72 +13,72 @@ on:
   push:
     branches: [main]
     paths:
-      - "internal/**"
-      - "dataplane/**"
-      - "client/**"
-      - "cmd/veepin/**"
+      - "vpn/internal/**"
+      - "vpn/dataplane/**"
+      - "vpn/client/**"
+      - "vpn/cmd/veepin/**"
       # One entry per public protocol package: a change confined to any of them
       # can break that protocol's interop cells and nothing else would catch it.
-      - "ikev2/**"
-      - "wireguard/**"
-      - "openvpn/**"
-      - "sstp/**"
-      - "ssh/**"
-      - "l2tp/**"
-      - "anyconnect/**"
-      - "nebula/**"
-      - "masque/**"
-      - "fortinet/**"
-      - "gp/**"
-      - "cisco/**"
-      - "pulse/**"
-      - "amneziawg/**"
-      - "softether/**"
-      - "l2tpv3/**"
-      - "internal/l2tpv3/**"
-      - "toy/**"
-      - "Dockerfile"
-      - "tests/interop/**"
-      - "cmd/livingreadme/**"
-      - ".github/scripts/living-readme-commit.sh"
-      - ".github/scripts/living-readme-preview.sh"
-      - ".github/workflows/interop.yml"
+      - "vpn/ikev2/**"
+      - "vpn/wireguard/**"
+      - "vpn/openvpn/**"
+      - "vpn/sstp/**"
+      - "vpn/ssh/**"
+      - "vpn/l2tp/**"
+      - "vpn/anyconnect/**"
+      - "vpn/nebula/**"
+      - "vpn/masque/**"
+      - "vpn/fortinet/**"
+      - "vpn/gp/**"
+      - "vpn/cisco/**"
+      - "vpn/pulse/**"
+      - "vpn/amneziawg/**"
+      - "vpn/softether/**"
+      - "vpn/l2tpv3/**"
+      - "vpn/internal/l2tpv3/**"
+      - "vpn/toy/**"
+      - "vpn/Dockerfile"
+      - "vpn/tests/interop/**"
+      - "vpn/cmd/livingreadme/**"
+      - "vpn/scripts/ci/living-readme-commit.sh"
+      - "vpn/scripts/ci/living-readme-preview.sh"
+      - ".github/workflows/vpn-interop.yml"
   pull_request:
     branches: [main]
     paths:
-      - "internal/**"
-      - "dataplane/**"
-      - "client/**"
-      - "cmd/veepin/**"
+      - "vpn/internal/**"
+      - "vpn/dataplane/**"
+      - "vpn/client/**"
+      - "vpn/cmd/veepin/**"
       # One entry per public protocol package: a change confined to any of them
       # can break that protocol's interop cells and nothing else would catch it.
-      - "ikev2/**"
-      - "wireguard/**"
-      - "openvpn/**"
-      - "sstp/**"
-      - "ssh/**"
-      - "l2tp/**"
-      - "anyconnect/**"
-      - "nebula/**"
-      - "masque/**"
-      - "fortinet/**"
-      - "gp/**"
-      - "cisco/**"
-      - "pulse/**"
-      - "amneziawg/**"
-      - "softether/**"
-      - "l2tpv3/**"
-      - "internal/l2tpv3/**"
-      - "toy/**"
-      - "Dockerfile"
-      - "tests/interop/**"
-      - "cmd/livingreadme/**"
-      - ".github/scripts/living-readme-commit.sh"
-      - ".github/scripts/living-readme-preview.sh"
-      - ".github/workflows/interop.yml"
+      - "vpn/ikev2/**"
+      - "vpn/wireguard/**"
+      - "vpn/openvpn/**"
+      - "vpn/sstp/**"
+      - "vpn/ssh/**"
+      - "vpn/l2tp/**"
+      - "vpn/anyconnect/**"
+      - "vpn/nebula/**"
+      - "vpn/masque/**"
+      - "vpn/fortinet/**"
+      - "vpn/gp/**"
+      - "vpn/cisco/**"
+      - "vpn/pulse/**"
+      - "vpn/amneziawg/**"
+      - "vpn/softether/**"
+      - "vpn/l2tpv3/**"
+      - "vpn/internal/l2tpv3/**"
+      - "vpn/toy/**"
+      - "vpn/Dockerfile"
+      - "vpn/tests/interop/**"
+      - "vpn/cmd/livingreadme/**"
+      - "vpn/scripts/ci/living-readme-commit.sh"
+      - "vpn/scripts/ci/living-readme-preview.sh"
+      - ".github/workflows/vpn-interop.yml"
 
 concurrency:
-  group: interop-${{ github.ref }}
+  group: vpn-interop-${{ github.ref }}
   cancel-in-progress: true
 
 # contents:write so the push-to-main run can commit the refreshed interop matrix
@@ -86,6 +86,11 @@ concurrency:
 # diff, so the elevated scope is unused there.
 permissions:
   contents: write
+
+# veepin lives under vpn/ in this repository; every run step starts there.
+defaults:
+  run:
+    working-directory: vpn
 
 jobs:
   # The split is derived from internal/livingreadme's manifest, not written here:
@@ -250,7 +255,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: interop-${{ matrix.shard.name }}
-          path: interop-${{ matrix.shard.name }}.json
+          path: vpn/interop-${{ matrix.shard.name }}.json
           if-no-files-found: error
           retention-days: 7
 
@@ -281,7 +286,7 @@ jobs:
         with:
           pattern: interop-*
           merge-multiple: true
-          path: shards
+          path: vpn/shards
 
       - name: Merge the shard streams
         run: |
@@ -298,11 +303,11 @@ jobs:
         env:
           SHA: ${{ github.sha }}
           REF: ${{ github.ref_name }}
-        run: .github/scripts/living-readme-commit.sh "interop results" README.md interop interop.json interop-benchmark interop.json
+        run: scripts/ci/living-readme-commit.sh "interop results" README.md interop interop.json interop-benchmark interop.json
 
       - name: Preview interop matrix + throughput diff (pull request)
         if: github.event_name == 'pull_request'
         env:
           SHA: ${{ github.sha }}
           REF: ${{ github.ref_name }}
-        run: .github/scripts/living-readme-preview.sh "interop results" README.md interop interop.json interop-benchmark interop.json
+        run: scripts/ci/living-readme-preview.sh "interop results" README.md interop interop.json interop-benchmark interop.json

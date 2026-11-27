@@ -16,13 +16,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/xen0bit/veepin/client"
-	"github.com/xen0bit/veepin/internal/harden"
-	"github.com/xen0bit/veepin/internal/hostnet"
-	"github.com/xen0bit/veepin/internal/mgmt"
-	"github.com/xen0bit/veepin/internal/mgmt/ui"
-	"github.com/xen0bit/veepin/internal/supervisor"
-	"github.com/xen0bit/veepin/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/client"
+	"github.com/xen0bit/netgraph/vpn/internal/harden"
+	"github.com/xen0bit/netgraph/vpn/internal/hostnet"
+	"github.com/xen0bit/netgraph/vpn/internal/mgmt"
+	"github.com/xen0bit/netgraph/vpn/internal/mgmt/ui"
+	"github.com/xen0bit/netgraph/vpn/internal/supervisor"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
 )
 
 // runServe runs a VPN server. Everything protocol-specific is in the flag set

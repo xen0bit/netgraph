@@ -4,8 +4,8 @@ import (
 	"net"
 	"testing"
 
-	"github.com/xen0bit/veepin/dataplane"
-	"github.com/xen0bit/veepin/internal/ikev1"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
+	"github.com/xen0bit/netgraph/vpn/internal/ikev1"
 )
 
 // discardTUN accepts the pump's writes and never yields a read.

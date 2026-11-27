@@ -12,8 +12,8 @@ import (
 	"slices"
 	"sync"
 
-	"github.com/xen0bit/veepin/internal/cryptoutil"
-	"github.com/xen0bit/veepin/internal/ikev2/transform"
+	"github.com/xen0bit/netgraph/vpn/internal/cryptoutil"
+	"github.com/xen0bit/netgraph/vpn/internal/ikev2/transform"
 )
 
 // Drop-path sentinel errors. Decapsulate can be called for every inbound packet

@@ -21,10 +21,10 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/xen0bit/veepin/client"
-	"github.com/xen0bit/veepin/dataplane"
-	icisco "github.com/xen0bit/veepin/internal/cisco"
-	"github.com/xen0bit/veepin/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/client"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
+	icisco "github.com/xen0bit/netgraph/vpn/internal/cisco"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
 )
 
 func init() { client.Register("cisco", parseOptions) }

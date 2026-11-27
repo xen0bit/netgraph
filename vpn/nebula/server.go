@@ -20,7 +20,7 @@ import (
 	"strconv"
 	"sync"
 
-	"github.com/xen0bit/veepin/client"
+	"github.com/xen0bit/netgraph/vpn/client"
 )
 
 func init() {

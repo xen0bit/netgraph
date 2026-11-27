@@ -17,7 +17,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/xen0bit/veepin/internal/replay"
+	"github.com/xen0bit/netgraph/vpn/internal/replay"
 )
 
 // replayWindowSize is how far behind the highest counter a late packet is still

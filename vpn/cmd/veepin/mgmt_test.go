@@ -15,10 +15,10 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/xen0bit/veepin/client"
-	"github.com/xen0bit/veepin/internal/mgmt"
-	"github.com/xen0bit/veepin/internal/supervisor"
-	"github.com/xen0bit/veepin/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/client"
+	"github.com/xen0bit/netgraph/vpn/internal/mgmt"
+	"github.com/xen0bit/netgraph/vpn/internal/supervisor"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
 )
 
 // cliFakeMgr mirrors internal/mgmt's fakeMgr but in package main (the CLI test

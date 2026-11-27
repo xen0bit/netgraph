@@ -3,7 +3,7 @@ package data
 import (
 	"testing"
 
-	"github.com/xen0bit/veepin/internal/openvpn/keys"
+	"github.com/xen0bit/netgraph/vpn/internal/openvpn/keys"
 )
 
 func benchCiphers(b *testing.B) (client, server *Cipher) {

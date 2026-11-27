@@ -6,9 +6,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xen0bit/veepin/dataplane"
-	"github.com/xen0bit/veepin/internal/wireguard/noise"
-	"github.com/xen0bit/veepin/internal/wireguard/wire"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
+	"github.com/xen0bit/netgraph/vpn/internal/wireguard/noise"
+	"github.com/xen0bit/netgraph/vpn/internal/wireguard/wire"
 )
 
 // socketServer is a Server with everything ListenAndServe would give it except

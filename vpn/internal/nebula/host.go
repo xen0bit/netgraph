@@ -27,7 +27,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xen0bit/veepin/dataplane"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
 )
 
 const (

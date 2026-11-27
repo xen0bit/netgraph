@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xen0bit/veepin/internal/ikev2/payload"
-	"github.com/xen0bit/veepin/internal/ikev2/transform"
-	"github.com/xen0bit/veepin/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/internal/ikev2/payload"
+	"github.com/xen0bit/netgraph/vpn/internal/ikev2/transform"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
 )
 
 // gateServer starts a responder with the given PSK (possibly empty) and, when

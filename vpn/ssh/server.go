@@ -13,12 +13,12 @@ import (
 
 	cryptossh "golang.org/x/crypto/ssh"
 
-	"github.com/xen0bit/veepin/client"
-	"github.com/xen0bit/veepin/dataplane"
-	"github.com/xen0bit/veepin/internal/pqpolicy"
-	"github.com/xen0bit/veepin/internal/sshtun"
-	"github.com/xen0bit/veepin/internal/userdb"
-	"github.com/xen0bit/veepin/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/client"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
+	"github.com/xen0bit/netgraph/vpn/internal/pqpolicy"
+	"github.com/xen0bit/netgraph/vpn/internal/sshtun"
+	"github.com/xen0bit/netgraph/vpn/internal/userdb"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
 )
 
 // ServerConfig configures an SSH VPN responder — an SSH server that accepts

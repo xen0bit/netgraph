@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xen0bit/veepin/dataplane"
-	imasque "github.com/xen0bit/veepin/internal/masque"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
+	imasque "github.com/xen0bit/netgraph/vpn/internal/masque"
 	"golang.org/x/net/quic"
 )
 

@@ -23,11 +23,11 @@ import (
 	"os"
 	"strconv"
 
-	"github.com/xen0bit/veepin/client"
-	"github.com/xen0bit/veepin/dataplane"
-	"github.com/xen0bit/veepin/internal/pqpolicy"
-	ipulse "github.com/xen0bit/veepin/internal/pulse"
-	"github.com/xen0bit/veepin/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/client"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
+	"github.com/xen0bit/netgraph/vpn/internal/pqpolicy"
+	ipulse "github.com/xen0bit/netgraph/vpn/internal/pulse"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
 )
 
 func init() { client.Register("pulse", parseOptions) }

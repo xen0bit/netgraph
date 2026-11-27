@@ -9,7 +9,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/xen0bit/veepin/internal/dtls"
+	"github.com/xen0bit/netgraph/vpn/internal/dtls"
 )
 
 // The optional DTLS data channel.

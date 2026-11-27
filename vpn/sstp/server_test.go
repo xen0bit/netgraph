@@ -14,11 +14,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xen0bit/veepin/dataplane"
-	"github.com/xen0bit/veepin/internal/mschap"
-	"github.com/xen0bit/veepin/internal/ppp"
-	"github.com/xen0bit/veepin/internal/sstp/wire"
-	"github.com/xen0bit/veepin/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
+	"github.com/xen0bit/netgraph/vpn/internal/mschap"
+	"github.com/xen0bit/netgraph/vpn/internal/ppp"
+	"github.com/xen0bit/netgraph/vpn/internal/sstp/wire"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
 )
 
 // fakeTUN records what the server writes to its TUN.

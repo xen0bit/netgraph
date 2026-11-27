@@ -34,7 +34,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xen0bit/veepin/internal/cryptoutil"
+	"github.com/xen0bit/netgraph/vpn/internal/cryptoutil"
 )
 
 const (

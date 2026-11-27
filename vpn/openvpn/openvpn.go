@@ -8,7 +8,7 @@
 //
 // Importing this package registers "openvpn" with the client registry:
 //
-//	import _ "github.com/xen0bit/veepin/openvpn"
+//	import _ "github.com/xen0bit/netgraph/vpn/openvpn"
 //
 //	sess, res, err := client.Dial(ctx, "openvpn", opts)
 //
@@ -38,10 +38,10 @@ import (
 	"net"
 	"strconv"
 
-	"github.com/xen0bit/veepin/client"
-	iovpn "github.com/xen0bit/veepin/internal/openvpn"
-	"github.com/xen0bit/veepin/internal/pqpolicy"
-	"github.com/xen0bit/veepin/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/client"
+	iovpn "github.com/xen0bit/netgraph/vpn/internal/openvpn"
+	"github.com/xen0bit/netgraph/vpn/internal/pqpolicy"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
 )
 
 func init() { client.Register("openvpn", parseOptions) }

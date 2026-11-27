@@ -15,8 +15,8 @@ name: veepin-interop-l2tp-server-shaped
 services:
   veepin-l2tp-server:
     build:
-      context: ../..
-      dockerfile: Dockerfile
+      context: ../../..
+      dockerfile: vpn/Dockerfile
     image: veepin:interop
     cap_add: [NET_ADMIN]
     devices: ["/dev/net/tun:/dev/net/tun"]

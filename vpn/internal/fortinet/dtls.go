@@ -21,8 +21,8 @@ import (
 	"net"
 	"time"
 
-	"github.com/xen0bit/veepin/internal/dtls"
-	"github.com/xen0bit/veepin/internal/udpmux"
+	"github.com/xen0bit/netgraph/vpn/internal/dtls"
+	"github.com/xen0bit/netgraph/vpn/internal/udpmux"
 )
 
 const (

@@ -10,7 +10,7 @@
 // Importing this package also registers "ikev2" with the client registry, so a
 // caller that dials by name only needs the blank import:
 //
-//	import _ "github.com/xen0bit/veepin/ikev2"
+//	import _ "github.com/xen0bit/netgraph/vpn/ikev2"
 //
 //	sess, res, err := client.Dial(ctx, "ikev2", opts)
 //
@@ -31,11 +31,11 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/xen0bit/veepin/client"
-	"github.com/xen0bit/veepin/dataplane"
-	"github.com/xen0bit/veepin/internal/ikev2/ike"
-	"github.com/xen0bit/veepin/internal/pqpolicy"
-	"github.com/xen0bit/veepin/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/client"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
+	"github.com/xen0bit/netgraph/vpn/internal/ikev2/ike"
+	"github.com/xen0bit/netgraph/vpn/internal/pqpolicy"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
 )
 
 func init() { client.Register("ikev2", parseOptions) }

@@ -8,8 +8,8 @@ import (
 	"fmt"
 	"testing"
 
-	"github.com/xen0bit/veepin/internal/mschap"
-	"github.com/xen0bit/veepin/internal/sstp/wire"
+	"github.com/xen0bit/netgraph/vpn/internal/mschap"
+	"github.com/xen0bit/netgraph/vpn/internal/sstp/wire"
 )
 
 func TestPRFPlusKnownAnswer(t *testing.T) {

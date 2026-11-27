@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xen0bit/veepin/client"
-	"github.com/xen0bit/veepin/internal/openvpn/keys"
+	"github.com/xen0bit/netgraph/vpn/client"
+	"github.com/xen0bit/netgraph/vpn/internal/openvpn/keys"
 )
 
 func TestParsePushSubnet(t *testing.T) {

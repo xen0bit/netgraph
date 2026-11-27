@@ -7,11 +7,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xen0bit/veepin/dataplane"
-	"github.com/xen0bit/veepin/internal/openvpn/control"
-	"github.com/xen0bit/veepin/internal/openvpn/data"
-	"github.com/xen0bit/veepin/internal/openvpn/keys"
-	"github.com/xen0bit/veepin/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/dataplane"
+	"github.com/xen0bit/netgraph/vpn/internal/openvpn/control"
+	"github.com/xen0bit/netgraph/vpn/internal/openvpn/data"
+	"github.com/xen0bit/netgraph/vpn/internal/openvpn/keys"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
 )
 
 // discardTUN is a tunIO that answers the pump's Read forever and records what

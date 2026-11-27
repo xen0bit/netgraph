@@ -25,8 +25,8 @@ import (
 	"slices"
 	"strings"
 
-	"github.com/xen0bit/veepin/client"
-	"github.com/xen0bit/veepin/internal/confstore"
+	"github.com/xen0bit/netgraph/vpn/client"
+	"github.com/xen0bit/netgraph/vpn/internal/confstore"
 )
 
 // ValidName reports whether name is one the supervisor could have written. The

@@ -27,7 +27,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/xen0bit/veepin/internal/openvpn/keys"
+	"github.com/xen0bit/netgraph/vpn/internal/openvpn/keys"
 )
 
 // Data-channel opcodes and fixed field sizes.

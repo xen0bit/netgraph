@@ -24,20 +24,20 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/xen0bit/veepin/client"
-	"github.com/xen0bit/veepin/internal/keygen"
-	"github.com/xen0bit/veepin/internal/pqpolicy"
+	"github.com/xen0bit/netgraph/vpn/client"
+	"github.com/xen0bit/netgraph/vpn/internal/keygen"
+	"github.com/xen0bit/netgraph/vpn/internal/pqpolicy"
 
-	_ "github.com/xen0bit/veepin/anyconnect/pq"
-	_ "github.com/xen0bit/veepin/fortinet/pq"
-	_ "github.com/xen0bit/veepin/gp/pq"
-	_ "github.com/xen0bit/veepin/ikev2/pq"
-	_ "github.com/xen0bit/veepin/masque/pq"
-	_ "github.com/xen0bit/veepin/openvpn/pq"
-	_ "github.com/xen0bit/veepin/pulse/pq"
-	_ "github.com/xen0bit/veepin/softether/pq"
-	_ "github.com/xen0bit/veepin/ssh/pq"
-	_ "github.com/xen0bit/veepin/sstp/pq"
+	_ "github.com/xen0bit/netgraph/vpn/anyconnect/pq"
+	_ "github.com/xen0bit/netgraph/vpn/fortinet/pq"
+	_ "github.com/xen0bit/netgraph/vpn/gp/pq"
+	_ "github.com/xen0bit/netgraph/vpn/ikev2/pq"
+	_ "github.com/xen0bit/netgraph/vpn/masque/pq"
+	_ "github.com/xen0bit/netgraph/vpn/openvpn/pq"
+	_ "github.com/xen0bit/netgraph/vpn/pulse/pq"
+	_ "github.com/xen0bit/netgraph/vpn/softether/pq"
+	_ "github.com/xen0bit/netgraph/vpn/ssh/pq"
+	_ "github.com/xen0bit/netgraph/vpn/sstp/pq"
 )
 
 // TestEveryVariantIsNamedForItsBase pins the naming convention, because the
@@ -437,7 +437,7 @@ func pqCallsReachableFrom(t *testing.T, pkg string) map[string]map[string]bool {
 	// function is keyed by the alias the facade imports it under, so the
 	// facade's selector call reaches it.
 	calls := map[string]map[string]bool{}
-	engineAliases := collectPQCalls(t, fset, pkg, "", "github.com/xen0bit/veepin/internal/"+pkg, calls)
+	engineAliases := collectPQCalls(t, fset, pkg, "", "github.com/xen0bit/netgraph/vpn/internal/"+pkg, calls)
 	for alias := range engineAliases {
 		collectPQCalls(t, fset, filepath.Join("internal", pkg), alias, "", calls)
 	}

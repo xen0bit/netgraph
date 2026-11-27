@@ -18,7 +18,7 @@ import (
 	"net"
 	"sync"
 
-	"github.com/xen0bit/veepin/internal/vlog"
+	"github.com/xen0bit/netgraph/vpn/internal/vlog"
 )
 
 // maxInnerPacket bounds a packet read from the TUN. It is the framing's own

@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/xen0bit/veepin/internal/wireguard/transport"
+	"github.com/xen0bit/netgraph/vpn/internal/wireguard/transport"
 )
 
 // sessionPair builds the two ends of one transport session from crossed keys,
