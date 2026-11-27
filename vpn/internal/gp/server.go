@@ -30,6 +30,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xen0bit/netgraph/vpn/client"
 	"github.com/xen0bit/netgraph/vpn/dataplane"
 	"github.com/xen0bit/netgraph/vpn/internal/userdb"
 	"github.com/xen0bit/netgraph/vpn/internal/vlog"
@@ -37,6 +38,9 @@ import (
 
 // ServerConfig configures a GlobalProtect gateway.
 type ServerConfig struct {
+	// Sessions, if set, is told when each authenticated user takes and gives
+	// back an address (client.SessionReporter, through the facade).
+	Sessions *client.SessionHub
 	// Users maps a username to its password. A user absent here is rejected.
 	Users map[string]string
 	// Pool allocates client addresses.
@@ -87,6 +91,8 @@ type session struct {
 	// return to the gate exactly once, whichever of the several ends gets there
 	// first.
 	releaseOnce sync.Once
+	// hubID is the client.SessionHub session this login opened, or zero.
+	hubID uint64
 	// link is the session's one data path, ESP or SSL, guarded by Server.mu.
 	// One owner per session is what keeps the address and the route to it in
 	// step: a second tunnel replaces the first rather than outliving it, and
@@ -252,13 +258,23 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 
 	cookie := newAuthCookie()
-	s.mu.Lock()
-	s.expireSessionsLocked()
-	s.sessions[cookie] = &session{
+	sess := &session{
 		user:    req.User,
 		addr:    addr,
 		expires: time.Now().Add(sessionTTL),
 	}
+	// The password proved the user, and the address is theirs from here until
+	// releaseOnce gives it back -- whether their tunnel ends or the login
+	// expires unused.
+	if s.cfg.Sessions != nil {
+		outer, _ := netip.ParseAddrPort(r.RemoteAddr)
+		sess.hubID = s.cfg.Sessions.OpenSession(client.SessionEvent{
+			User: req.User, Auth: "password", Addrs: client.HostPrefixes(addr), Outer: outer,
+		})
+	}
+	s.mu.Lock()
+	s.expireSessionsLocked()
+	s.sessions[cookie] = sess
 	s.mu.Unlock()
 
 	s.log.Printf("gp: %q authenticated, assigned %s", req.User, addr)
@@ -680,7 +696,15 @@ func (s *Server) release(cookie string, sess *session) {
 		}
 		s.cfg.Pool.Release(sess.addr)
 		s.gate.Done()
+		s.closeSession(sess, "disconnected")
 	})
+}
+
+// closeSession ends sess's client.SessionHub session, if it has one.
+func (s *Server) closeSession(sess *session, reason string) {
+	if sess.hubID != 0 && s.cfg.Sessions != nil {
+		s.cfg.Sessions.CloseSession(sess.hubID, reason, time.Time{})
+	}
 }
 
 // expireSessionsLocked drops sessions that never took a data path. The caller
@@ -705,6 +729,7 @@ func (s *Server) expireSessionsLocked() {
 		expired.releaseOnce.Do(func() {
 			s.cfg.Pool.Release(expired.addr)
 			s.gate.Done()
+			s.closeSession(expired, "expired")
 		})
 	}
 }
