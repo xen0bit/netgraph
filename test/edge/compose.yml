@@ -1,0 +1,81 @@
+# The edge lab: a real WireGuard client connects to netgraph-edge, reaches a
+# server behind it through the tunnel, and netgraph is asked who did what.
+#
+#   make edge.lab      # go test -tags edgelab ./test/edge
+#
+#   public 198.18.1.0/24 (internal)          inside 10.78.0.0/24 (internal)
+#   wg-client .50 ──── edge .10 ═══════════ edge .10 ─┬─ web 10.78.0.30 (iperf3)
+#   (wireguard-go)     (netgraph-edge,                └─ server 10.78.0.20 (netgraph)
+#                       WireGuard 10.10.10.1/24)
+#
+# The client's tunnel address is 10.10.10.2; the edge NATs it onto the inside
+# network. Nothing here reaches the real internet.
+name: netgraph-edge-lab
+
+x-wg-keys: &wg-keys
+  SERVER_PRIVATE: "+IRmjL6NRpthikeXn+jGUJNLe1ZJKQaqeWubiG9+GHs="
+  SERVER_PUBLIC: "srb9CBWUN+UL2CYhqHoL+rGKFPNu6nUJiNStgH0EBWM="
+  CLIENT_PRIVATE: "CHk+5XZnPhJ+UXfIx83SaePpgYrK+0/FqiPvNvTp3Hg="
+  CLIENT_PUBLIC: "gjMMAROzi5lHFapIKeaAdJ2RhGe0lW24XysGzBd1OSM="
+  PSK: "cjldFdAmi69yIFhc0Sms/5Yz6boVXkMZbMJl+RzzMZM="
+  SERVER_TUN_IP: "10.10.10.1"
+  CLIENT_TUN_IP: "10.10.10.2"
+
+networks:
+  public:
+    internal: true
+    ipam: { config: [{ subnet: 198.18.1.0/24 }] }
+  inside:
+    internal: true
+    ipam: { config: [{ subnet: 10.78.0.0/24 }] }
+  mgmt: {}
+
+services:
+  server:
+    build: { context: ../.., dockerfile: deploy/Dockerfile, target: server }
+    image: netgraph:edgelab
+    environment:
+      NETGRAPH_TOKEN: edge-ingest-token
+      NETGRAPH_READ_TOKEN: edge-read-token
+    networks:
+      inside: { ipv4_address: 10.78.0.20 }
+      mgmt: {}
+    ports: ["127.0.0.1:18444:8443"]
+
+  edge:
+    build: { context: ../.., dockerfile: deploy/Dockerfile, target: edge }
+    image: netgraph-edge:edgelab
+    cap_add: [NET_ADMIN, NET_RAW]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    sysctls:
+      net.ipv4.ip_forward: "1"
+    environment:
+      <<: *wg-keys
+      NETGRAPH_TOKEN: edge-ingest-token
+    volumes:
+      - ./scripts/edge.sh:/edge.sh:ro
+    entrypoint: ["/bin/sh", "/edge.sh"]
+    networks:
+      public: { ipv4_address: 198.18.1.10 }
+      inside: { ipv4_address: 10.78.0.10 }
+    depends_on: [server]
+
+  web:
+    build: { context: ../../vpn/tests/interop/wireguard }
+    image: interop-wireguard
+    command: ["iperf3", "-s"]
+    networks:
+      inside: { ipv4_address: 10.78.0.30 }
+
+  wg-client:
+    image: interop-wireguard
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    environment:
+      <<: *wg-keys
+    volumes:
+      - ./scripts/client.sh:/client.sh:ro
+    command: ["/bin/sh", "/client.sh"]
+    networks:
+      public: { ipv4_address: 198.18.1.50 }
+    depends_on: [edge, web]

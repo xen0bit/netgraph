@@ -96,6 +96,21 @@ builds:
       - -trimpath
     ldflags: *ldflags
 
+  # VPN listeners that report to the server. Linux only (TUN, AF_PACKET,
+  # iptables); the same targets as EDGE_TARGETS in the Makefile.
+  - id: netgraph-edge
+    binary: netgraph-edge
+    main: ./cmd/netgraph-edge
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [amd64, arm64, arm]
+    goarm: ["7"]
+    mod_timestamp: "{{ .CommitTimestamp }}"
+    flags:
+      - -trimpath
+    ldflags: *ldflags
+
 archives:
   # Names carry the ARM variant: armv5/6/7 are all GOARCH=arm, and without
   # it they collide on one file name (pwrq hit this as a 422 on upload).
@@ -147,6 +162,17 @@ archives:
         dst: packaging/macos
       - src: packaging/windows/*
         dst: packaging/windows
+
+  - id: netgraph-edge
+    ids: [netgraph-edge]
+    formats: [tar.gz]
+    name_template: >-
+      netgraph-edge_{{ .Version }}_{{ .Os }}_{{ .Arch }}
+      {{- if .Arm }}v{{ .Arm }}{{ end }}
+    files:
+      - README.md
+      - LICENSE*
+      - docs/edge.md
 
 nfpms:
   - id: netgraph-sensor

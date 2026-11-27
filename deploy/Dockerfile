@@ -3,6 +3,7 @@
 #   docker build -f deploy/Dockerfile --target sensor -t netgraph-sensor .
 #   docker build -f deploy/Dockerfile --target server -t netgraph .
 #   docker build -f deploy/Dockerfile --target agent -t netgraph-agent .
+#   docker build -f deploy/Dockerfile --target edge -t netgraph-edge .
 #
 # Released images are built by goreleaser from its own binaries instead
 # (deploy/goreleaser.Dockerfile); this file is for local use and test/lab.
@@ -24,6 +25,8 @@ RUN tags=embed_web; [ -s internal/asn/ip2asn-combined.tsv.gz ] && [ -s internal/
         -o /out/netgraph ./cmd/netgraph \
  && go build -trimpath -ldflags "-s -w -X github.com/xen0bit/netgraph/internal/buildinfo.Version=${VERSION}" \
         -o /out/netgraph-agent ./cmd/netgraph-agent \
+ && go build -trimpath -ldflags "-s -w -X github.com/xen0bit/netgraph/internal/buildinfo.Version=${VERSION}" \
+        -o /out/netgraph-edge ./cmd/netgraph-edge \
  && mkdir -p /out/data
 
 # The sensor needs CAP_NET_RAW (cap_add: [NET_RAW]) and nothing else. It runs
@@ -52,3 +55,15 @@ FROM alpine:3.22 AS agent
 RUN apk add --no-cache nftables
 COPY --from=build /out/netgraph-agent /usr/bin/netgraph-agent
 ENTRYPOINT ["/usr/bin/netgraph-agent"]
+
+# The edge runs VPN listeners: it opens TUNs and, for a listener with
+# "setup_nat", addresses them and installs tagged iptables rules, so it needs
+# CAP_NET_ADMIN, CAP_NET_RAW (its own capture of each TUN) and /dev/net/tun.
+# Debian, not distroless, for the ip, iptables and sysctl it runs.
+FROM debian:bookworm-slim AS edge
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends iproute2 iptables procps ca-certificates \
+ && rm -rf /var/lib/apt/lists/*
+COPY --from=build /out/netgraph-edge /usr/bin/netgraph-edge
+ENTRYPOINT ["/usr/bin/netgraph-edge"]
+CMD ["run"]

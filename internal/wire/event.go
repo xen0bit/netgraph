@@ -38,6 +38,9 @@ const (
 	TypeWiFi    Type = "wifi"     // a Wi-Fi network, client or handshake observation
 	TypeWiFiKey Type = "wifi_key" // handshake nonces, for restart persistence and cross-sensor sync
 	TypeWiFiGTK Type = "wifi_gtk" // a group key as the AP sent it (still wrapped), for the same
+
+	// TypeVPNSession is a VPN session opening or closing on a netgraph-edge.
+	TypeVPNSession Type = "vpn_session"
 )
 
 // Event is one observation. TS is when it was observed (the packet's capture
@@ -60,6 +63,8 @@ type Event struct {
 	WiFi    *WiFi    `json:"wifi,omitempty"`
 	WiFiKey *WiFiKey `json:"wifi_key,omitempty"`
 	WiFiGTK *WiFiGTK `json:"wifi_gtk,omitempty"`
+
+	VPNSession *VPNSession `json:"vpn_session,omitempty"`
 }
 
 // Hello describes the sensor and the interfaces it captures. The server uses
@@ -348,4 +353,23 @@ type EAPOL struct {
 	Installed bool   `json:"installed,omitempty"`
 	Group     bool   `json:"group,omitempty"` // a group-key (GTK rekey) message, not the 4-way handshake
 	GTK       bool   `json:"gtk,omitempty"`   // a group key was learned, so broadcasts decrypt
+}
+
+// VPNSession is one session on one of an edge's VPN listeners opening (Open)
+// or closing. The event's TS is when it did. User is the identity the
+// protocol's handshake proved (a username, a certificate subject, a public
+// key), never a name the client merely claimed, and Addrs are the inner
+// prefixes the session held: a flow from one of them, while the session was
+// open, is that user's. ID pairs a close with its open; it is unique within one
+// listener for one edge boot.
+type VPNSession struct {
+	Listener string         `json:"listener"`
+	Protocol string         `json:"protocol"`
+	ID       uint64         `json:"id"`
+	Open     bool           `json:"open,omitempty"`
+	User     string         `json:"user"`
+	Name     string         `json:"name,omitempty"`
+	Addrs    []netip.Prefix `json:"addrs,omitempty"`
+	Outer    netip.AddrPort `json:"outer,omitzero"`
+	Reason   string         `json:"reason,omitempty"` // on a close: expired, disconnected, kicked, shutdown
 }

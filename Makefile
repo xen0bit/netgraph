@@ -36,12 +36,16 @@ SERVER_TARGETS := linux/amd64 linux/arm64 linux/arm linux/riscv64 \
 # Windows (observe only). Keep in sync with .goreleaser.yaml.
 AGENT_TARGETS := linux/amd64 linux/arm64 linux/arm linux/riscv64 linux/386 \
 	darwin/amd64 darwin/arm64 windows/amd64 windows/arm64
+# goarch:extra-env for netgraph-edge: Linux only (TUN, AF_PACKET, iptables), on
+# the boxes a VPN appliance runs on. No MIPS: a router-class CPU cannot carry
+# userspace VPN crypto at any useful rate. Keep in sync with .goreleaser.yaml.
+EDGE_TARGETS := amd64: arm64: arm:GOARM=7
 
 .DEFAULT_GOAL := help
 
-## build: build netgraph, netgraph-sensor and netgraph-agent into ./bin
+## build: build netgraph, netgraph-sensor, netgraph-agent and netgraph-edge into ./bin
 .PHONY: build
-build: build-server build-sensor build-agent
+build: build-server build-sensor build-agent build-edge
 
 ## build-server: build ./bin/netgraph
 .PHONY: build-server
@@ -52,6 +56,11 @@ build-server:
 .PHONY: build-sensor
 build-sensor:
 	CGO_ENABLED=0 $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/netgraph-sensor ./cmd/netgraph-sensor
+
+## build-edge: build ./bin/netgraph-edge (VPN listeners that report to the server; Linux)
+.PHONY: build-edge
+build-edge:
+	CGO_ENABLED=0 GOOS=linux $(GO) build -trimpath -ldflags "$(LDFLAGS)" -o $(BIN_DIR)/netgraph-edge ./cmd/netgraph-edge
 
 ## build-ech: build the experimental ECH observer (not part of normal builds)
 .PHONY: build-ech
@@ -158,6 +167,11 @@ test:
 	@# vpn/'s AllocsPerRun guards skip under -race: this pass is what runs them.
 	$(GO) test ./vpn/...
 
+## edge.lab: a real WireGuard client through netgraph-edge, asked of netgraph (Docker)
+.PHONY: edge.lab
+edge.lab:
+	cd test/edge && $(GO) test -tags edgelab -count=1 -v -timeout 15m .
+
 ## vpn.interop: vpn/'s protocol cells against real peers, in Docker (slow; VPN_RUN=regexp)
 VPN_RUN ?= .
 .PHONY: vpn.interop
@@ -189,6 +203,7 @@ lint:
 	$(GO) vet -tags lab ./test/lab/...
 	$(GO) vet -tags browser ./test/browser/...
 	$(GO) vet -tags interop ./vpn/tests/interop/...
+	$(GO) vet -tags edgelab ./test/edge/...
 	$(GOLANGCI_LINT) run
 
 ## vulncheck: run govulncheck
@@ -212,6 +227,11 @@ cross:
 	for t in $(AGENT_TARGETS); do \
 		if env CGO_ENABLED=0 GOOS=$${t%/*} GOARCH=$${t#*/} GO386=softfloat $(GO) build -o /dev/null ./cmd/netgraph-agent; \
 		then echo "ok    agent $$t"; else echo "FAIL  agent $$t"; fail=1; fi; \
+	done; \
+	for t in $(EDGE_TARGETS); do \
+		arch=$${t%%:*}; extra=$${t#*:}; \
+		if env CGO_ENABLED=0 GOOS=linux GOARCH=$$arch $$extra $(GO) build -o /dev/null ./cmd/netgraph-edge; \
+		then echo "ok    edge linux/$$arch $$extra"; else echo "FAIL  edge linux/$$arch $$extra"; fail=1; fi; \
 	done; \
 	exit $$fail
 

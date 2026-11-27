@@ -228,6 +228,7 @@ func New(cfg Config) *Server {
 	s.registerPurposeRoutes()
 	s.registerBundleRoutes()
 	s.registerAgentRoutes()
+	s.registerVPNRoutes()
 	s.mux.Handle("POST /api/v1/ask", s.require(RoleViewer, s.ask))
 	s.mux.Handle("POST /api/v1/annotations", s.require(RoleOperator, s.createAnnotation))
 	s.mux.Handle("DELETE /api/v1/annotations/{id}", s.require(RoleOperator, s.deleteAnnotation))

@@ -149,6 +149,8 @@ type ingester struct {
 
 	live   []LiveEvent
 	joined []joinedDevice // devices that used an address for the first time
+
+	vpn map[int64]*vpnCache // edge sensor ID -> its recent VPN sessions (vpn.go)
 }
 
 type joinedDevice struct {
@@ -464,6 +466,10 @@ func (g *ingester) event(ctx context.Context, sid int64, sensor, boot string, ev
 	case wire.TypeWiFiKey:
 		if ev.WiFiKey != nil {
 			return g.wifiKey(ctx, sid, ts, ev.WiFiKey)
+		}
+	case wire.TypeVPNSession:
+		if ev.VPNSession != nil {
+			return g.vpnSession(ctx, sid, boot, ts, ev.VPNSession)
 		}
 	}
 	return nil // unknown types are from a newer sensor; ignore them
@@ -959,6 +965,12 @@ func (g *ingester) flowRecord(ctx context.Context, sid int64, sensor, boot strin
 	if err != nil {
 		return err
 	}
+	// A flow is a VPN user's when this sensor is the edge whose session held
+	// the client address as the flow's interval began.
+	vpnSession, err := g.vpnSessionFor(ctx, sid, client, start)
+	if err != nil {
+		return err
+	}
 
 	f.SNI, f.HTTPHost = hostName(f.SNI), hostName(f.HTTPHost)
 	qname, seen := g.flowName[key]
@@ -981,18 +993,18 @@ func (g *ingester) flowRecord(ctx context.Context, sid int64, sensor, boot strin
 	if _, err := g.tx.ExecContext(ctx, `INSERT INTO flows (
 		sensor_id, flow_key, proto, src_ip, src_port, dst_ip, dst_port, first_seen, t_start, t_end,
 		bytes_out, bytes_in, pkts_out, pkts_in, tcp_flags, final, end_reason, app, sni, alpn, ja4, http_host, user_agent,
-		qname, client_ip, client_port, client_mac, client_device, remote_ip, remote_port, direction, multicast)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		qname, client_ip, client_port, client_mac, client_device, remote_ip, remote_port, direction, multicast, vpn_session)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		sid, key, f.Proto, f.Src.String(), f.SrcPort, f.Dst.String(), f.DstPort, first, start, end,
 		f.BytesOut, f.BytesIn, f.PktsOut, f.PktsIn, f.TCPFlags, boolInt(f.Final), f.EndReason, f.App, f.SNI, f.ALPN, f.JA4, f.HTTPHost, f.UserAgent,
-		qname, client.String(), cport, devMAC, dev, remote.String(), rport, dir, boolInt(multicast)); err != nil {
+		qname, client.String(), cport, devMAC, dev, remote.String(), rport, dir, boolInt(multicast), vpnSession); err != nil {
 		return err
 	}
 	if _, err := g.tx.ExecContext(ctx, `INSERT INTO connections (
 		flow_key, sensor_id, proto, client_ip, client_port, client_mac, client_device, remote_ip, remote_port, direction, multicast,
 		first_seen, last_seen, final, end_reason, app, sni, alpn, ja4, http_host, user_agent, qname, bytes_out, bytes_in, pkts_out, pkts_in,
-		remote_asn, remote_cc, rtt_server_us, rtt_client_us, retrans)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		remote_asn, remote_cc, rtt_server_us, rtt_client_us, retrans, vpn_session)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT (flow_key) DO UPDATE SET
 			rtt_server_us = CASE WHEN excluded.rtt_server_us > 0 THEN excluded.rtt_server_us ELSE rtt_server_us END,
 			rtt_client_us = CASE WHEN excluded.rtt_client_us > 0 THEN excluded.rtt_client_us ELSE rtt_client_us END,
@@ -1003,6 +1015,7 @@ func (g *ingester) flowRecord(ctx context.Context, sid int64, sensor, boot strin
 			final = max(final, excluded.final),
 			end_reason = CASE WHEN excluded.final = 1 THEN excluded.end_reason ELSE end_reason END,
 			client_device = CASE WHEN client_device = 0 THEN excluded.client_device ELSE client_device END,
+			vpn_session = CASE WHEN vpn_session = 0 THEN excluded.vpn_session ELSE vpn_session END,
 			client_mac = CASE WHEN client_mac = '' THEN excluded.client_mac ELSE client_mac END,
 			app = CASE WHEN excluded.app != '' THEN excluded.app ELSE app END,
 			sni = CASE WHEN excluded.sni != '' THEN excluded.sni ELSE sni END,
@@ -1015,7 +1028,7 @@ func (g *ingester) flowRecord(ctx context.Context, sid int64, sensor, boot strin
 			pkts_out = pkts_out + excluded.pkts_out, pkts_in = pkts_in + excluded.pkts_in`,
 		key, sid, f.Proto, client.String(), cport, devMAC, dev, remote.String(), rport, dir, boolInt(multicast),
 		first, end, boolInt(f.Final), f.EndReason, f.App, f.SNI, f.ALPN, f.JA4, f.HTTPHost, f.UserAgent, qname,
-		f.BytesOut, f.BytesIn, f.PktsOut, f.PktsIn, rasn, rcc, f.RTTServerUS, f.RTTClientUS, f.Retrans); err != nil {
+		f.BytesOut, f.BytesIn, f.PktsOut, f.PktsIn, rasn, rcc, f.RTTServerUS, f.RTTClientUS, f.Retrans, vpnSession); err != nil {
 		return err
 	}
 	devKey, err := g.deviceKey(ctx, dev)
