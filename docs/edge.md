@@ -23,8 +23,10 @@ wg-client ══ WireGuard ══► netgraph-edge ──► the inside network
 
 The protocols come from `vpn/`, sixteen of them, each with a client and a
 server (see [`vpn/README.md`](../vpn/README.md)). Any of them can run on an
-edge. In this preview **WireGuard** (and AmneziaWG) and **IKEv2** report
-sessions, so their traffic is attributed to users. The others are captured and stored,
+edge. In this preview **WireGuard** (and AmneziaWG), **IKEv2**,
+**AnyConnect**, **GlobalProtect** and **Fortinet** report sessions, so their
+traffic is attributed to users. Each is tested in `make edge.lab` against its
+real client: wireguard-go, strongSwan, and openconnect speaking the last three. The others are captured and stored,
 and the edge says once, per protocol, that they are not attributed yet.
 
 ## Running it
@@ -75,6 +77,9 @@ was proved.
 | Protocol | Opens | Identity | Closes |
 |---|---|---|---|
 | WireGuard, AmneziaWG | a handshake while none is open | the peer's public key (`public-key`) | its keys pass reject-after-time (180 s) with no rekey, timed at its last authenticated packet; or the listener stops |
+| AnyConnect | CONNECT assigns an address, after the password login | the username (`password`) | the tunnel's connection ends and the address returns to the pool |
+| GlobalProtect | the login assigns an address | the username (`password`) | the tunnel ends, or a login that never brought one up expires (`expired`) |
+| Fortinet | the login (and second factor, if configured) is granted | the username (`password`, or `password+totp`) | the tunnel ends, or its DTLS start fails |
 | IKEv2 | IKE_AUTH assigns an address | the EAP username (`eap-mschapv2`), or the IKE identity a certificate matched (`certificate`) or the PSK covered (`psk`) | the peer's Delete ends the IKE SA and its lease goes back to the pool; or the listener stops. An IKE SA rekey moves the session with the lease |
 
 `auth` says how far to trust `user`. Under a PSK every client shares one key,
@@ -106,7 +111,10 @@ Sessions follow the raw records for retention, and `db purge` removes them.
 
 This is the first slice of the edge (see AGENTS.md, "vpn/ and the edge"):
 
-- Sessions for the other fourteen protocols, and dead-peer detection for IKEv2.
+- Sessions for the other protocols (OpenVPN, SSTP, Ivanti, SoftEther, Cisco
+  IPsec, L2TP, SSH, Nebula, MASQUE, L2TPv3), and dead-peer detection for IKEv2.
+- One port for every TLS protocol. Each listener has its own port today, and a
+  GlobalProtect portal names its gateway without one, so GlobalProtect needs 443.
 - Users and groups in the server, with policy compiled to the edge's own
   firewall table.
 - Config the server signs and pushes, so the listener files go away.

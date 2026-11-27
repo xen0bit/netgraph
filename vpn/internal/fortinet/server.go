@@ -22,6 +22,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xen0bit/netgraph/vpn/client"
 	"github.com/xen0bit/netgraph/vpn/dataplane"
 	"github.com/xen0bit/netgraph/vpn/internal/mschap"
 	"github.com/xen0bit/netgraph/vpn/internal/otp"
@@ -33,6 +34,9 @@ import (
 
 // ServerConfig configures a Fortinet SSL VPN server.
 type ServerConfig struct {
+	// Sessions, if set, is told when each authenticated user takes and gives
+	// back an address (client.SessionReporter, through the facade).
+	Sessions *client.SessionHub
 	// Users maps a username to its password. A user absent here is rejected.
 	Users map[string]string
 	// Pool allocates client addresses.
@@ -88,6 +92,7 @@ type Server struct {
 	dtls       *udpmux.Mux                // the UDP data channel, once ServeDTLS runs
 	pending2FA map[string]*challengeState // reqid -> a login awaiting its second factor
 	pending    map[string]net.IP          // cookie -> assigned address, between login and tunnel
+	sessionOf  map[netip.Addr]uint64      // assigned address -> its client.SessionHub session
 	links      map[netip.Addr]*pppLink    // assigned address -> active tunnel
 	byCookie   map[string]*pppLink        // cookie -> active tunnel, so a later DTLS
 	//                                 session can attach to the link it belongs to
@@ -128,6 +133,7 @@ func NewServer(cfg ServerConfig, tun io.ReadWriteCloser) (*Server, error) {
 		log:        logger,
 		shaper:     shaper,
 		pending:    map[string]net.IP{},
+		sessionOf:  map[netip.Addr]uint64{},
 		pending2FA: map[string]*challengeState{},
 		lastTOTP:   map[string]uint64{},
 		links:      map[netip.Addr]*pppLink{},
@@ -206,7 +212,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	s.grantSession(w, r, req.Username)
+	s.grantSession(w, r, req.Username, "password")
 }
 
 // issueChallenge answers a correct password with a second-factor prompt.
@@ -279,7 +285,7 @@ func (s *Server) handleChallenge(w http.ResponseWriter, r *http.Request, body st
 		return
 	}
 	s.log.Printf("fortinet: %q passed its second factor", state.username)
-	s.grantSession(w, r, state.username)
+	s.grantSession(w, r, state.username, "password+totp")
 }
 
 // expireChallengesLocked drops challenges nobody answered. The caller holds mu.
@@ -294,7 +300,7 @@ func (s *Server) expireChallengesLocked() {
 
 // grantSession completes a login: it takes admission, reserves an address, and
 // hands back the cookie that authorises the tunnel.
-func (s *Server) grantSession(w http.ResponseWriter, r *http.Request, username string) {
+func (s *Server) grantSession(w http.ResponseWriter, r *http.Request, username, auth string) {
 	if s.gate.Admit(remoteAddr(r)) != dataplane.Admitted {
 		http.Error(w, "busy", http.StatusServiceUnavailable)
 		return
@@ -307,8 +313,22 @@ func (s *Server) grantSession(w http.ResponseWriter, r *http.Request, username s
 	}
 
 	cookie := newCookie()
+	// The login proved the user (and the second factor, when there is one):
+	// the address is theirs until releaseAddr gives it back.
+	var sessionID uint64
+	if s.cfg.Sessions != nil {
+		outer, _ := netip.ParseAddrPort(r.RemoteAddr)
+		sessionID = s.cfg.Sessions.OpenSession(client.SessionEvent{
+			User: username, Auth: auth, Addrs: client.HostPrefixes(addr), Outer: outer,
+		})
+	}
 	s.mu.Lock()
 	s.pending[cookie] = addr
+	if sessionID != 0 {
+		if a, ok := netip.AddrFromSlice(addr.To4()); ok {
+			s.sessionOf[a] = sessionID
+		}
+	}
 	s.mu.Unlock()
 
 	http.SetCookie(w, &http.Cookie{Name: CookieName, Value: cookie, Path: "/"})
@@ -415,7 +435,7 @@ func (s *Server) runServerLink(conn net.Conn, reader io.Reader, addr net.IP, dat
 		delete(s.byCookie, cookie)
 	}
 	s.mu.Unlock()
-	s.cfg.Pool.Release(addr)
+	s.releaseAddr(addr)
 	s.log.Printf("fortinet: tunnel for %s (%s) closed", addr, carrier)
 }
 
@@ -531,4 +551,20 @@ func destAddr(pkt []byte) (netip.Addr, bool) {
 		return netip.Addr{}, false
 	}
 	return netip.AddrFrom4([4]byte{pkt[16], pkt[17], pkt[18], pkt[19]}), true
+}
+
+// releaseAddr returns addr to the pool and ends the session that held it.
+func (s *Server) releaseAddr(addr net.IP) {
+	s.cfg.Pool.Release(addr)
+	a, ok := netip.AddrFromSlice(addr.To4())
+	if !ok {
+		return
+	}
+	s.mu.Lock()
+	id := s.sessionOf[a]
+	delete(s.sessionOf, a)
+	s.mu.Unlock()
+	if id != 0 && s.cfg.Sessions != nil {
+		s.cfg.Sessions.CloseSession(id, "disconnected", time.Time{})
+	}
 }

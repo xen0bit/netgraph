@@ -330,10 +330,13 @@ func (s *Server) ListenAndServe() error {
 
 // Close stops the data path and releases the TUN device and sockets.
 func (s *Server) Close() error {
+	// Sessions end as "shutdown" first: closing the engine drops each
+	// client's connection, and that path would otherwise close them as
+	// "disconnected", which is not what happened.
+	s.CloseAllSessions("shutdown")
 	s.pump.Close()
 	err := s.ike.Close()
 	s.tun.Close()
-	s.CloseAllSessions("shutdown")
 	return err
 }
 

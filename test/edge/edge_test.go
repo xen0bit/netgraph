@@ -1,9 +1,9 @@
 //go:build edgelab
 
-// Package edge drives test/edge/compose.yml: real clients -- wireguard-go,
-// and strongSwan with EAP-MSCHAPv2 -- connect to netgraph-edge and move TCP
-// through their tunnels to a server behind it, and netgraph is asked who did
-// what.
+// Package edge drives test/edge/compose.yml: real clients of five protocols
+// -- wireguard-go; strongSwan with EAP-MSCHAPv2; openconnect as AnyConnect,
+// GlobalProtect and Fortinet -- connect to netgraph-edge and move TCP through
+// their tunnels to a server behind it, and netgraph is asked who did what.
 //
 //	make edge.lab
 package edge
@@ -90,7 +90,7 @@ func TestEdgeLab(t *testing.T) {
 	compose(t, "build")
 	t.Cleanup(func() {
 		if t.Failed() {
-			for _, svc := range []string{"edge", "wg-client", "ikev2-client", "server"} {
+			for _, svc := range []string{"edge", "wg-client", "ikev2-client", "anyconnect-client", "gp-client", "fortinet-client", "server"} {
 				out, _ := composeErr("logs", "--tail", "40", svc)
 				t.Logf("--- %s\n%s", svc, out)
 			}
@@ -99,16 +99,26 @@ func TestEdgeLab(t *testing.T) {
 	})
 	compose(t, "up", "-d")
 
-	for _, svc := range []string{"wg-client", "ikev2-client"} {
-		waitFor(t, svc+" to finish its transfer", 2*time.Minute, func() bool {
-			_, err := composeErr("exec", "-T", svc, "test", "-f", "/tmp/done")
+	// One real client per protocol, each with its own user and pool.
+	want := []struct {
+		svc, listener, protocol, user, auth, pool, outer string
+	}{
+		{"wg-client", "office", "wireguard", clientKey, "public-key", "10.10.10.2/32", "198.18.1.50:"},
+		{"ikev2-client", "remote", "ikev2", "alice", "eap-mschapv2", "10.11.11.", "198.18.1.51:"},
+		{"anyconnect-client", "ssl", "anyconnect", "carol", "password", "10.12.12.", "198.18.1.52:"},
+		{"gp-client", "gp", "gp", "dave", "password", "10.13.13.", "198.18.1.53:"},
+		{"fortinet-client", "forti", "fortinet", "erin", "password", "10.14.14.", "198.18.1.54:"},
+	}
+	for _, w := range want {
+		waitFor(t, w.svc+" to finish its transfer", 2*time.Minute, func() bool {
+			_, err := composeErr("exec", "-T", w.svc, "test", "-f", "/tmp/done")
 			return err == nil
 		})
 	}
 	byListener := map[string]session{}
-	waitFor(t, "both sessions and their traffic at the server", time.Minute, func() bool {
+	waitFor(t, "every session and its traffic at the server", time.Minute, func() bool {
 		all, err := sessions()
-		if err != nil || len(all) != 2 {
+		if err != nil || len(all) != len(want) {
 			return false
 		}
 		for _, s := range all {
@@ -121,19 +131,14 @@ func TestEdgeLab(t *testing.T) {
 		}
 		return true
 	})
-	wg := byListener["office"]
-	if wg.Sensor != "edge-lab" || wg.Protocol != "wireguard" || wg.User != clientKey || wg.Auth != "public-key" {
-		t.Errorf("WireGuard session = %+v, want the client's public key", wg)
-	}
-	if len(wg.Prefixes) != 1 || wg.Prefixes[0] != clientAddr || !strings.HasPrefix(wg.Outer, "198.18.1.50:") {
-		t.Errorf("WireGuard session holds %v from %s, want [%s] from 198.18.1.50", wg.Prefixes, wg.Outer, clientAddr)
-	}
-	ike := byListener["remote"]
-	if ike.Protocol != "ikev2" || ike.User != "alice" || ike.Auth != "eap-mschapv2" {
-		t.Errorf("IKEv2 session = %+v, want alice by eap-mschapv2", ike)
-	}
-	if len(ike.Prefixes) != 1 || !strings.HasPrefix(ike.Prefixes[0], "10.11.11.") || !strings.HasPrefix(ike.Outer, "198.18.1.51:") {
-		t.Errorf("IKEv2 session holds %v from %s, want a pool address from 198.18.1.51", ike.Prefixes, ike.Outer)
+	for _, w := range want {
+		s := byListener[w.listener]
+		if s.Sensor != "edge-lab" || s.Protocol != w.protocol || s.User != w.user || s.Auth != w.auth {
+			t.Errorf("%s session = %+v, want %s by %s", w.protocol, s, w.user, w.auth)
+		}
+		if len(s.Prefixes) != 1 || !strings.HasPrefix(s.Prefixes[0], w.pool) || !strings.HasPrefix(s.Outer, w.outer) {
+			t.Errorf("%s session holds %v from %s, want %s* from %s*", w.protocol, s.Prefixes, s.Outer, w.pool, w.outer)
+		}
 	}
 
 	compose(t, "stop", "-t", "20", "edge")
@@ -148,7 +153,7 @@ func TestEdgeLab(t *testing.T) {
 			}
 			byListener[s.Listener] = s
 		}
-		return len(all) == 2
+		return len(all) == len(want)
 	})
 	for name, s := range byListener {
 		if s.Reason != "shutdown" {

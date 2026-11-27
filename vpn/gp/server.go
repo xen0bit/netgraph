@@ -123,6 +123,11 @@ type Server struct {
 	udpConn *net.UDPConn
 	started bool
 	closed  bool
+
+	// SessionHub makes the server a client.SessionReporter: a session is one
+	// user, proved by password at login, holding one address until the
+	// gateway takes it back.
+	*client.SessionHub
 }
 
 // NewServer validates the configuration, loads the keypair, allocates the pool
@@ -166,7 +171,9 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, fmt.Errorf("gp: opening TUN: %w", err)
 	}
 
+	sessions := &client.SessionHub{}
 	engine, err := igp.NewServer(igp.ServerConfig{
+		Sessions: sessions,
 		Users:    cfg.Users,
 		Pool:     pool,
 		ServerIP: gateway,
@@ -198,6 +205,8 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		gateway: gateway,
 		tun:     tun,
 		engine:  engine,
+
+		SessionHub: sessions,
 	}, nil
 }
 
@@ -273,6 +282,10 @@ func (s *Server) Close() error {
 	s.closed = true
 	s.mu.Unlock()
 
+	// Sessions end as "shutdown" first: closing the engine drops each
+	// client's connection, and that path would otherwise close them as
+	// "disconnected", which is not what happened.
+	s.CloseAllSessions("shutdown")
 	return s.engine.Close()
 }
 
@@ -293,6 +306,9 @@ func (s *Server) Abandon() { s.tun.Close() }
 // re-signatured Abandon compiles fine and the assertion silently starts failing,
 // which reads as the leak coming back.
 var _ client.AbandonableServer = (*Server)(nil)
+
+// Server implements client.SessionReporter, found the same way.
+var _ client.SessionReporter = (*Server)(nil)
 
 // TUNName is the interface the gateway is bound to.
 func (s *Server) TUNName() string {

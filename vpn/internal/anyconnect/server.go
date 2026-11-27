@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/xen0bit/netgraph/vpn/client"
 	"github.com/xen0bit/netgraph/vpn/dataplane"
 	"github.com/xen0bit/netgraph/vpn/internal/dtls"
 	"github.com/xen0bit/netgraph/vpn/internal/userdb"
@@ -34,11 +35,14 @@ const (
 
 // ServerConfig configures the AnyConnect server engine.
 type ServerConfig struct {
-	Users   map[string]string // username -> password
-	Pool    *dataplane.AddrPool
-	Gateway net.IP // the server's inner address (the pool's first host)
-	DNS     []net.IP
-	MTU     int
+	// Sessions, if set, is told when each authenticated client takes and gives
+	// back its address (client.SessionReporter, through the facade).
+	Sessions *client.SessionHub
+	Users    map[string]string // username -> password
+	Pool     *dataplane.AddrPool
+	Gateway  net.IP // the server's inner address (the pool's first host)
+	DNS      []net.IP
+	MTU      int
 	// Shape enables downstream traffic shaping: how much padded output each
 	// inner flow is given before shaping stops for that flow, so it bounds what
 	// shaping costs. A flow gets Shape/MTU padded packets whatever sizes it
@@ -271,6 +275,13 @@ func (s *Server) serveConnect(conn net.Conn, br *bufio.Reader, cookie string) (*
 		return nil, err
 	}
 	s.addClient(c)
+	// The session cookie proved the password: the username is the identity,
+	// for as long as this connection holds the address.
+	if s.cfg.Sessions != nil {
+		c.session = s.cfg.Sessions.OpenSession(client.SessionEvent{
+			User: user, Auth: "password", Addrs: client.HostPrefixes(ip), Outer: client.OuterOf(conn.RemoteAddr()),
+		})
+	}
 	return c, nil
 }
 
@@ -313,6 +324,9 @@ func (s *Server) removeClient(c *serverClient) {
 		ch.close()
 	}
 	s.pool.Release(c.innerIP)
+	if c.session != 0 && s.cfg.Sessions != nil {
+		s.cfg.Sessions.CloseSession(c.session, "disconnected", time.Time{})
+	}
 	s.logger.Printf("anyconnect: %s disconnected, released %s", c.username, c.innerIP)
 }
 
@@ -377,6 +391,7 @@ type serverClient struct {
 	username string
 	innerIP  net.IP
 	appID    string
+	session  uint64 // the client.SessionHub ID of this connection's session, or zero
 
 	// dtls is this client's UDP data channel once it comes up.
 	dtls atomic.Pointer[dtlsChannel]

@@ -1,13 +1,17 @@
-# The edge lab: a real WireGuard client connects to netgraph-edge, reaches a
-# server behind it through the tunnel, and netgraph is asked who did what.
+# The edge lab: real clients of five protocols connect to netgraph-edge, reach
+# a server behind it through their tunnels, and netgraph is asked who did what.
 #
 #   make edge.lab      # go test -tags edgelab ./test/edge
 #
 #   public 198.18.1.0/24 (internal)          inside 10.78.0.0/24 (internal)
 #   wg-client .50 ──┬─ edge .10 ═══════════ edge .10 ─┬─ web 10.78.0.30 (iperf3)
 #   (wireguard-go)  │  (netgraph-edge:                 └─ server 10.78.0.20 (netgraph)
-#   ikev2-client .51┘   WireGuard 10.10.10.1/24,
-#   (strongSwan, EAP)   IKEv2 pool 10.11.11.0/24)
+#   ikev2-client .51┤   WireGuard 10.10.10.1/24,
+#   (strongSwan, EAP)│  IKEv2 pool 10.11.11.0/24,
+#   anyconnect .52 ──┤  AnyConnect pool 10.12.12.0/24,
+#   gp .53 ──────────┤  GlobalProtect pool 10.13.13.0/24,
+#   fortinet .54 ────┘  Fortinet pool 10.14.14.0/24)
+#   (.52-.54: openconnect)
 #
 # The client's tunnel address is 10.10.10.2; the edge NATs it onto the inside
 # network. Nothing here reaches the real internet.
@@ -31,7 +35,20 @@ networks:
     ipam: { config: [{ subnet: 10.78.0.0/24 }] }
   mgmt: {}
 
+volumes:
+  pki:
+
 services:
+  # A throwaway certificate for the AnyConnect listener, which the client pins.
+  pki:
+    build: { context: ../../vpn/tests/interop/openconnect }
+    image: interop-openconnect
+    entrypoint: ["/bin/sh", "/pki.sh"]
+    volumes:
+      - pki:/pki
+      - ./scripts/pki.sh:/pki.sh:ro
+    network_mode: none
+
   server:
     build: { context: ../.., dockerfile: deploy/Dockerfile, target: server }
     image: netgraph:edgelab
@@ -55,11 +72,14 @@ services:
       NETGRAPH_TOKEN: edge-ingest-token
     volumes:
       - ./scripts/edge.sh:/edge.sh:ro
+      - pki:/pki:ro
     entrypoint: ["/bin/sh", "/edge.sh"]
     networks:
       public: { ipv4_address: 198.18.1.10 }
       inside: { ipv4_address: 10.78.0.10 }
-    depends_on: [server]
+    depends_on:
+      server: { condition: service_started }
+      pki: { condition: service_completed_successfully }
 
   web:
     build: { context: ../../vpn/tests/interop/wireguard }
@@ -94,4 +114,42 @@ services:
     command: ["/bin/sh", "/client.sh"]
     networks:
       public: { ipv4_address: 198.18.1.51 }
+    depends_on: [edge, web]
+
+  # openconnect, as each commercial protocol's client.
+  anyconnect-client:
+    image: interop-openconnect
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    entrypoint: ["/bin/sh", "/client.sh"]
+    environment: { PROTOCOL: anyconnect, PORT: "8443", USER: carol, PASS: letmein }
+    volumes: &oc-volumes
+      - pki:/pki:ro
+      - ./scripts/openconnect-client.sh:/client.sh:ro
+    networks:
+      public: { ipv4_address: 198.18.1.52 }
+    depends_on: [edge, web]
+
+  gp-client:
+    image: interop-openconnect
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    entrypoint: ["/bin/sh", "/client.sh"]
+    # GlobalProtect's portal names its gateway by address alone, so a client
+    # dials it on 443: the GlobalProtect listener has that port.
+    environment: { PROTOCOL: gp, PORT: "443", USER: dave, PASS: opensesame }
+    volumes: *oc-volumes
+    networks:
+      public: { ipv4_address: 198.18.1.53 }
+    depends_on: [edge, web]
+
+  fortinet-client:
+    image: interop-openconnect
+    cap_add: [NET_ADMIN]
+    devices: ["/dev/net/tun:/dev/net/tun"]
+    entrypoint: ["/bin/sh", "/client.sh"]
+    environment: { PROTOCOL: fortinet, PORT: "10443", USER: erin, PASS: swordfish }
+    volumes: *oc-volumes
+    networks:
+      public: { ipv4_address: 198.18.1.54 }
     depends_on: [edge, web]
