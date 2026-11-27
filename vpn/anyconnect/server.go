@@ -118,6 +118,10 @@ type Server struct {
 	logger   *vlog.Logger
 	gate     *dataplane.Gate
 
+	// SessionHub makes the server a client.SessionReporter: a session is one
+	// authenticated user holding one address for the life of its tunnel.
+	*client.SessionHub
+
 	closeOnce sync.Once
 }
 
@@ -182,7 +186,9 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 		return nil, fmt.Errorf("anyconnect: open TUN: %w", err)
 	}
 
+	sessions := &client.SessionHub{}
 	eng := engine.NewServer(tun, engine.ServerConfig{
+		Sessions: sessions,
 		Users:    cfg.Users,
 		Pool:     pool,
 		Gateway:  gateway,
@@ -194,7 +200,8 @@ func NewServer(cfg ServerConfig) (*Server, error) {
 	return &Server{
 		eng: eng, tun: tun, pool: pool, gateway: gateway,
 		listener: ln, logger: logger,
-		gate: dataplane.NewGate(dataplane.AdmissionConfig{}),
+		gate:       dataplane.NewGate(dataplane.AdmissionConfig{}),
+		SessionHub: sessions,
 	}, nil
 }
 
@@ -227,6 +234,7 @@ func (s *Server) Close() error {
 		s.listener.Close()
 		_ = s.eng.Close()
 		s.tun.Close()
+		s.CloseAllSessions("shutdown")
 	})
 	return nil
 }
@@ -248,6 +256,9 @@ func (s *Server) Abandon() { s.tun.Close() }
 // re-signatured Abandon compiles fine and the assertion silently starts failing,
 // which reads as the leak coming back.
 var _ client.AbandonableServer = (*Server)(nil)
+
+// Server implements client.SessionReporter, found the same way.
+var _ client.SessionReporter = (*Server)(nil)
 
 // TUNName is the interface the data path is bound to.
 func (s *Server) TUNName() string { return s.tun.Name() }

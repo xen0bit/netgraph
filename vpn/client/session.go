@@ -18,6 +18,7 @@ package client
 
 import (
 	"cmp"
+	"net"
 	"net/netip"
 	"slices"
 	"sync"
@@ -173,4 +174,30 @@ func (h *SessionHub) OpenSessions() []SessionEvent {
 	}
 	slices.SortFunc(out, func(a, b SessionEvent) int { return cmp.Compare(a.ID, b.ID) })
 	return out
+}
+
+// HostPrefixes turns assigned inner addresses into the host prefixes a
+// SessionEvent carries (/32, /128), skipping nil and invalid ones.
+func HostPrefixes(ips ...net.IP) []netip.Prefix {
+	var out []netip.Prefix
+	for _, ip := range ips {
+		if a, ok := netip.AddrFromSlice(ip); ok {
+			a = a.Unmap()
+			out = append(out, netip.PrefixFrom(a, a.BitLen()))
+		}
+	}
+	return out
+}
+
+// OuterOf is a peer's address on the underlying network, as a SessionEvent's
+// Outer, from whatever net.Addr its connection reports (zero if neither TCP
+// nor UDP).
+func OuterOf(a net.Addr) netip.AddrPort {
+	switch v := a.(type) {
+	case *net.TCPAddr:
+		return v.AddrPort()
+	case *net.UDPAddr:
+		return v.AddrPort()
+	}
+	return netip.AddrPort{}
 }
